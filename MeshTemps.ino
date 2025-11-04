@@ -12,11 +12,17 @@ static bool g_debug = true;  // runtime-toggle via serial
 
 static void logConns() {
   DLOG("Peers: %u\n", mesh.getNodeList().size());
+#if MESH_IS_ROOT
+  GUI_UpdateNetwork(mesh.getNodeList().size());
+  GUI_RequestRender();
+#endif
 }
 
 #if MESH_IS_ROOT
 // ===================== ROOT (always) =====================
 #include <Preferences.h>
+#include <lvgl.h>
+
 Preferences prefs;
 
 // Last-seen data and labels (persisted).
@@ -24,6 +30,14 @@ JsonDocument lastSeen;
 JsonDocument labels;
 
 Task taskAnnounce;
+
+// ---------------- LVGL GUI (root) ----------------
+static lv_obj_t* ui_lbl_title = nullptr;
+static lv_obj_t* ui_lbl_peers = nullptr;
+static lv_obj_t* ui_table     = nullptr;
+static volatile bool guiDirty = false;
+
+static void GUI_RebuildTable();  // forward
 
 static void ensureDocs() {
   if (!lastSeen["nodes"].is<JsonObject>()) lastSeen["nodes"].to<JsonObject>();
@@ -53,6 +67,112 @@ static void eraseLabels() {
   labels.clear(); ensureDocs(); saveLabels();
 }
 
+// ---------- LVGL helpers ----------
+static void GUI_Init() {
+  // Build a simple layout: title at top-left, peers at top-right, table fills the rest.
+  lv_obj_t* scr = lv_scr_act();
+
+  ui_lbl_title = lv_label_create(scr);
+  lv_label_set_text(ui_lbl_title, "MeshTemps — ROOT");
+  lv_obj_align(ui_lbl_title, LV_ALIGN_TOP_LEFT, 6, 4);
+
+  ui_lbl_peers = lv_label_create(scr);
+  lv_label_set_text(ui_lbl_peers, "Peers: 0");
+  lv_obj_align(ui_lbl_peers, LV_ALIGN_TOP_RIGHT, -6, 4);
+
+  ui_table = lv_table_create(scr);
+  lv_obj_set_size(ui_table, lv_pct(100), lv_pct(100));
+  lv_obj_align(ui_table, LV_ALIGN_BOTTOM_MID, 0, -2);
+  lv_table_set_col_cnt(ui_table, 6);
+  lv_table_set_row_cnt(ui_table, 1);
+  lv_table_set_cell_value(ui_table, 0, 0, "Node");
+  lv_table_set_cell_value(ui_table, 0, 1, "Location");
+  lv_table_set_cell_value(ui_table, 0, 2, "Addr");
+  lv_table_set_cell_value(ui_table, 0, 3, "Label");
+  lv_table_set_cell_value(ui_table, 0, 4, "Temp \xC2\xB0""C"); // °C
+  lv_table_set_cell_value(ui_table, 0, 5, "Age(s)");
+
+  guiDirty = true;  // first paint
+}
+
+static void GUI_UpdateNetwork(size_t peers) {
+  if (!ui_lbl_peers) return;
+  static char buf[32];
+  snprintf(buf, sizeof(buf), "Peers: %u", (unsigned)peers);
+  lv_label_set_text(ui_lbl_peers, buf);
+}
+
+static void GUI_UpdateNodeSummary(const char* /*nodeIdStr*/, int /*busGpio*/, uint32_t /*lastMs*/) {
+  // No per-node widgets; we rebuild a single table. Mark dirty only.
+  guiDirty = true;
+}
+
+static void GUI_UpdateSensorRow(const char* /*nodeIdStr*/, const char* /*addr16*/, float /*tempC*/, const char* /*labelOrNull*/, uint32_t /*lastMs*/) {
+  // Table is rebuilt from the model. Mark dirty only.
+  guiDirty = true;
+}
+
+static void GUI_RequestRender() {
+  guiDirty = true;
+}
+
+static void GUI_RebuildTable() {
+  if (!ui_table) return;
+
+  // Row 0 = header
+  uint16_t row = 1;
+  lv_table_set_row_cnt(ui_table, 1);
+
+  const uint32_t now = millis();
+  ensureDocs();
+  JsonObject nodes = lastSeen["nodes"].as<JsonObject>();
+  for (JsonPair kv : nodes) {
+    String nodeIdStr = kv.key().c_str();
+    JsonObject n = kv.value();
+    String loc = labels["nodes"][nodeIdStr] | "";
+    JsonObject sn = n["sensors"].as<JsonObject>();
+
+    for (JsonPair sv : sn) {
+      String addr = sv.key().c_str();
+      float  t    = sv.value()["tC"] | NAN;
+      uint32_t last = sv.value()["last"] | 0;
+      String lab = labels["sensors"][addr] | "";
+
+      uint32_t age_s = (last <= now) ? ((now - last)/1000U) : 0;
+
+      lv_table_set_row_cnt(ui_table, row + 1);
+      lv_table_set_cell_value(ui_table, row, 0, nodeIdStr.c_str());
+      lv_table_set_cell_value(ui_table, row, 1, loc.c_str());
+      lv_table_set_cell_value(ui_table, row, 2, addr.c_str());
+      lv_table_set_cell_value(ui_table, row, 3, lab.c_str());
+
+      char tmp[16];
+      if (isnan(t)) strncpy(tmp, "--", sizeof(tmp));
+      else { snprintf(tmp, sizeof(tmp), "%.2f", t); }
+      lv_table_set_cell_value(ui_table, row, 4, tmp);
+
+      char age[12]; snprintf(age, sizeof(age), "%lu", (unsigned long)age_s);
+      lv_table_set_cell_value(ui_table, row, 5, age);
+
+      row++;
+    }
+  }
+}
+
+static void GUI_Pump() {
+  // Always let LVGL process its timers
+  lv_timer_handler();
+
+  // Rebuild table when marked dirty (rate-limited)
+  static uint32_t lastBuild = 0;
+  if (guiDirty && (millis() - lastBuild >= 50)) {
+    lastBuild = millis();
+    guiDirty = false;
+    GUI_RebuildTable();
+  }
+}
+// -------------------------------------------------
+
 void onReceive(uint32_t from, String &msg) {
   DLOG("[ROOT RX] from=%u len=%u: %s\n", from, msg.length(), msg.c_str());
 
@@ -78,6 +198,10 @@ void onReceive(uint32_t from, String &msg) {
   node["busGpio"]  = gpio;
   node["last"]     = (uint32_t)millis();
 
+  // LVGL model-hook (per-node)
+  String nodeIdStr = String(nodeId);
+  GUI_UpdateNodeSummary(nodeIdStr.c_str(), gpio, (uint32_t)millis());
+
   JsonObject sn = node["sensors"].to<JsonObject>();
   JsonArray  arr = d["sensors"].as<JsonArray>();
   DLOG("  nodeId=%u bus_gpio=%d sensors=%d\n", nodeId, gpio, arr.size());
@@ -86,7 +210,9 @@ void onReceive(uint32_t from, String &msg) {
     const char *a = s["addr"] | "";
     if (!a || strlen(a) != 16) continue;
     JsonObject r = sn[a].to<JsonObject>();
-    if (s.containsKey("tC")) r["tC"] = s["tC"].as<float>();
+
+    // ArduinoJson v7-safe: check via is<T>()
+    if (s["tC"].is<float>()) r["tC"] = s["tC"].as<float>();
     r["last"] = (uint32_t)millis();
 
     float t = r["tC"] | NAN;
@@ -94,7 +220,14 @@ void onReceive(uint32_t from, String &msg) {
     DLOG("    [%s]%s = %s\n",
          a, (label && strlen(label)) ? (String(" \"")+label+"\"").c_str() : "",
          isnan(t) ? "NaN" : String(t,2).c_str());
+
+    // LVGL model-hook (per-sensor)
+    GUI_UpdateSensorRow(nodeIdStr.c_str(), a, t,
+                        (label && strlen(label)) ? label : nullptr,
+                        (uint32_t)millis());
   }
+
+  GUI_RequestRender();
 }
 
 void onChangedConnections() { logConns(); }
@@ -118,7 +251,6 @@ static void processConsole() {
     line.trim();
     if (!line.length()) { Serial.println("ok"); line = ""; continue; }
 
-    // split by space
     std::vector<String> t; int s = 0;
     for (int i=0;i<(int)line.length();++i) if (isspace((unsigned char)line[i])) { if (i>s) t.push_back(line.substring(s,i)); s=i+1; }
     if (s < (int)line.length()) t.push_back(line.substring(s));
@@ -149,16 +281,13 @@ static void processConsole() {
           Serial.printf("  %s%s : %s\n", a.c_str(), nm.length()? (" \""+nm+"\"").c_str():"", isnan(v)?"NaN":String(v,2).c_str());
         }
       }
+      GUI_RequestRender();
     }
-    else if (t[0]=="node" && t.size()>=3) {
-      labels["nodes"][t[1]] = t[2]; saveLabels(); Serial.println(F("ok"));
-    }
-    else if (t[0]=="name" && t.size()>=3) {
-      labels["sensors"][t[1]] = t[2]; saveLabels(); Serial.println(F("ok"));
-    }
+    else if (t[0]=="node" && t.size()>=3) { labels["nodes"][t[1]] = t[2]; saveLabels(); Serial.println(F("ok")); GUI_RequestRender(); }
+    else if (t[0]=="name" && t.size()>=3) { labels["sensors"][t[1]] = t[2]; saveLabels(); Serial.println(F("ok")); GUI_RequestRender(); }
     else if (t[0]=="save") { saveLabels(); Serial.println(F("saved")); }
-    else if (t[0]=="load") { loadLabels(); Serial.println(F("loaded")); }
-    else if (t[0]=="erase"){ eraseLabels(); Serial.println(F("erased")); }
+    else if (t[0]=="load") { loadLabels(); Serial.println(F("loaded")); GUI_RequestRender(); }
+    else if (t[0]=="erase"){ eraseLabels(); Serial.println(F("erased")); GUI_RequestRender(); }
     else if (t[0]=="debug" && t.size()>=2) {
       g_debug = (t[1]=="on");
       Serial.printf("debug=%s\n", g_debug?"on":"off");
@@ -173,6 +302,11 @@ void setup() {
   Serial.begin(115200); delay(200);
 
   lastSeen.clear(); labels.clear(); ensureDocs(); loadLabels();
+
+  // Build LVGL widgets (assumes lv_init() + display driver already done)
+  GUI_Init();
+  GUI_UpdateNetwork(0);
+  GUI_RequestRender();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &userScheduler, MESH_PORT);
@@ -194,6 +328,7 @@ void setup() {
 void loop() {
   mesh.update();
   processConsole();
+  GUI_Pump();     // <-- LVGL timer + deferred redraw
 }
 
 #else
@@ -213,6 +348,13 @@ static uint32_t g_rootId = 0;
 static uint32_t g_rootLastSeenMs = 0;
 
 Task taskSend;
+
+inline String addrToHex(const uint8_t *addr) {
+  static const char *H = "0123456789ABCDEF";
+  char s[17] = {0};
+  for (int i = 0; i < 8; ++i) { s[i*2] = H[addr[i]>>4]; s[i*2+1] = H[addr[i]&0xF]; }
+  return String(s);
+}
 
 static void scanSensors() {
   devs.clear();
