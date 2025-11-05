@@ -11,7 +11,7 @@
 // ===== ROLE (compile-time) =====
 // Set to 1 for the display node (always ROOT). All others: 0 (LEAF).
 #ifndef MESH_IS_ROOT
-#define MESH_IS_ROOT 1
+#define MESH_IS_ROOT 0
 #endif
 
 // ===== Mesh credentials (routerless) =====
