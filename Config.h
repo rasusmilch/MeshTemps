@@ -11,7 +11,7 @@
 // ===== ROLE (compile-time) =====
 // Set to 1 for the display node (always ROOT). All others: 0 (LEAF).
 #ifndef MESH_IS_ROOT
-#define MESH_IS_ROOT 0
+#define MESH_IS_ROOT 1
 #endif
 
 // ===== Mesh credentials (routerless) =====
@@ -24,12 +24,12 @@
 #define ONEWIRE_PIN 4
 #endif
 #ifndef SEND_PERIOD_MS
-#define SEND_PERIOD_MS 5000
+#define SEND_PERIOD_MS 10000UL
 #endif
 
 // ===== Root broadcast cadence =====
 #ifndef ROOT_ANNOUNCE_MS
-#define ROOT_ANNOUNCE_MS 3000
+#define ROOT_ANNOUNCE_MS 20000UL
 #endif
 
 // ===== ArduinoJson v7 capacities =====

@@ -40,6 +40,7 @@ static void logConns() {
 #if MESH_IS_ROOT
 // ============================ ROOT (always) ============================
 #include <Preferences.h>
+#include "DisplaySetup.h"
 #include <lvgl.h>
 
 Preferences prefs;
@@ -81,7 +82,9 @@ static void saveLabels() {
 }
 
 static void eraseLabels() {
-  labels.clear(); ensureDocs(); saveLabels();
+  labels.clear(); 
+  ensureDocs(); 
+  saveLabels();
 }
 
 static void GUI_RebuildTable();
@@ -120,9 +123,17 @@ void GUI_UpdateNetwork(size_t peers) {
   lv_label_set_text(ui_lbl_peers, buf);
 }
 
-static void GUI_UpdateNodeSummary(const char*, int, uint32_t) { guiDirty = true; }
-static void GUI_UpdateSensorRow(const char*, const char*, float, const char*, uint32_t) { guiDirty = true; }
-void GUI_RequestRender() { guiDirty = true; }
+static void GUI_UpdateNodeSummary(const char*, int, uint32_t) { 
+  guiDirty = true; 
+}
+
+static void GUI_UpdateSensorRow(const char*, const char*, float, const char*, uint32_t) { 
+  guiDirty = true; 
+}
+
+void GUI_RequestRender() { 
+  guiDirty = true; 
+}
 
 static void GUI_RebuildTable() {
   if (!ui_table) return;
@@ -304,9 +315,13 @@ static void processConsole() {
 void setup() {
   Serial.begin(115200); delay(200);
 
-  lastSeen.clear(); labels.clear(); ensureDocs(); loadLabels();
+  lastSeen.clear(); 
+  labels.clear(); 
+  ensureDocs(); 
+  loadLabels();
 
-  GUI_Init();
+  Display_Init();   // 1) init panel + LVGL first
+  GUI_Init();       // 2) build your LVGL table/labels (your existing function)
   GUI_UpdateNetwork(0);
   GUI_RequestRender();
 
@@ -329,8 +344,9 @@ void setup() {
 
 void loop() {
   mesh.update();
+  Display_Loop();
   processConsole();
-  GUI_Pump();
+  // GUI_Pump();
 }
 
 #else
@@ -472,15 +488,33 @@ static void calStart(const String& addr16, CalStage stg) {
 static void calLock(float actualC) {
   if (g_calSess.stage==CAL_IDLE) { Serial.println(F("CAL idle")); return; }
   if (isnan(g_calSess.lastRaw)) { Serial.println(F("CAL no reading yet")); return; }
-  if (g_calSess.stage==CAL_ICE)  { g_calSess.rawIce  = g_calSess.lastRaw; g_calSess.actIce  = actualC; g_calSess.haveIce  = true; Serial.println(F("ICE locked.")); }
-  if (g_calSess.stage==CAL_BOIL) { g_calSess.rawBoil = g_calSess.lastRaw; g_calSess.actBoil = actualC; g_calSess.haveBoil = true; Serial.println(F("BOIL locked.")); }
+  if (g_calSess.stage==CAL_ICE)  { 
+    g_calSess.rawIce  = g_calSess.lastRaw; 
+    g_calSess.actIce  = actualC; 
+    g_calSess.haveIce  = true; 
+    Serial.println(F("ICE locked.")); 
+    g_calSess.stage = CAL_IDLE;
+  }
+  if (g_calSess.stage==CAL_BOIL) { 
+    g_calSess.rawBoil = g_calSess.lastRaw; 
+    g_calSess.actBoil = actualC; 
+    g_calSess.haveBoil = true; 
+    Serial.println(F("BOIL locked.")); 
+    g_calSess.stage = CAL_IDLE;
+  }
 }
 
 static void calSolveAndSave() {
-  if (!g_calSess.haveIce || !g_calSess.haveBoil) { Serial.println(F("CAL not complete")); return; }
+  if (!g_calSess.haveIce || !g_calSess.haveBoil) { 
+    Serial.println(F("CAL not complete")); 
+    return; 
+  }
   float x1=g_calSess.rawIce,  y1=g_calSess.actIce;
   float x2=g_calSess.rawBoil, y2=g_calSess.actBoil;
-  if (fabsf(x2-x1) < 1e-4f) { Serial.println(F("CAL ERROR: identical raw points")); return; }
+  if (fabsf(x2-x1) < 1e-4f) { 
+    Serial.println(F("CAL ERROR: identical raw points")); 
+    return; 
+  }
   Coeff c;
   c.a1 = (y2 - y1)/(x2 - x1);
   c.a0 = y1 - c.a1*x1;
