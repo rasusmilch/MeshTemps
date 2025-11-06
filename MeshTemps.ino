@@ -40,8 +40,11 @@ static void logConns() {
 #if MESH_IS_ROOT
 // ============================ ROOT (always) ============================
 #include <Preferences.h>
-#include "DisplaySetup.h"
+// #include "DisplaySetup.h"
+#include <esp_display_panel.hpp>
 #include <lvgl.h>
+#include "lvgl_v8_port.h"
+#include "esp_panel_board_custom_conf.h"
 
 Preferences prefs;
 
@@ -56,6 +59,57 @@ static lv_obj_t* ui_lbl_title = nullptr;
 static lv_obj_t* ui_lbl_peers = nullptr;
 static lv_obj_t* ui_table     = nullptr;
 static volatile bool guiDirty = false;
+
+using namespace esp_panel::drivers;
+using namespace esp_panel::board;
+
+static Board *s_board = nullptr;
+
+void Display_Init()
+{
+    Serial.println(F("[Display] Init board"));
+
+    s_board = new Board();
+    if (!s_board) {
+        Serial.println(F("[Display] Board alloc failed"));
+        while (true) { delay(1000); }
+    }
+
+    if (!s_board->init()) {
+        Serial.println(F("[Display] board->init() failed"));
+        while (true) { delay(1000); }
+    }
+
+#if LVGL_PORT_AVOID_TEARING_MODE
+    {
+        LCD *lcd = s_board->getLCD();
+        if (lcd) {
+            // Match the 09_lvgl_Porting logic
+            lcd->configFrameBufferNumber(LVGL_PORT_DISP_BUFFER_NUM);
+
+        #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
+            auto bus = lcd->getBus();
+            if (bus && bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
+                static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(lcd->getFrameWidth() * 10);
+            }
+        #endif
+        }
+    }
+#endif
+
+    if (!s_board->begin()) {
+        Serial.println(F("[Display] board->begin() failed"));
+        while (true) { delay(1000); }
+    }
+
+    Serial.println(F("[Display] Init LVGL port"));
+    if (!lvgl_port_init(s_board->getLCD(), s_board->getTouch())) {
+        Serial.println(F("[Display] lvgl_port_init() failed"));
+        while (true) { delay(1000); }
+    }
+
+    Serial.println(F("[Display] Ready"));
+}
 
 static void ensureDocs() {
   if (!lastSeen["nodes"].is<JsonObject>()) lastSeen["nodes"].to<JsonObject>();
@@ -91,6 +145,11 @@ static void GUI_RebuildTable();
 
 static void GUI_Init() {
   // Assumes lv_init() + display driver are already set up elsewhere.
+
+  if (!lvgl_port_lock(-1)) {
+    return; // or handle error
+  }
+
   lv_obj_t* scr = lv_scr_act();
 
   ui_lbl_title = lv_label_create(scr);
@@ -114,13 +173,19 @@ static void GUI_Init() {
   lv_table_set_cell_value(ui_table, 0, 5, "Age(s)");
 
   guiDirty = true;
+
+  lvgl_port_unlock();
 }
 
 void GUI_UpdateNetwork(size_t peers) {
+  if (!lvgl_port_lock(-1)) return;
+
   if (!ui_lbl_peers) return;
   static char buf[32];
   snprintf(buf, sizeof(buf), "Peers: %u", (unsigned)peers);
   lv_label_set_text(ui_lbl_peers, buf);
+
+  lvgl_port_unlock();
 }
 
 static void GUI_UpdateNodeSummary(const char*, int, uint32_t) { 
@@ -137,6 +202,8 @@ void GUI_RequestRender() {
 
 static void GUI_RebuildTable() {
   if (!ui_table) return;
+
+  if (!lvgl_port_lock(-1)) return;
 
   uint16_t row = 1;
   lv_table_set_row_cnt(ui_table, 1);
@@ -175,16 +242,20 @@ static void GUI_RebuildTable() {
       row++;
     }
   }
+  lvgl_port_unlock();
 }
 
-static void GUI_Pump() {
-  lv_timer_handler();
-  static uint32_t lastBuild = 0;
-  if (guiDirty && (millis() - lastBuild >= 50)) {
-    lastBuild = millis();
-    guiDirty = false;
-    GUI_RebuildTable();
-  }
+void Display_Loop() {
+    static uint32_t lastBuild = 0;
+
+    if (guiDirty && (millis() - lastBuild >= 50)) {
+        if (lvgl_port_lock(10)) {
+            guiDirty = false;
+            GUI_RebuildTable();  // does LVGL work
+            lvgl_port_unlock();
+            lastBuild = millis();
+        }
+    }
 }
 
 void onReceive(uint32_t from, String &msg) {

@@ -3,7 +3,7 @@
 
 #include <lvgl.h>
 #include "lvgl_v8_port.h"
-#include <C:\Users\rsusmilch\Documents\Arduino\libraries\lvgl\demos\lv_demos.h>
+// #include <C:\Users\rsusmilch\Documents\Arduino\libraries\lvgl\demos\lv_demos.h>
 
 using namespace esp_panel::drivers;
 using namespace esp_panel::board;
@@ -12,7 +12,7 @@ using namespace esp_panel::board;
  * To use the built-in examples and demos of LVGL uncomment the includes below respectively.
  */
 //   #include <demos/lv_demos.h>
-  #include <C:\Users\rsusmilch\Documents\Arduino\libraries\lvgl\examples\lv_examples.h>
+//   #include <examples/lv_examples.h>
 
 void setup()
 {
@@ -79,7 +79,7 @@ void setup()
      * Or try out a demo.
      * Don't forget to uncomment header and enable the demos in `lv_conf.h`. E.g. `LV_USE_DEMO_WIDGETS`
      */
-    lv_demo_widgets();
+    // lv_demo_widgets();
     // lv_demo_benchmark();
     // lv_demo_music();
     // lv_demo_stress();
