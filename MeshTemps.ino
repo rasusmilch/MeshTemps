@@ -540,32 +540,6 @@ void GuiRebuildTable() {
       ++row;
     }
 
-    // If no sensors yet: show a placeholder row for this node.
-    if (!has_sensor_rows) {
-      lv_table_set_row_cnt(g_ui_table, row + 1);
-
-      lv_table_set_cell_value(g_ui_table, row, 0, node_id.c_str());
-      lv_table_set_cell_value(g_ui_table, row, 1, node_label.c_str());
-      lv_table_set_cell_value(g_ui_table, row, 2, "--");
-      lv_table_set_cell_value(g_ui_table, row, 3, "");
-
-      lv_table_set_cell_value(g_ui_table, row, 4, "--");
-
-      const uint32_t last_ms = node_obj["last"] | 0U;
-      const uint32_t age_min =
-          (last_ms <= now_ms)
-              ? (now_ms - last_ms) / 60000U
-              : 0U;
-
-      char age_buffer[12];
-      snprintf(age_buffer,
-               sizeof(age_buffer),
-               "%lu",
-               static_cast<unsigned long>(age_min));
-      lv_table_set_cell_value(g_ui_table, row, 5, age_buffer);
-
-      ++row;
-    }
   }
 
 }
