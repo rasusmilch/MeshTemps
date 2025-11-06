@@ -87,6 +87,8 @@ using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
 using esp_panel::drivers::LCD;
 
+constexpr int kStorageVersionCurrent = 2;
+
 Preferences g_root_preferences;
 
 // Last-seen data and labels (persisted).
@@ -96,6 +98,8 @@ JsonDocument g_labels;
 Task g_task_announce;
 
 bool g_display_fahrenheit = true;  // true = °F, false = °C
+bool g_highlight_missing_nodes = true;     // highlight missing nodes in yellow
+uint32_t g_stale_minutes_threshold = 10;   // connected but stale -> red
 
 // LVGL GUI state (root).
 lv_obj_t* g_ui_label_title = nullptr;
@@ -106,6 +110,85 @@ volatile bool g_gui_dirty = false;
 Board* g_board = nullptr;
 
 namespace {
+
+void GuiRebuildTable();  // Forward declaration.
+
+int LoadStorageVersion() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const int version = g_root_preferences.getInt("version", 0);
+  g_root_preferences.end();
+  return version;
+}
+
+void SaveStorageVersion(int version) {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putInt("version", version);
+  g_root_preferences.end();
+}
+
+void LoadLabels() {
+  // v1 and v2 both use "labels" as JSON.
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const String json = g_root_preferences.getString("labels", "");
+  g_root_preferences.end();
+
+  g_labels.clear();
+  if (!json.isEmpty()) {
+    if (deserializeJson(g_labels, json) != DeserializationError::Ok) {
+      g_labels.clear();
+    }
+  }
+}
+
+void SaveLabels() {
+  String json;
+  serializeJson(g_labels, json);
+
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putString("labels", json);
+  g_root_preferences.end();
+}
+
+void EraseLabels() {
+  g_labels.clear();
+  g_last_seen["nodes"].to<JsonObject>();  // keep structure sane
+  g_labels["nodes"].to<JsonObject>();
+  g_labels["sensors"].to<JsonObject>();
+  SaveLabels();
+}
+
+void LoadDisplayUnits() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const int stored = g_root_preferences.getInt("units", 1);  // default °F
+  g_root_preferences.end();
+  g_display_fahrenheit = (stored != 0);
+}
+
+void SaveDisplayUnits() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putInt("units", g_display_fahrenheit ? 1 : 0);
+  g_root_preferences.end();
+}
+
+void LoadHighlightSettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const int missing = g_root_preferences.getInt("hl_missing", 1);
+  const int stale = g_root_preferences.getInt("hl_stale_min", 10);
+  g_root_preferences.end();
+
+  g_highlight_missing_nodes = (missing != 0);
+  g_stale_minutes_threshold =
+      stale > 0 ? static_cast<uint32_t>(stale) : 10U;
+}
+
+void SaveHighlightSettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putInt("hl_missing",
+                            g_highlight_missing_nodes ? 1 : 0);
+  g_root_preferences.putInt("hl_stale_min",
+                            static_cast<int>(g_stale_minutes_threshold));
+  g_root_preferences.end();
+}
 
 void EnsureDocuments() {
   if (!g_last_seen["nodes"].is<JsonObject>()) {
@@ -119,51 +202,47 @@ void EnsureDocuments() {
   }
 }
 
-void LoadLabels() {
-  EnsureDocuments();
+// Migrate v1 -> v2 and load settings.
+void MigrateStorageIfNeeded() {
+  const int version = LoadStorageVersion();
 
-  g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const String json = g_root_preferences.getString("labels", "");
-  g_root_preferences.end();
+  if (version == 0) {
+    // Unversioned: treat as v1 (labels only) if present.
+    LoadLabels();
+    EnsureDocuments();
 
-  if (json.length() > 0) {
-    if (deserializeJson(g_labels, json) != DeserializationError::Ok) {
-      g_labels.clear();
-      EnsureDocuments();
-    }
+    g_display_fahrenheit = true;
+    SaveDisplayUnits();
+
+    g_highlight_missing_nodes = true;
+    g_stale_minutes_threshold = 10;
+    SaveHighlightSettings();
+
+    SaveStorageVersion(kStorageVersionCurrent);
+    return;
   }
-}
 
-void SaveLabels() {
+  if (version == 1) {
+    // v1: labels already handled in old format.
+    LoadLabels();
+    EnsureDocuments();
+
+    g_display_fahrenheit = true;
+    SaveDisplayUnits();
+
+    g_highlight_missing_nodes = true;
+    g_stale_minutes_threshold = 10;
+    SaveHighlightSettings();
+
+    SaveStorageVersion(kStorageVersionCurrent);
+    return;
+  }
+
+  // v2 or higher: load normally.
+  LoadLabels();
   EnsureDocuments();
-
-  String json;
-  serializeJson(g_labels, json);
-
-  g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putString("labels", json);
-  g_root_preferences.end();
-}
-
-void EraseLabels() {
-  g_labels.clear();
-  EnsureDocuments();
-  SaveLabels();
-}
-
-void GuiRebuildTable();  // Forward declaration.
-
-void LoadDisplayUnits() {
-  g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const int stored = g_root_preferences.getInt("units", 1);  // default °F
-  g_root_preferences.end();
-  g_display_fahrenheit = (stored != 0);
-}
-
-void SaveDisplayUnits() {
-  g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putInt("units", g_display_fahrenheit ? 1 : 0);
-  g_root_preferences.end();
+  LoadDisplayUnits();
+  LoadHighlightSettings();
 }
 
 void DisplayInit() {
@@ -309,24 +388,46 @@ void GuiRebuildTable() {
     return;
   }
 
-  if (!lvgl_port_lock(-1)) {
-    return;
-  }
-
   lv_table_set_row_cnt(g_ui_table, 1);
 
   const uint32_t now_ms = millis();
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
 
+  // Snapshot connected node IDs.
+  std::vector<uint32_t> connected_ids = mesh.getNodeList();
+
+  auto is_connected = [&](uint32_t node_id) -> bool {
+    for (uint32_t id : connected_ids) {
+      if (id == node_id) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  auto set_row_color = [&](uint16_t row_index, lv_color_t color) {
+    for (uint16_t col = 0; col < 6; ++col) {
+      lv_table_set_cell_bg_color(g_ui_table, row_index, col, color);
+    }
+  };
+
+
   uint16_t row = 1;
 
   for (JsonPair node_entry : nodes) {
-    const String node_id = node_entry.key().c_str();
+    const String node_id_str = node_entry.key().c_str();
     JsonObject node_obj = node_entry.value();
 
-    const String node_label = g_labels["nodes"][node_id] | "";
+    const String node_label = g_labels["nodes"][node_id_str] | "";
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
+
+    // Parse node ID as decimal for connection test; if it fails, treat as not connected.
+    char* endptr = nullptr;
+    const uint32_t node_id_u32 =
+        static_cast<uint32_t>(strtoul(node_id_str.c_str(), &endptr, 10));
+    const bool node_connected =
+        (endptr != node_id_str.c_str()) && is_connected(node_id_u32);
 
     bool has_sensor_rows = false;
 
@@ -353,7 +454,7 @@ void GuiRebuildTable() {
 
       lv_table_set_row_cnt(g_ui_table, row + 1);
 
-      lv_table_set_cell_value(g_ui_table, row, 0, node_id.c_str());
+      lv_table_set_cell_value(g_ui_table, row, 0, node_id_str.c_str());
       lv_table_set_cell_value(g_ui_table, row, 1, node_label.c_str());
       lv_table_set_cell_value(g_ui_table, row, 2, addr.c_str());
       lv_table_set_cell_value(g_ui_table, row, 3, sensor_label.c_str());
@@ -363,19 +464,78 @@ void GuiRebuildTable() {
         strlcpy(temp_buffer, "--", sizeof(temp_buffer));
       } else {
         snprintf(temp_buffer,
-                 sizeof(temp_buffer),
-                 "%.2f%s",
-                 temp_display,
-                 corrected ? " *" : "");
+                sizeof(temp_buffer),
+                "%.2f%s",
+                temp_display,
+                corrected ? " *" : "");
       }
       lv_table_set_cell_value(g_ui_table, row, 4, temp_buffer);
 
       char age_buffer[12];
       snprintf(age_buffer,
-               sizeof(age_buffer),
-               "%lu",
-               static_cast<unsigned long>(age_min));
+              sizeof(age_buffer),
+              "%lu",
+              static_cast<unsigned long>(age_min));
       lv_table_set_cell_value(g_ui_table, row, 5, age_buffer);
+
+      // Determine row color.
+      lv_color_t row_color = lv_color_white();
+
+      const bool missing = g_highlight_missing_nodes && !node_connected;
+      const bool stale =
+          node_connected &&
+          g_stale_minutes_threshold > 0 &&
+          age_min >= g_stale_minutes_threshold;
+
+      if (missing) {
+        row_color = lv_color_yellow();
+      } else if (stale) {
+        row_color = lv_color_make(0xFF, 0x80, 0x80);  // light red
+      }
+
+      set_row_color(row, row_color);
+
+      ++row;
+    }
+
+    // If no sensors recorded yet: placeholder row for this node.
+    if (!has_sensor_rows) {
+      lv_table_set_row_cnt(g_ui_table, row + 1);
+
+      const uint32_t last_ms = node_obj["last"] | 0U;
+      const uint32_t age_min =
+          (last_ms <= now_ms)
+              ? (now_ms - last_ms) / 60000U
+              : 0U;
+
+      lv_table_set_cell_value(g_ui_table, row, 0, node_id_str.c_str());
+      lv_table_set_cell_value(g_ui_table, row, 1, node_label.c_str());
+      lv_table_set_cell_value(g_ui_table, row, 2, "--");
+      lv_table_set_cell_value(g_ui_table, row, 3, "");
+      lv_table_set_cell_value(g_ui_table, row, 4, "--");
+
+      char age_buffer[12];
+      snprintf(age_buffer,
+              sizeof(age_buffer),
+              "%lu",
+              static_cast<unsigned long>(age_min));
+      lv_table_set_cell_value(g_ui_table, row, 5, age_buffer);
+
+      lv_color_t row_color = lv_color_white();
+
+      const bool missing = g_highlight_missing_nodes && !node_connected;
+      const bool stale =
+          node_connected &&
+          g_stale_minutes_threshold > 0 &&
+          age_min >= g_stale_minutes_threshold;
+
+      if (missing) {
+        row_color = lv_color_yellow();
+      } else if (stale) {
+        row_color = lv_color_make(0xFF, 0x80, 0x80);
+      }
+
+      set_row_color(row, row_color);
 
       ++row;
     }
@@ -408,7 +568,6 @@ void GuiRebuildTable() {
     }
   }
 
-  lvgl_port_unlock();
 }
 
 
@@ -504,6 +663,8 @@ void ProcessConsoleRoot() {
       Serial.println(F("  save | load | erase"));
       Serial.println(F("  debug on|off"));
       Serial.println(F("  units c|f"));
+      Serial.println(F("  highlight missing on|off"));
+      Serial.println(F("  highlight stale <minutes>"));
     };
 
     if (command == "help" || command == "?") {
@@ -600,6 +761,42 @@ void ProcessConsoleRoot() {
         GuiRequestRender();
       } else {
         Serial.println(F("ERR units (use 'units c' or 'units f')"));
+      }
+
+    } else if (command == "highlight" && tokens.size() >= 3) {
+      const String& target = tokens[1];
+      const String& value = tokens[2];
+
+      if (target == "missing") {
+        if (value == "on") {
+          g_highlight_missing_nodes = true;
+          SaveHighlightSettings();
+          Serial.println(F("highlight missing=on"));
+          GuiRequestRender();
+        } else if (value == "off") {
+          g_highlight_missing_nodes = false;
+          SaveHighlightSettings();
+          Serial.println(F("highlight missing=off"));
+          GuiRequestRender();
+        } else {
+          Serial.println(F("ERR highlight missing (use on|off)"));
+        }
+      } else if (target == "stale") {
+        const long minutes = value.toInt();
+        if (minutes > 0) {
+          g_stale_minutes_threshold =
+              static_cast<uint32_t>(minutes);
+          SaveHighlightSettings();
+          Serial.printf("highlight stale=%ld min\n", minutes);
+          GuiRequestRender();
+        } else {
+          Serial.println(
+              F("ERR highlight stale (use positive minutes)"));
+        }
+      } else {
+        Serial.println(
+            F("ERR highlight (use 'highlight missing on|off' or "
+              "'highlight stale <min>')"));
       }
     } else {
       Serial.println(F("ERR (help)"));
@@ -724,9 +921,9 @@ void setup() {
 
   g_last_seen.clear();
   g_labels.clear();
+
+  MigrateStorageIfNeeded();  // loads labels + units + highlight
   EnsureDocuments();
-  LoadLabels();
-  LoadDisplayUnits();
 
   DisplayInit();
   GuiInit();
@@ -741,8 +938,7 @@ void setup() {
   mesh.onChangedConnections(&OnConnectionsChangedRoot);
 
   g_task_announce.set(
-      TASK_IMMEDIATE,
-      TASK_FOREVER,
+      TASK_IMMEDIATE, TASK_FOREVER,
       []() {
         RootAnnounce();
         g_task_announce.delay(ROOT_ANNOUNCE_MS);
