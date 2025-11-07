@@ -82,14 +82,14 @@ void LogConnections() {
 #include <lvgl.h>
 #include "lvgl_v8_port.h"
 #include "esp_panel_board_custom_conf.h"
-
+#include <map>
 #include <limits>
 
 using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
 using esp_panel::drivers::LCD;
 
-constexpr int kStorageVersionCurrent = 4;
+constexpr int kStorageVersionCurrent = 5;
 
 // Buzzer (root)
 constexpr int kBuzzerPin = 6;
@@ -100,6 +100,11 @@ constexpr uint32_t kDefaultGapAlertMs     = 5000;   // ms between alert beeps
 uint32_t g_beep_len_ms       = kDefaultBeepLenMs;
 uint32_t g_beep_gap_warn_ms  = kDefaultGapWarnMs;
 uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
+
+// Flashing (root)
+constexpr uint32_t kDefaultFlashIntervalMs = 5000;  // ms between flash toggles; 0 = off
+uint32_t g_flash_interval_ms = kDefaultFlashIntervalMs;
+bool g_flash_phase = false;  // toggled in DisplayLoop()
 
 // Persistent root prefs.
 Preferences g_root_preferences;
@@ -134,12 +139,41 @@ lv_obj_t* g_ui_label_title = nullptr;
 lv_obj_t* g_ui_label_peers = nullptr;
 lv_obj_t* g_ui_label_uptime = nullptr;
 lv_obj_t* g_ui_tile_container = nullptr;
-volatile bool g_gui_dirty = false;
 
+volatile bool g_gui_dirty = false;
 volatile size_t g_ui_peers = 0;
 
-
 Board* g_board = nullptr;
+
+// Per-node persistent tile widgets.
+struct TileWidgets {
+  lv_obj_t* tile = nullptr;
+  lv_obj_t* label_loc = nullptr;
+  lv_obj_t* label_age = nullptr;
+  lv_obj_t* sensor_label[2] = {nullptr, nullptr};
+
+  // Base (non-flash) colors.
+  lv_color_t bg_normal;
+  lv_color_t fg_normal;   // header + age
+
+  // Flash-phase colors (for warn/alert tiles).
+  lv_color_t bg_flash;
+  lv_color_t fg_flash;
+
+  lv_color_t sensor_color[2];
+  int sensor_count = 0;
+
+  bool node_has_alert = false;
+  bool node_has_warning = false;
+  bool is_missing = false;
+  bool is_stale = false;
+
+  bool last_flash_active = false;
+};
+
+std::map<String, TileWidgets> g_tiles;
+
+volatile bool g_flash_dirty = false;
 
 namespace {
 
@@ -273,6 +307,20 @@ void LoadBuzzerSettings() {
   g_beep_gap_alert_ms = ga;
 }
 
+void SaveFlashSettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putULong("flash_interval_ms", g_flash_interval_ms);
+  g_root_preferences.end();
+}
+
+void LoadFlashSettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const uint32_t fi =
+      g_root_preferences.getULong("flash_interval_ms", kDefaultFlashIntervalMs);
+  g_root_preferences.end();
+  g_flash_interval_ms = fi;
+}
+
 void EnsureDocuments() {
   if (!g_last_seen["nodes"].is<JsonObject>()) {
     g_last_seen["nodes"].to<JsonObject>();
@@ -307,18 +355,21 @@ void MigrateStorageIfNeeded() {
     g_alert_high_c = 30.0f;
     SaveLimits();
 
-    // New in v4: buzzer defaults.
+    // Buzzer + flash defaults.
     g_beep_len_ms       = kDefaultBeepLenMs;
     g_beep_gap_warn_ms  = kDefaultGapWarnMs;
     g_beep_gap_alert_ms = kDefaultGapAlertMs;
     SaveBuzzerSettings();
+
+    g_flash_interval_ms = kDefaultFlashIntervalMs;
+    SaveFlashSettings();
 
     SaveStorageVersion(kStorageVersionCurrent);
     return;
   }
 
   if (version == 2) {
-    // v2: had units + highlight; no stored limits/buzzer yet.
+    // v2: units + highlight; add limits + buzzer + flash.
     LoadLabels();
     EnsureDocuments();
     LoadDisplayUnits();
@@ -335,12 +386,15 @@ void MigrateStorageIfNeeded() {
     g_beep_gap_alert_ms = kDefaultGapAlertMs;
     SaveBuzzerSettings();
 
+    g_flash_interval_ms = kDefaultFlashIntervalMs;
+    SaveFlashSettings();
+
     SaveStorageVersion(kStorageVersionCurrent);
     return;
   }
 
   if (version == 3) {
-    // v3: had limits; add buzzer settings.
+    // v3: had limits; add buzzer + flash.
     LoadLabels();
     EnsureDocuments();
     LoadDisplayUnits();
@@ -352,18 +406,39 @@ void MigrateStorageIfNeeded() {
     g_beep_gap_alert_ms = kDefaultGapAlertMs;
     SaveBuzzerSettings();
 
+    g_flash_interval_ms = kDefaultFlashIntervalMs;
+    SaveFlashSettings();
+
     SaveStorageVersion(kStorageVersionCurrent);
     return;
   }
 
-  // v4+ normal load.
+  if (version == 4) {
+    // v4: had buzzer; add flash.
+    LoadLabels();
+    EnsureDocuments();
+    LoadDisplayUnits();
+    LoadHighlightSettings();
+    LoadLimits();
+    LoadBuzzerSettings();
+
+    g_flash_interval_ms = kDefaultFlashIntervalMs;
+    SaveFlashSettings();
+
+    SaveStorageVersion(kStorageVersionCurrent);
+    return;
+  }
+
+  // v5+ normal load.
   LoadLabels();
   EnsureDocuments();
   LoadDisplayUnits();
   LoadHighlightSettings();
   LoadLimits();
   LoadBuzzerSettings();
+  LoadFlashSettings();
 }
+
 
 // ---------------------------------------------------------------------------
 // Display + GUI setup
@@ -593,9 +668,95 @@ void BuzzerBeepOnce() {
   DLOG("[BUZZER] Beep\n");
 }
 
+TileWidgets& GetOrCreateTile(const String& node_id_str,
+                             lv_coord_t tile_w,
+                             lv_coord_t tile_h) {
+  auto it = g_tiles.find(node_id_str);
+  if (it != g_tiles.end()) {
+    // Ensure size in case geometry changed (e.g. rotation/res change).
+    lv_obj_set_size(it->second.tile, tile_w, tile_h);
+    return it->second;
+  }
+
+  TileWidgets tw;
+
+  tw.tile = lv_obj_create(g_ui_tile_container);
+  lv_obj_set_size(tw.tile, tile_w, tile_h);
+  lv_obj_set_style_radius(tw.tile, 12, 0);
+  lv_obj_set_style_pad_all(tw.tile, 6, 0);
+  lv_obj_set_style_border_width(tw.tile, 0, 0);
+  lv_obj_clear_flag(tw.tile, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(tw.tile, LV_SCROLLBAR_MODE_OFF);
+
+  // Location label.
+  tw.label_loc = lv_label_create(tw.tile);
+  lv_obj_set_width(tw.label_loc, lv_pct(100));
+  lv_obj_set_style_text_align(tw.label_loc, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(tw.label_loc, &lv_font_montserrat_16, 0);
+
+  // Age label.
+  tw.label_age = lv_label_create(tw.tile);
+  lv_obj_set_width(tw.label_age, lv_pct(100));
+  lv_obj_set_style_text_align(tw.label_age, LV_TEXT_ALIGN_CENTER, 0);
+
+  // Sensor labels (up to 2).
+  for (int i = 0; i < 2; ++i) {
+    tw.sensor_label[i] = lv_label_create(tw.tile);
+  }
+
+  auto [ins_it, ok] = g_tiles.emplace(node_id_str, tw);
+  return ins_it->second;
+}
+
 // ---------------------------------------------------------------------------
 // Tile rebuild
 // ---------------------------------------------------------------------------
+void GuiApplyFlashPhase() {
+  for (auto &entry : g_tiles) {
+    TileWidgets &tw = entry.second;
+
+    const bool flashable =
+        (tw.node_has_alert || tw.node_has_warning);
+    const bool flash_active =
+        flashable &&
+        (g_flash_interval_ms > 0) &&
+        g_flash_phase;
+
+    // If nothing changed for this tile, do nothing.
+    if (flash_active == tw.last_flash_active) {
+      continue;
+    }
+    tw.last_flash_active = flash_active;
+
+    if (flash_active) {
+      // FLASH: light gray bg, black text for entire tile.
+      lv_obj_set_style_bg_color(tw.tile, tw.bg_flash, 0);
+      lv_obj_set_style_bg_opa(tw.tile, LV_OPA_COVER, 0);
+
+      lv_obj_set_style_text_color(tw.label_loc, tw.fg_flash, 0);
+      lv_obj_set_style_text_color(tw.label_age, tw.fg_flash, 0);
+      for (int i = 0; i < tw.sensor_count; ++i) {
+        if (tw.sensor_label[i]) {
+          lv_obj_set_style_text_color(tw.sensor_label[i],
+                                      tw.fg_flash, 0);
+        }
+      }
+    } else {
+      // NORMAL: restore per-tile and per-sensor colors.
+      lv_obj_set_style_bg_color(tw.tile, tw.bg_normal, 0);
+      lv_obj_set_style_bg_opa(tw.tile, LV_OPA_COVER, 0);
+
+      lv_obj_set_style_text_color(tw.label_loc, tw.fg_normal, 0);
+      lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
+      for (int i = 0; i < tw.sensor_count; ++i) {
+        if (tw.sensor_label[i]) {
+          lv_obj_set_style_text_color(tw.sensor_label[i],
+                                      tw.sensor_color[i], 0);
+        }
+      }
+    }
+  }
+}
 
 void GuiRebuildTiles() {
   if (g_ui_tile_container == nullptr) {
@@ -611,46 +772,46 @@ void GuiRebuildTiles() {
 
   auto is_connected = [&](uint32_t node_id) -> bool {
     for (uint32_t id : connected_ids) {
-      if (id == node_id) {
-        return true;
-      }
+      if (id == node_id) return true;
     }
     return false;
   };
 
-  g_any_warning = false;
-  g_any_alert = false;
-
-  lv_obj_clean(g_ui_tile_container);
-
   const uint32_t now_ms = millis();
 
-  // Tile geometry heuristic: 3 columns on wide, 2 on narrower.
+  // Layout parameters.
   const lv_coord_t screen_w = lv_obj_get_width(lv_scr_act());
   const int columns = (screen_w >= 640) ? 3 : 2;
   const lv_coord_t gap = 6;
-  const lv_coord_t tile_w =
-      (screen_w - (columns + 1) * gap) / columns;
-  const lv_coord_t tile_h = 100;  // enough for labels
+  const lv_coord_t tile_w = (screen_w - (columns + 1) * gap) / columns;
+  const lv_coord_t tile_h = 100;
 
+  g_any_warning = false;
+  g_any_alert = false;
+
+  // Iterate all known nodes and update/create tiles.
   for (JsonPair node_entry : nodes) {
     const String node_id_str = node_entry.key().c_str();
     JsonObject node_obj = node_entry.value();
 
-    String loc = g_labels["nodes"][node_id_str] | "";
+    TileWidgets& tw = GetOrCreateTile(node_id_str, tile_w, tile_h);
 
+    // Location: label or node id.
+    String loc = g_labels["nodes"][node_id_str] | "";
+    if (loc.isEmpty()) {
+      loc = node_id_str;
+    }
+
+    // Connection + age.
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
 
-    // Parse ID for connection status; if not numeric, treat as not connected.
     char* endptr = nullptr;
     const uint32_t node_id_u32 =
         static_cast<uint32_t>(strtoul(node_id_str.c_str(), &endptr, 10));
     const bool node_connected =
         (endptr != node_id_str.c_str()) && is_connected(node_id_u32);
 
-    // Compute age (minutes) from newest sensor last, or node last.
     uint32_t latest_ms = node_obj["last"] | 0U;
-
     for (JsonPair sensor_entry : sensors) {
       JsonObject s = sensor_entry.value();
       const uint32_t s_last = s["last"] | 0U;
@@ -672,55 +833,31 @@ void GuiRebuildTiles() {
 
     const bool is_stale =
         node_connected &&
-        g_stale_minutes_threshold > 0 &&
-        age_min >= g_stale_minutes_threshold;
+        (g_stale_minutes_threshold > 0) &&
+        (age_min >= g_stale_minutes_threshold);
 
-    bool node_has_warning = false;
-    bool node_has_alert = false;
-
-    // Create tile.
-    lv_obj_t* tile = lv_obj_create(g_ui_tile_container);
-    lv_obj_set_size(tile, tile_w, tile_h);
-    lv_obj_set_style_radius(tile, 12, 0);
-    lv_obj_set_style_pad_all(tile, 6, 0);
-    lv_obj_set_style_border_width(tile, 0, 0);
-    lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scrollbar_mode(tile, LV_SCROLLBAR_MODE_OFF);
-
-
-    // Determine colors based on status and thresholds.
-    // Priority: alert > missing > (stale or warn) > normal.
-    // Thresholds are applied on °C values.
-    // Base: normal (healthy) tile.
-    lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24);  // dark green
-    lv_color_t fg = lv_color_white();                 // headers on tile
-
-
-
-    // Inspect up to two sensors for display and status.
+    // Build up to 2 sensor views.
     struct SensorView {
       String label;
       float temp_c = NAN;
       bool has_value = false;
       bool is_alert = false;
       bool is_warning = false;
-    };
-    SensorView sv[2];
+    } sv[2];
+
     int sv_count = 0;
+    bool node_has_alert = false;
+    bool node_has_warning = false;
 
     for (JsonPair sensor_entry : sensors) {
-      if (sv_count >= 2) {
-        break;
-      }
+      if (sv_count >= 2) break;
 
       const String addr = sensor_entry.key().c_str();
       JsonObject s = sensor_entry.value();
 
       SensorView& v = sv[sv_count++];
       v.label = (g_labels["sensors"][addr] | "");
-      if (v.label.isEmpty()) {
-        v.label = addr;
-      }
+      if (v.label.isEmpty()) v.label = addr;
 
       if (s["tC"].is<float>()) {
         v.temp_c = s["tC"].as<float>();
@@ -754,64 +891,69 @@ void GuiRebuildTiles() {
       }
     }
 
+    // Decide base colors for this tile (normal phase).
+    lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24);  // dark green
+    lv_color_t fg = lv_color_white();                 // header/age
+
     if (node_has_alert) {
-      // Strong red for alerts.
       bg = lv_color_make(0xB7, 0x1C, 0x1C);          // deep red
       fg = lv_color_white();
       g_any_alert = true;
-
     } else if (is_stale || node_has_warning) {
-      // Dark amber, not pale yellow: keeps contrast for bright text.
       bg = lv_color_make(0x8A, 0x5A, 0x00);          // dark amber
       fg = lv_color_white();
+      g_any_warning = true;
+    } else if (is_missing) {
+      bg = lv_color_make(0x20, 0x40, 0x60);          // muted blue-gray
+      fg = lv_color_white();
+    }
 
-      if (node_has_warning || is_stale) {
-        g_any_warning = true;
+    // Store state in tile.
+    tw.node_has_alert   = node_has_alert;
+    tw.node_has_warning = node_has_warning;
+    tw.is_missing       = is_missing;
+    tw.is_stale         = is_stale;
+
+    tw.bg_normal = bg;
+    tw.fg_normal = fg;
+
+    // Flash colors (used only by GuiApplyFlashPhase()).
+    if (node_has_alert || node_has_warning) {
+      // Flash = light grey background with black text.
+      tw.bg_flash = lv_color_make(0xCC, 0xCC, 0xCC);
+      tw.fg_flash = lv_color_black();
+    } else {
+      // Non-flashing nodes: flash == normal (no visible change).
+      tw.bg_flash = bg;
+      tw.fg_flash = fg;
+    }
+
+    // Update location label.
+    lv_label_set_text(tw.label_loc, loc.c_str());
+    lv_obj_align(tw.label_loc, LV_ALIGN_TOP_MID, 0, 0);
+
+    // Update age label.
+    char age_buf[24];
+    snprintf(age_buf, sizeof(age_buf), "Age: %lu min",
+             static_cast<unsigned long>(age_min));
+    lv_label_set_text(tw.label_age, age_buf);
+    lv_obj_align(tw.label_age, LV_ALIGN_TOP_MID, 0, 20);
+
+    // Update sensor labels & store their "normal" colors.
+    tw.sensor_count = sv_count;
+    for (int i = 0; i < 2; ++i) {
+      lv_obj_t* lbl = tw.sensor_label[i];
+      if (!lbl) continue;
+
+      if (i >= sv_count) {
+        lv_label_set_text(lbl, "");
+        lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
+        continue;
       }
 
-    } else if (is_missing) {
-      // Muted blue-gray for offline/missing.
-      bg = lv_color_make(0x20, 0x40, 0x60);
-      fg = lv_color_white();
+      lv_obj_clear_flag(lbl, LV_OBJ_FLAG_HIDDEN);
 
-    } else {
-      // keep normal dark green
-    }
-
-    lv_obj_set_style_bg_color(tile, bg, 0);
-    lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(tile, fg, 0);
-
-    // Location (top, larger, centered).
-    lv_obj_t* label_loc = lv_label_create(tile);
-    {
-      String text = loc.isEmpty() ? node_id_str : loc;
-      lv_label_set_text(label_loc, text.c_str());
-      lv_obj_set_width(label_loc, lv_pct(100));
-      lv_obj_set_style_text_align(label_loc, LV_TEXT_ALIGN_CENTER, 0);
-      lv_obj_align(label_loc, LV_ALIGN_TOP_MID, 0, 0);
-
-      // Make it bigger
-      lv_obj_set_style_text_font(label_loc, &lv_font_montserrat_16, 0);
-    }
-
-    // Age (minutes, small, centered).
-    lv_obj_t* label_age = lv_label_create(tile);
-    {
-      char buf[24];
-      snprintf(buf, sizeof(buf), "Age: %lu min",
-               static_cast<unsigned long>(age_min));
-      lv_label_set_text(label_age, buf);
-      lv_obj_set_width(label_age, lv_pct(100));
-      lv_obj_set_style_text_align(label_age, LV_TEXT_ALIGN_CENTER, 0);
-      lv_obj_align(label_age, LV_ALIGN_TOP_MID, 0, 20);
-    }
-
-    // Sensor rows (bottom).
-    for (int i = 0; i < sv_count; ++i) {
       const SensorView& v = sv[i];
-
-      lv_obj_t* label = lv_label_create(tile);
 
       char buf[64];
       if (!v.has_value) {
@@ -822,59 +964,55 @@ void GuiRebuildTiles() {
           temp_disp = temp_disp * 1.8f + 32.0f;
         }
         const char unit_ch = g_display_fahrenheit ? 'F' : 'C';
-
-        snprintf(buf, sizeof(buf),
-                "%s: %.1f%c",
-                v.label.c_str(),
-                static_cast<double>(temp_disp),
-                unit_ch);
+        snprintf(buf, sizeof(buf), "%s: %.1f%c",
+                 v.label.c_str(),
+                 static_cast<double>(temp_disp),
+                 unit_ch);
       }
+      lv_label_set_text(lbl, buf);
 
-      lv_label_set_text(label, buf);
-
-      // Decide per-sensor color based on *that sensor's* severity
-      // and the tile's status context.
       lv_color_t sensor_color;
-
-      // No reading: dim gray, regardless of tile.
       if (!v.has_value) {
-        sensor_color = lv_color_make(0xCC, 0xCC, 0xCC);  // light gray
-
+        sensor_color = lv_color_make(0xCC, 0xCC, 0xCC); // light gray
       } else if (v.is_alert) {
-        // Super high contrast on both red and dark backgrounds.
-        sensor_color = lv_color_make(0xFF, 0xFF, 0x80);  // bright yellow
-
+        sensor_color = lv_color_make(0xFF, 0xFF, 0x80); // bright yellow
       } else if (v.is_warning) {
-        // Also bright; stands out on dark amber and green.
-        sensor_color = lv_color_make(0xFF, 0xD7, 0x00);  // gold
-
+        sensor_color = lv_color_make(0xFF, 0xD7, 0x00); // gold
+      } else if (node_has_alert) {
+        sensor_color = lv_color_make(0xFF, 0xE0, 0xE0); // soft light
+      } else if (is_stale || node_has_warning) {
+        sensor_color = lv_color_make(0xFF, 0xF7, 0xE0); // warm cream
+      } else if (is_missing) {
+        sensor_color = lv_color_make(0xB0, 0xBE, 0xC5); // blue-gray
       } else {
-        // Normal sensor on this tile:
-        if (node_has_alert) {
-          // On alert tile: still readable but less "screamy" than alert.
-          sensor_color = lv_color_make(0xFF, 0xE0, 0xE0);  // soft light pink/white
-        } else if (is_stale || node_has_warning) {
-          // On warning/amber: light warm text, NOT green vs yellow.
-          sensor_color = lv_color_make(0xFF, 0xF7, 0xE0);  // warm cream
-        } else if (is_missing) {
-          // On missing: muted.
-          sensor_color = lv_color_make(0xB0, 0xBE, 0xC5);  // blue-gray
-        } else {
-          // Normal tile: subtle but clear.
-          sensor_color = lv_color_make(0xE0, 0xFF, 0xE0);  // light green
-        }
+        sensor_color = lv_color_make(0xE0, 0xFF, 0xE0); // light green
       }
 
-      lv_obj_set_style_text_color(label, sensor_color, 0);
+      tw.sensor_color[i] = sensor_color;
 
-
-
-      // Align near bottom with some spacing.
+      // Position sensors near bottom.
       const int y_offset = (sv_count == 1)
                                ? -8
                                : (i == 0 ? -26 : -8);
-      lv_obj_align(label, LV_ALIGN_BOTTOM_LEFT, 0, y_offset);
+      lv_obj_align(lbl, LV_ALIGN_BOTTOM_LEFT, 0, y_offset);
     }
+
+    // Apply NORMAL (non-flash) appearance only.
+    lv_obj_set_style_bg_color(tw.tile, tw.bg_normal, 0);
+    lv_obj_set_style_bg_opa(tw.tile, LV_OPA_COVER, 0);
+
+    lv_obj_set_style_text_color(tw.label_loc, tw.fg_normal, 0);
+    lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
+
+    for (int i = 0; i < tw.sensor_count; ++i) {
+      if (tw.sensor_label[i]) {
+        lv_obj_set_style_text_color(tw.sensor_label[i],
+                                    tw.sensor_color[i], 0);
+      }
+    }
+
+    // Let GuiApplyFlashPhase() decide flashing; start from "not flashed".
+    tw.last_flash_active = false;
   }
 }
 
@@ -901,33 +1039,61 @@ void GuiRequestRender() {
 void DisplayLoop() {
   static uint32_t last_build_ms = 0;
   static uint32_t last_force_ms = 0;
+  static uint32_t last_flash_ms = 0;
 
   const uint32_t now_ms = millis();
 
-  // Force a full GUI rebuild at least once per minute to refresh age/status.
+  // Flashing: only mark flash-dirty, don't trigger full rebuild.
+  if (g_flash_interval_ms > 0 && (g_any_alert || g_any_warning)) {
+    if (now_ms - last_flash_ms >= g_flash_interval_ms) {
+      g_flash_phase = !g_flash_phase;
+      g_flash_dirty = true;      // <--- instead of g_gui_dirty
+      last_flash_ms = now_ms;
+    }
+  } else {
+    if (g_flash_phase) {
+      g_flash_phase = false;
+      g_flash_dirty = true;
+    }
+    last_flash_ms = now_ms;
+  }
+
+  // Periodic full GUI rebuild for age/status.
   if (now_ms - last_force_ms >= 60000U) {
     g_gui_dirty = true;
     last_force_ms = now_ms;
   }
 
-  if (g_gui_dirty && (now_ms - last_build_ms >= 50U)) {
+  if ((g_gui_dirty || g_flash_dirty) &&
+      (now_ms - last_build_ms >= 50U)) {
     if (lvgl_port_lock(-1)) {
-      g_gui_dirty = false;
 
-      if (g_ui_label_peers != nullptr) {
-        char buffer[32];
-        snprintf(buffer, sizeof(buffer), "Peers: %u",
-                 static_cast<unsigned>(g_ui_peers));
-        lv_label_set_text(g_ui_label_peers, buffer);
+      if (g_gui_dirty) {
+        g_gui_dirty = false;
+
+        if (g_ui_label_peers != nullptr) {
+          char buffer[32];
+          snprintf(buffer, sizeof(buffer), "Peers: %u",
+                   static_cast<unsigned>(g_ui_peers));
+          lv_label_set_text(g_ui_label_peers, buffer);
+        }
+
+        GuiRebuildTiles();  // data/layout only
       }
 
-      GuiRebuildTiles();
+      if (g_flash_dirty) {
+        g_flash_dirty = false;
+        GuiApplyFlashPhase();  // lightweight color toggle
+      }
+
       UpdateUptimeLabel();
       lvgl_port_unlock();
       last_build_ms = now_ms;
     }
   }
 }
+
+
 
 void BuzzerLoop() {
   // Static state so we can be called every loop() tick.
@@ -1060,6 +1226,7 @@ void ProcessConsoleRoot() {
       Serial.println(F("  limits alert <low> <high>"));
       Serial.println(F("  limits show"));
       Serial.println(F("  buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>"));
+      Serial.println(F("  flash <interval_ms|off>"));
     };
 
     if (command == "help" || command == "?") {
@@ -1178,6 +1345,7 @@ void ProcessConsoleRoot() {
         } else {
           Serial.println(F("ERR highlight missing (use on|off)"));
         }
+
       } else if (target == "stale") {
         const long minutes = value.toInt();
         if (minutes > 0) {
@@ -1196,6 +1364,29 @@ void ProcessConsoleRoot() {
               "'highlight stale <min>')"));
       }
 
+    } else if (command == "flash" && tokens.size() >= 2) {
+      if (tokens[1].equalsIgnoreCase("off")) {
+        g_flash_interval_ms = 0;
+        SaveFlashSettings();
+        g_flash_phase = false;
+        g_gui_dirty = true;
+        Serial.println(F("flash off"));
+      } else {
+        const long interval = tokens[1].toInt();
+        if (interval < 0) {
+          Serial.println(
+              F("ERR flash (use 'flash <interval_ms>' with >=0, or 'flash off')"));
+        } else {
+          g_flash_interval_ms = static_cast<uint32_t>(interval);
+          SaveFlashSettings();
+          g_flash_phase = false;
+          g_gui_dirty = true;
+          Serial.printf("flash interval=%lu ms (%s)\n",
+                        static_cast<unsigned long>(g_flash_interval_ms),
+                        g_flash_interval_ms ? "enabled" : "off");
+        }
+      }
+
     } else if (command == "dummy" && tokens.size() >= 2) {
       const String& mode = tokens[1];
       if (mode == "on") {
@@ -1212,6 +1403,7 @@ void ProcessConsoleRoot() {
       } else {
         Serial.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
       }
+
     } else if (command == "limits" && tokens.size() >= 2 && tokens[1] == "show") {
       auto FromC = [&](float c) -> float {
         return g_display_fahrenheit ? (c * 1.8f + 32.0f) : c;
@@ -1226,6 +1418,7 @@ void ProcessConsoleRoot() {
                     FromC(g_alert_low_c),
                     FromC(g_alert_high_c),
                     unit);
+
     } else if (command == "limits" && tokens.size() >= 4) {
       const String& kind = tokens[1];
       const float low_in  = tokens[2].toFloat();
