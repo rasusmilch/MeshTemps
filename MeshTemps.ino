@@ -83,35 +83,71 @@ void LogConnections() {
 #include "lvgl_v8_port.h"
 #include "esp_panel_board_custom_conf.h"
 
+#include <limits>
+
 using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
 using esp_panel::drivers::LCD;
 
-constexpr int kStorageVersionCurrent = 2;
+constexpr int kStorageVersionCurrent = 4;
 
+// Buzzer (root)
+constexpr int kBuzzerPin = 6;
+constexpr uint32_t kDefaultBeepLenMs      = 150;    // ms buzzer ON
+constexpr uint32_t kDefaultGapWarnMs      = 10000;  // ms between warning beeps
+constexpr uint32_t kDefaultGapAlertMs     = 5000;   // ms between alert beeps
+
+uint32_t g_beep_len_ms       = kDefaultBeepLenMs;
+uint32_t g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
+
+// Persistent root prefs.
 Preferences g_root_preferences;
 
-// Last-seen data and labels (persisted).
+// Last-seen data and labels (persisted labels, volatile last_seen).
 JsonDocument g_last_seen;
 JsonDocument g_labels;
 
+// Mesh tasks.
 Task g_task_announce;
 
-bool g_display_fahrenheit = true;  // true = °F, false = °C
-bool g_highlight_missing_nodes = true;     // highlight missing nodes in yellow
-uint32_t g_stale_minutes_threshold = 10;   // connected but stale -> red
+// Units / highlight config.
+bool g_display_fahrenheit = true;          // true = °F, false = °C
+bool g_highlight_missing_nodes = true;
+uint32_t g_stale_minutes_threshold = 5;   // minutes
+
+// Dummy data mode (non-persistent).
+bool g_use_dummy_data = false;
+
+// Temperature limits (in °C, NaN = disabled).
+float g_warn_low_c = 5.0;
+float g_warn_high_c = 26.0;
+float g_alert_low_c = 3.0;
+float g_alert_high_c = 30.0;
+
+// Aggregate state for buzzer.
+bool g_any_warning = false;
+bool g_any_alert = false;
 
 // LVGL GUI state (root).
 lv_obj_t* g_ui_label_title = nullptr;
 lv_obj_t* g_ui_label_peers = nullptr;
-lv_obj_t* g_ui_table = nullptr;
+lv_obj_t* g_ui_label_uptime = nullptr;
+lv_obj_t* g_ui_tile_container = nullptr;
 volatile bool g_gui_dirty = false;
+
+volatile size_t g_ui_peers = 0;
+
 
 Board* g_board = nullptr;
 
 namespace {
 
-void GuiRebuildTable();  // Forward declaration.
+void GuiRebuildTiles();  // forward
+
+// ---------------------------------------------------------------------------
+// Storage helpers
+// ---------------------------------------------------------------------------
 
 int LoadStorageVersion() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
@@ -127,7 +163,6 @@ void SaveStorageVersion(int version) {
 }
 
 void LoadLabels() {
-  // v1 and v2 both use "labels" as JSON.
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const String json = g_root_preferences.getString("labels", "");
   g_root_preferences.end();
@@ -151,10 +186,38 @@ void SaveLabels() {
 
 void EraseLabels() {
   g_labels.clear();
-  g_last_seen["nodes"].to<JsonObject>();  // keep structure sane
+  g_last_seen["nodes"].to<JsonObject>();
   g_labels["nodes"].to<JsonObject>();
   g_labels["sensors"].to<JsonObject>();
   SaveLabels();
+}
+
+void SaveLimits() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putFloat("warn_low_c", g_warn_low_c);
+  g_root_preferences.putFloat("warn_high_c", g_warn_high_c);
+  g_root_preferences.putFloat("alert_low_c", g_alert_low_c);
+  g_root_preferences.putFloat("alert_high_c", g_alert_high_c);
+  g_root_preferences.end();
+}
+
+void LoadLimits() {
+  // Start from whatever defaults are in the globals; only override with valid ranges.
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const float wl = g_root_preferences.getFloat("warn_low_c", g_warn_low_c);
+  const float wh = g_root_preferences.getFloat("warn_high_c", g_warn_high_c);
+  const float al = g_root_preferences.getFloat("alert_low_c", g_alert_low_c);
+  const float ah = g_root_preferences.getFloat("alert_high_c", g_alert_high_c);
+  g_root_preferences.end();
+
+  if (wh > wl) {
+    g_warn_low_c = wl;
+    g_warn_high_c = wh;
+  }
+  if (ah > al) {
+    g_alert_low_c = al;
+    g_alert_high_c = ah;
+  }
 }
 
 void LoadDisplayUnits() {
@@ -190,6 +253,26 @@ void SaveHighlightSettings() {
   g_root_preferences.end();
 }
 
+void SaveBuzzerSettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putULong("beep_len_ms",       g_beep_len_ms);
+  g_root_preferences.putULong("beep_gap_warn_ms",  g_beep_gap_warn_ms);
+  g_root_preferences.putULong("beep_gap_alert_ms", g_beep_gap_alert_ms);
+  g_root_preferences.end();
+}
+
+void LoadBuzzerSettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const uint32_t len  = g_root_preferences.getULong("beep_len_ms",       kDefaultBeepLenMs);
+  const uint32_t gw   = g_root_preferences.getULong("beep_gap_warn_ms",  kDefaultGapWarnMs);
+  const uint32_t ga   = g_root_preferences.getULong("beep_gap_alert_ms", kDefaultGapAlertMs);
+  g_root_preferences.end();
+
+  g_beep_len_ms       = (len > 0) ? len : kDefaultBeepLenMs;
+  g_beep_gap_warn_ms  = gw;
+  g_beep_gap_alert_ms = ga;
+}
+
 void EnsureDocuments() {
   if (!g_last_seen["nodes"].is<JsonObject>()) {
     g_last_seen["nodes"].to<JsonObject>();
@@ -202,12 +285,11 @@ void EnsureDocuments() {
   }
 }
 
-// Migrate v1 -> v2 and load settings.
 void MigrateStorageIfNeeded() {
   const int version = LoadStorageVersion();
 
-  if (version == 0) {
-    // Unversioned: treat as v1 (labels only) if present.
+  if (version == 0 || version == 1) {
+    // Old: labels only.
     LoadLabels();
     EnsureDocuments();
 
@@ -218,32 +300,74 @@ void MigrateStorageIfNeeded() {
     g_stale_minutes_threshold = 10;
     SaveHighlightSettings();
 
+    // Initialize default limits and persist.
+    g_warn_low_c   = 5.0f;
+    g_warn_high_c  = 26.0f;
+    g_alert_low_c  = 3.0f;
+    g_alert_high_c = 30.0f;
+    SaveLimits();
+
+    // New in v4: buzzer defaults.
+    g_beep_len_ms       = kDefaultBeepLenMs;
+    g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+    g_beep_gap_alert_ms = kDefaultGapAlertMs;
+    SaveBuzzerSettings();
+
     SaveStorageVersion(kStorageVersionCurrent);
     return;
   }
 
-  if (version == 1) {
-    // v1: labels already handled in old format.
+  if (version == 2) {
+    // v2: had units + highlight; no stored limits/buzzer yet.
     LoadLabels();
     EnsureDocuments();
+    LoadDisplayUnits();
+    LoadHighlightSettings();
 
-    g_display_fahrenheit = true;
-    SaveDisplayUnits();
+    g_warn_low_c   = 5.0f;
+    g_warn_high_c  = 26.0f;
+    g_alert_low_c  = 3.0f;
+    g_alert_high_c = 30.0f;
+    SaveLimits();
 
-    g_highlight_missing_nodes = true;
-    g_stale_minutes_threshold = 10;
-    SaveHighlightSettings();
+    g_beep_len_ms       = kDefaultBeepLenMs;
+    g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+    g_beep_gap_alert_ms = kDefaultGapAlertMs;
+    SaveBuzzerSettings();
 
     SaveStorageVersion(kStorageVersionCurrent);
     return;
   }
 
-  // v2 or higher: load normally.
+  if (version == 3) {
+    // v3: had limits; add buzzer settings.
+    LoadLabels();
+    EnsureDocuments();
+    LoadDisplayUnits();
+    LoadHighlightSettings();
+    LoadLimits();
+
+    g_beep_len_ms       = kDefaultBeepLenMs;
+    g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+    g_beep_gap_alert_ms = kDefaultGapAlertMs;
+    SaveBuzzerSettings();
+
+    SaveStorageVersion(kStorageVersionCurrent);
+    return;
+  }
+
+  // v4+ normal load.
   LoadLabels();
   EnsureDocuments();
   LoadDisplayUnits();
   LoadHighlightSettings();
+  LoadLimits();
+  LoadBuzzerSettings();
 }
+
+// ---------------------------------------------------------------------------
+// Display + GUI setup
+// ---------------------------------------------------------------------------
 
 void DisplayInit() {
   Serial.println(F("[Display] Init board"));
@@ -305,39 +429,82 @@ void GuiInit() {
   }
 
   lv_obj_t* screen = lv_scr_act();
+  lv_obj_set_style_pad_all(screen, 0, 0);
 
-  g_ui_label_title = lv_label_create(screen);
-  lv_label_set_text(g_ui_label_title, "MeshTemps — ROOT");
-  lv_obj_align(g_ui_label_title, LV_ALIGN_TOP_LEFT, 6, 4);
+  // Disable all scrolling on the root screen
+  lv_obj_clear_flag(screen, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
 
-  g_ui_label_peers = lv_label_create(screen);
+  // Top bar.
+  lv_obj_t* bar = lv_obj_create(screen);
+  lv_obj_set_size(bar, lv_pct(100), 36);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
+  lv_obj_set_style_pad_all(bar, 4, 0);
+  lv_obj_set_style_radius(bar, 0, 0);
+  lv_obj_set_style_border_width(bar, 0, 0);
+  lv_obj_set_style_bg_color(bar, lv_color_make(0x20, 0x20, 0x20), 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  // White text on dark bar
+  lv_obj_set_style_text_color(bar, lv_color_white(), 0);
+
+  lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(bar, LV_SCROLLBAR_MODE_OFF);
+
+  g_ui_label_peers = lv_label_create(bar);
   lv_label_set_text(g_ui_label_peers, "Peers: 0");
-  lv_obj_align(g_ui_label_peers, LV_ALIGN_TOP_RIGHT, -6, 4);
+  lv_obj_align(g_ui_label_peers, LV_ALIGN_LEFT_MID, 4, 0);
 
-  g_ui_table = lv_table_create(screen);
-  lv_obj_set_size(g_ui_table, lv_pct(100), lv_pct(100));
-  lv_obj_align(g_ui_table, LV_ALIGN_BOTTOM_MID, 0, -2);
-  lv_table_set_col_cnt(g_ui_table, 6);
-  lv_table_set_row_cnt(g_ui_table, 1);
+  g_ui_label_title = lv_label_create(bar);
+  lv_label_set_text(g_ui_label_title, "Room Temps");
+  lv_obj_align(g_ui_label_title, LV_ALIGN_CENTER, 0, 0);
 
-  lv_table_set_cell_value(g_ui_table, 0, 0, "Node");
-  lv_table_set_cell_value(g_ui_table, 0, 1, "Location");
-  lv_table_set_cell_value(g_ui_table, 0, 2, "Addr");
-  lv_table_set_cell_value(g_ui_table, 0, 3, "Label");
+  g_ui_label_uptime = lv_label_create(bar);
+  lv_label_set_text(g_ui_label_uptime, "0:00");
+  lv_obj_align(g_ui_label_uptime, LV_ALIGN_RIGHT_MID, -4, 0);
 
-  if (g_display_fahrenheit) {
-    lv_table_set_cell_value(g_ui_table, 0, 4, "Temp \xC2\xB0""F");
-  } else {
-    lv_table_set_cell_value(g_ui_table, 0, 4, "Temp \xC2\xB0""C");
+  // Tile container below the bar.
+  g_ui_tile_container = lv_obj_create(screen);
+
+  // Work out available height so we don't overlap the bar.
+  lv_coord_t scr_h = lv_obj_get_height(screen);
+  if (scr_h == 0) {
+    lv_disp_t* disp = lv_disp_get_default();
+    if (disp) {
+      scr_h = lv_disp_get_ver_res(disp);
+    }
   }
 
-  lv_table_set_cell_value(g_ui_table, 0, 5, "Age(min)");
+  const lv_coord_t bar_h = lv_obj_get_height(bar);
+  lv_coord_t cont_h = (scr_h > bar_h) ? (scr_h - bar_h) : scr_h;
+
+  lv_obj_set_size(g_ui_tile_container, lv_pct(100), cont_h);
+  lv_obj_align_to(g_ui_tile_container, bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+
+  lv_obj_set_style_pad_all(g_ui_tile_container, 6, 0);
+  lv_obj_set_style_pad_row(g_ui_tile_container, 6, 0);
+  lv_obj_set_style_pad_column(g_ui_tile_container, 6, 0);
+  lv_obj_set_style_bg_opa(g_ui_tile_container, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(g_ui_tile_container, 0, 0);
+
+  lv_obj_set_flex_flow(g_ui_tile_container, LV_FLEX_FLOW_ROW_WRAP);
+  lv_obj_set_flex_align(g_ui_tile_container,
+                        LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START);
+
+  // No scrolling for the tile container.
+  lv_obj_clear_flag(g_ui_tile_container, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(g_ui_tile_container, LV_SCROLLBAR_MODE_OFF);
+
+  // Ensure the bar is always drawn on top of tiles.
+  lv_obj_move_foreground(bar);
 
   g_gui_dirty = true;
 
   lvgl_port_unlock();
 }
 
+// Called when node metadata changes.
 void GuiUpdateNodeSummary(const char* node_id,
                           int bus_gpio,
                           uint32_t last_ms) {
@@ -347,6 +514,7 @@ void GuiUpdateNodeSummary(const char* node_id,
   g_gui_dirty = true;
 }
 
+// Called when sensor data changes.
 void GuiUpdateSensorRow(const char* node_id,
                         const char* addr,
                         float temp_f,
@@ -360,42 +528,86 @@ void GuiUpdateSensorRow(const char* node_id,
   g_gui_dirty = true;
 }
 
-}  // namespace
-
-void GuiUpdateNetwork(size_t peers) {
-  if (!lvgl_port_lock(-1)) {
+void UpdateUptimeLabel() {
+  if (g_ui_label_uptime == nullptr) {
     return;
   }
+  const uint32_t seconds = millis() / 1000U;
+  const uint32_t minutes = seconds / 60U;
+  const uint32_t hours   = minutes / 60U;
 
-  if (g_ui_label_peers != nullptr) {
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "Peers: %u",
-             static_cast<unsigned>(peers));
-    lv_label_set_text(g_ui_label_peers, buffer);
-  }
+  char buffer[16];
+  // Always show HH:MM (hours can go above 99 fine).
+  snprintf(buffer, sizeof(buffer), "%02lu:%02lu",
+           static_cast<unsigned long>(hours),
+           static_cast<unsigned long>(minutes % 60U));
 
-  lvgl_port_unlock();
+  lv_label_set_text(g_ui_label_uptime, buffer);
 }
 
-void GuiRequestRender() {
-  g_gui_dirty = true;
-}
+// Dummy data injection (non-persistent).
+void BuildDummyData() {
+  g_last_seen.clear();
+  EnsureDocuments();
 
-namespace {
-
-void GuiRebuildTable() {
-  if (g_ui_table == nullptr) {
-    return;
-  }
-
-  lv_table_set_row_cnt(g_ui_table, 1);
-
+  JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
   const uint32_t now_ms = millis();
+
+  for (int i = 1; i <= 10; ++i) {
+    const String node_key = String(1000 + i);
+    JsonObject node_obj = nodes[node_key].to<JsonObject>();
+    node_obj["busGpio"] = -1;
+    node_obj["last"] = now_ms;
+
+    const String loc = String("Dummy ") + String(i);
+    g_labels["nodes"][node_key] = loc;
+
+    JsonObject sensors = node_obj["sensors"].to<JsonObject>();
+
+    char addr1[17];
+    char addr2[17];
+    snprintf(addr1, sizeof(addr1), "D%02d000000000001", i);
+    snprintf(addr2, sizeof(addr2), "D%02d000000000002", i);
+
+    JsonObject s1 = sensors[addr1].to<JsonObject>();
+    JsonObject s2 = sensors[addr2].to<JsonObject>();
+
+    g_labels["sensors"][addr1] = "Sensor 1";
+    g_labels["sensors"][addr2] = "Sensor 2";
+
+    const float base = 20.0f + static_cast<float>(i);
+
+    s1["tC"] = base;
+    s1["corr"] = false;
+    s1["last"] = now_ms;
+
+    s2["tC"] = base + 5.0f;
+    s2["corr"] = false;
+    s2["last"] = now_ms;
+  }
+}
+
+// Placeholder buzzer.
+void BuzzerBeepOnce() {
+  // TODO: wire to actual buzzer pin.
+  DLOG("[BUZZER] Beep\n");
+}
+
+// ---------------------------------------------------------------------------
+// Tile rebuild
+// ---------------------------------------------------------------------------
+
+void GuiRebuildTiles() {
+  if (g_ui_tile_container == nullptr) {
+    return;
+  }
+
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
 
-  // Snapshot connected node IDs.
-  std::vector<uint32_t> connected_ids = mesh.getNodeList();
+  // Snapshot current connections.
+  auto node_list = mesh.getNodeList();
+  std::vector<uint32_t> connected_ids(node_list.begin(), node_list.end());
 
   auto is_connected = [&](uint32_t node_id) -> bool {
     for (uint32_t id : connected_ids) {
@@ -406,158 +618,368 @@ void GuiRebuildTable() {
     return false;
   };
 
-  auto set_row_color = [&](uint16_t row_index, lv_color_t color) {
-    for (uint16_t col = 0; col < 6; ++col) {
-      lv_table_set_cell_bg_color(g_ui_table, row_index, col, color);
-    }
-  };
+  g_any_warning = false;
+  g_any_alert = false;
 
+  lv_obj_clean(g_ui_tile_container);
 
-  uint16_t row = 1;
+  const uint32_t now_ms = millis();
+
+  // Tile geometry heuristic: 3 columns on wide, 2 on narrower.
+  const lv_coord_t screen_w = lv_obj_get_width(lv_scr_act());
+  const int columns = (screen_w >= 640) ? 3 : 2;
+  const lv_coord_t gap = 6;
+  const lv_coord_t tile_w =
+      (screen_w - (columns + 1) * gap) / columns;
+  const lv_coord_t tile_h = 100;  // enough for labels
 
   for (JsonPair node_entry : nodes) {
     const String node_id_str = node_entry.key().c_str();
     JsonObject node_obj = node_entry.value();
 
-    const String node_label = g_labels["nodes"][node_id_str] | "";
+    String loc = g_labels["nodes"][node_id_str] | "";
+
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
 
-    // Parse node ID as decimal for connection test; if it fails, treat as not connected.
+    // Parse ID for connection status; if not numeric, treat as not connected.
     char* endptr = nullptr;
     const uint32_t node_id_u32 =
         static_cast<uint32_t>(strtoul(node_id_str.c_str(), &endptr, 10));
     const bool node_connected =
         (endptr != node_id_str.c_str()) && is_connected(node_id_u32);
 
-    bool has_sensor_rows = false;
+    // Compute age (minutes) from newest sensor last, or node last.
+    uint32_t latest_ms = node_obj["last"] | 0U;
 
     for (JsonPair sensor_entry : sensors) {
-      has_sensor_rows = true;
+      JsonObject s = sensor_entry.value();
+      const uint32_t s_last = s["last"] | 0U;
+      if (s_last > latest_ms) {
+        latest_ms = s_last;
+      }
+    }
+
+    const uint32_t age_min =
+        (latest_ms <= now_ms)
+            ? (now_ms - latest_ms) / 60000U
+            : 0U;
+
+    const bool is_missing =
+        g_highlight_missing_nodes &&
+        !node_connected &&
+        (g_stale_minutes_threshold > 0) &&
+        (age_min >= g_stale_minutes_threshold);
+
+    const bool is_stale =
+        node_connected &&
+        g_stale_minutes_threshold > 0 &&
+        age_min >= g_stale_minutes_threshold;
+
+    bool node_has_warning = false;
+    bool node_has_alert = false;
+
+    // Create tile.
+    lv_obj_t* tile = lv_obj_create(g_ui_tile_container);
+    lv_obj_set_size(tile, tile_w, tile_h);
+    lv_obj_set_style_radius(tile, 12, 0);
+    lv_obj_set_style_pad_all(tile, 6, 0);
+    lv_obj_set_style_border_width(tile, 0, 0);
+    lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(tile, LV_SCROLLBAR_MODE_OFF);
+
+
+    // Determine colors based on status and thresholds.
+    // Priority: alert > missing > (stale or warn) > normal.
+    // Thresholds are applied on °C values.
+    // Base: normal (healthy) tile.
+    lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24);  // dark green
+    lv_color_t fg = lv_color_white();                 // headers on tile
+
+
+
+    // Inspect up to two sensors for display and status.
+    struct SensorView {
+      String label;
+      float temp_c = NAN;
+      bool has_value = false;
+      bool is_alert = false;
+      bool is_warning = false;
+    };
+    SensorView sv[2];
+    int sv_count = 0;
+
+    for (JsonPair sensor_entry : sensors) {
+      if (sv_count >= 2) {
+        break;
+      }
 
       const String addr = sensor_entry.key().c_str();
-      JsonObject sensor_obj = sensor_entry.value();
+      JsonObject s = sensor_entry.value();
 
-      const float temp_c = sensor_obj["tC"] | NAN;
-      const bool corrected = sensor_obj["corr"] | false;
-      const uint32_t last_ms = sensor_obj["last"] | 0U;
-      const String sensor_label = g_labels["sensors"][addr] | "";
-
-      const uint32_t age_min =
-          (last_ms <= now_ms)
-              ? (now_ms - last_ms) / 60000U
-              : 0U;
-
-      float temp_display = temp_c;
-      if (!isnan(temp_c) && g_display_fahrenheit) {
-        temp_display = temp_c * 1.8f + 32.0f;
+      SensorView& v = sv[sv_count++];
+      v.label = (g_labels["sensors"][addr] | "");
+      if (v.label.isEmpty()) {
+        v.label = addr;
       }
 
-      lv_table_set_row_cnt(g_ui_table, row + 1);
+      if (s["tC"].is<float>()) {
+        v.temp_c = s["tC"].as<float>();
+        v.has_value = !isnan(v.temp_c);
+      }
 
-      lv_table_set_cell_value(g_ui_table, row, 0, node_id_str.c_str());
-      lv_table_set_cell_value(g_ui_table, row, 1, node_label.c_str());
-      lv_table_set_cell_value(g_ui_table, row, 2, addr.c_str());
-      lv_table_set_cell_value(g_ui_table, row, 3, sensor_label.c_str());
+      if (v.has_value) {
+        const float t = v.temp_c;
 
-      char temp_buffer[24];
-      if (isnan(temp_display)) {
-        strlcpy(temp_buffer, "--", sizeof(temp_buffer));
+        if (!isnan(g_alert_low_c) && t < g_alert_low_c) {
+          v.is_alert = true;
+        }
+        if (!isnan(g_alert_high_c) && t > g_alert_high_c) {
+          v.is_alert = true;
+        }
+
+        if (!v.is_alert) {
+          if (!isnan(g_warn_low_c) && t < g_warn_low_c) {
+            v.is_warning = true;
+          }
+          if (!isnan(g_warn_high_c) && t > g_warn_high_c) {
+            v.is_warning = true;
+          }
+        }
+      }
+
+      if (v.is_alert) {
+        node_has_alert = true;
+      } else if (v.is_warning) {
+        node_has_warning = true;
+      }
+    }
+
+    if (node_has_alert) {
+      // Strong red for alerts.
+      bg = lv_color_make(0xB7, 0x1C, 0x1C);          // deep red
+      fg = lv_color_white();
+      g_any_alert = true;
+
+    } else if (is_stale || node_has_warning) {
+      // Dark amber, not pale yellow: keeps contrast for bright text.
+      bg = lv_color_make(0x8A, 0x5A, 0x00);          // dark amber
+      fg = lv_color_white();
+
+      if (node_has_warning || is_stale) {
+        g_any_warning = true;
+      }
+
+    } else if (is_missing) {
+      // Muted blue-gray for offline/missing.
+      bg = lv_color_make(0x20, 0x40, 0x60);
+      fg = lv_color_white();
+
+    } else {
+      // keep normal dark green
+    }
+
+    lv_obj_set_style_bg_color(tile, bg, 0);
+    lv_obj_set_style_bg_opa(tile, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(tile, fg, 0);
+
+    // Location (top, larger, centered).
+    lv_obj_t* label_loc = lv_label_create(tile);
+    {
+      String text = loc.isEmpty() ? node_id_str : loc;
+      lv_label_set_text(label_loc, text.c_str());
+      lv_obj_set_width(label_loc, lv_pct(100));
+      lv_obj_set_style_text_align(label_loc, LV_TEXT_ALIGN_CENTER, 0);
+      lv_obj_align(label_loc, LV_ALIGN_TOP_MID, 0, 0);
+
+      // Make it bigger
+      lv_obj_set_style_text_font(label_loc, &lv_font_montserrat_16, 0);
+    }
+
+    // Age (minutes, small, centered).
+    lv_obj_t* label_age = lv_label_create(tile);
+    {
+      char buf[24];
+      snprintf(buf, sizeof(buf), "Age: %lu min",
+               static_cast<unsigned long>(age_min));
+      lv_label_set_text(label_age, buf);
+      lv_obj_set_width(label_age, lv_pct(100));
+      lv_obj_set_style_text_align(label_age, LV_TEXT_ALIGN_CENTER, 0);
+      lv_obj_align(label_age, LV_ALIGN_TOP_MID, 0, 20);
+    }
+
+    // Sensor rows (bottom).
+    for (int i = 0; i < sv_count; ++i) {
+      const SensorView& v = sv[i];
+
+      lv_obj_t* label = lv_label_create(tile);
+
+      char buf[64];
+      if (!v.has_value) {
+        snprintf(buf, sizeof(buf), "%s: --", v.label.c_str());
       } else {
-        snprintf(temp_buffer,
-                sizeof(temp_buffer),
-                "%.2f%s",
-                temp_display,
-                corrected ? " *" : "");
-      }
-      lv_table_set_cell_value(g_ui_table, row, 4, temp_buffer);
+        float temp_disp = v.temp_c;
+        if (g_display_fahrenheit) {
+          temp_disp = temp_disp * 1.8f + 32.0f;
+        }
+        const char unit_ch = g_display_fahrenheit ? 'F' : 'C';
 
-      char age_buffer[12];
-      snprintf(age_buffer,
-              sizeof(age_buffer),
-              "%lu",
-              static_cast<unsigned long>(age_min));
-      lv_table_set_cell_value(g_ui_table, row, 5, age_buffer);
-
-      // Determine row color.
-      lv_color_t row_color = lv_color_white();
-
-      const bool missing = g_highlight_missing_nodes && !node_connected;
-      const bool stale =
-          node_connected &&
-          g_stale_minutes_threshold > 0 &&
-          age_min >= g_stale_minutes_threshold;
-
-      if (missing) {
-        row_color = lv_color_yellow();
-      } else if (stale) {
-        row_color = lv_color_make(0xFF, 0x80, 0x80);  // light red
+        snprintf(buf, sizeof(buf),
+                "%s: %.1f%c",
+                v.label.c_str(),
+                static_cast<double>(temp_disp),
+                unit_ch);
       }
 
-      set_row_color(row, row_color);
+      lv_label_set_text(label, buf);
 
-      ++row;
+      // Decide per-sensor color based on *that sensor's* severity
+      // and the tile's status context.
+      lv_color_t sensor_color;
+
+      // No reading: dim gray, regardless of tile.
+      if (!v.has_value) {
+        sensor_color = lv_color_make(0xCC, 0xCC, 0xCC);  // light gray
+
+      } else if (v.is_alert) {
+        // Super high contrast on both red and dark backgrounds.
+        sensor_color = lv_color_make(0xFF, 0xFF, 0x80);  // bright yellow
+
+      } else if (v.is_warning) {
+        // Also bright; stands out on dark amber and green.
+        sensor_color = lv_color_make(0xFF, 0xD7, 0x00);  // gold
+
+      } else {
+        // Normal sensor on this tile:
+        if (node_has_alert) {
+          // On alert tile: still readable but less "screamy" than alert.
+          sensor_color = lv_color_make(0xFF, 0xE0, 0xE0);  // soft light pink/white
+        } else if (is_stale || node_has_warning) {
+          // On warning/amber: light warm text, NOT green vs yellow.
+          sensor_color = lv_color_make(0xFF, 0xF7, 0xE0);  // warm cream
+        } else if (is_missing) {
+          // On missing: muted.
+          sensor_color = lv_color_make(0xB0, 0xBE, 0xC5);  // blue-gray
+        } else {
+          // Normal tile: subtle but clear.
+          sensor_color = lv_color_make(0xE0, 0xFF, 0xE0);  // light green
+        }
+      }
+
+      lv_obj_set_style_text_color(label, sensor_color, 0);
+
+
+
+      // Align near bottom with some spacing.
+      const int y_offset = (sv_count == 1)
+                               ? -8
+                               : (i == 0 ? -26 : -8);
+      lv_obj_align(label, LV_ALIGN_BOTTOM_LEFT, 0, y_offset);
     }
-
-    // If no sensors recorded yet: placeholder row for this node.
-    if (!has_sensor_rows) {
-      lv_table_set_row_cnt(g_ui_table, row + 1);
-
-      const uint32_t last_ms = node_obj["last"] | 0U;
-      const uint32_t age_min =
-          (last_ms <= now_ms)
-              ? (now_ms - last_ms) / 60000U
-              : 0U;
-
-      lv_table_set_cell_value(g_ui_table, row, 0, node_id_str.c_str());
-      lv_table_set_cell_value(g_ui_table, row, 1, node_label.c_str());
-      lv_table_set_cell_value(g_ui_table, row, 2, "--");
-      lv_table_set_cell_value(g_ui_table, row, 3, "");
-      lv_table_set_cell_value(g_ui_table, row, 4, "--");
-
-      char age_buffer[12];
-      snprintf(age_buffer,
-              sizeof(age_buffer),
-              "%lu",
-              static_cast<unsigned long>(age_min));
-      lv_table_set_cell_value(g_ui_table, row, 5, age_buffer);
-
-      lv_color_t row_color = lv_color_white();
-
-      const bool missing = g_highlight_missing_nodes && !node_connected;
-      const bool stale =
-          node_connected &&
-          g_stale_minutes_threshold > 0 &&
-          age_min >= g_stale_minutes_threshold;
-
-      if (missing) {
-        row_color = lv_color_yellow();
-      } else if (stale) {
-        row_color = lv_color_make(0xFF, 0x80, 0x80);
-      }
-
-      set_row_color(row, row_color);
-
-      ++row;
-    }
-
   }
+}
 
+}  // namespace
+
+// -----------------------------------------------------------------------------
+// GUI helpers callable from elsewhere
+// -----------------------------------------------------------------------------
+
+void GuiUpdateNetwork(size_t peers) {
+  g_ui_peers = peers;
+  g_gui_dirty = true;
 }
 
 
+void GuiRequestRender() {
+  g_gui_dirty = true;
+}
+
+// -----------------------------------------------------------------------------
+// Display loop: rebuild tiles + buzzer + periodic refresh
+// -----------------------------------------------------------------------------
+
 void DisplayLoop() {
   static uint32_t last_build_ms = 0;
+  static uint32_t last_force_ms = 0;
 
   const uint32_t now_ms = millis();
+
+  // Force a full GUI rebuild at least once per minute to refresh age/status.
+  if (now_ms - last_force_ms >= 60000U) {
+    g_gui_dirty = true;
+    last_force_ms = now_ms;
+  }
+
   if (g_gui_dirty && (now_ms - last_build_ms >= 50U)) {
-    if (lvgl_port_lock(10)) {
+    if (lvgl_port_lock(-1)) {
       g_gui_dirty = false;
-      GuiRebuildTable();
+
+      if (g_ui_label_peers != nullptr) {
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "Peers: %u",
+                 static_cast<unsigned>(g_ui_peers));
+        lv_label_set_text(g_ui_label_peers, buffer);
+      }
+
+      GuiRebuildTiles();
+      UpdateUptimeLabel();
       lvgl_port_unlock();
       last_build_ms = now_ms;
     }
   }
 }
+
+void BuzzerLoop() {
+  // Static state so we can be called every loop() tick.
+  static bool     buzzer_on     = false;
+  static uint32_t beep_start_ms = 0;
+  static uint32_t last_beep_ms  = 0;
+
+  const uint32_t now_ms = millis();
+
+  // Priority: ALERT > WARNING (warning includes stale/etc via g_any_warning).
+  const bool have_alert   = g_any_alert;
+  const bool have_warning = (!have_alert && g_any_warning);
+
+  uint32_t gap_ms = 0;
+  if (have_alert) {
+    gap_ms = g_beep_gap_alert_ms;
+  } else if (have_warning) {
+    gap_ms = g_beep_gap_warn_ms;
+  }
+
+  // If no conditions or disabled, ensure buzzer is off and reset schedule.
+  if ((!have_alert && !have_warning) ||
+      gap_ms == 0 ||
+      g_beep_len_ms == 0) {
+    if (buzzer_on) {
+      digitalWrite(kBuzzerPin, LOW);
+      buzzer_on = false;
+    }
+    last_beep_ms = 0;
+    return;
+  }
+
+  if (buzzer_on) {
+    // Turn off after configured beep length.
+    if (now_ms - beep_start_ms >= g_beep_len_ms) {
+      digitalWrite(kBuzzerPin, LOW);
+      buzzer_on = false;
+      last_beep_ms = now_ms;
+    }
+  } else {
+    // Start a beep if it's the first one or the gap has elapsed.
+    if (last_beep_ms == 0 || now_ms - last_beep_ms >= gap_ms) {
+      digitalWrite(kBuzzerPin, HIGH);
+      buzzer_on = true;
+      beep_start_ms = now_ms;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Root announce and console
+// -----------------------------------------------------------------------------
 
 void RootAnnounce() {
   JsonDocument doc;
@@ -577,14 +999,11 @@ void ProcessConsoleRoot() {
 
   while (Serial.available() > 0) {
     const char ch = static_cast<char>(Serial.read());
-
     if (ch == '\r') {
       continue;
     }
-
     if (ch != '\n') {
       input_line += ch;
-
       if (input_line.length() > kMaxConsoleLineLength) {
         const int excess =
             static_cast<int>(input_line.length()) -
@@ -595,7 +1014,6 @@ void ProcessConsoleRoot() {
     }
 
     input_line.trim();
-
     if (input_line.length() == 0) {
       Serial.println(F("ok"));
       input_line = "";
@@ -607,7 +1025,6 @@ void ProcessConsoleRoot() {
 
     const int line_length = static_cast<int>(input_line.length());
     int field_start = 0;
-
     for (int i = 0; i < line_length; ++i) {
       if (isspace(static_cast<unsigned char>(input_line[i]))) {
         if (i > field_start) {
@@ -616,7 +1033,6 @@ void ProcessConsoleRoot() {
         field_start = i + 1;
       }
     }
-
     if (field_start < line_length) {
       tokens.push_back(input_line.substring(field_start));
     }
@@ -639,6 +1055,11 @@ void ProcessConsoleRoot() {
       Serial.println(F("  units c|f"));
       Serial.println(F("  highlight missing on|off"));
       Serial.println(F("  highlight stale <minutes>"));
+      Serial.println(F("  dummy on|off"));
+      Serial.println(F("  limits warn <low> <high>"));
+      Serial.println(F("  limits alert <low> <high>"));
+      Serial.println(F("  limits show"));
+      Serial.println(F("  buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>"));
     };
 
     if (command == "help" || command == "?") {
@@ -667,9 +1088,11 @@ void ProcessConsoleRoot() {
           JsonObject sensor_obj = sensor_entry.value();
 
           const float temp_c =
-              sensor_obj["tC"] | std::numeric_limits<float>::quiet_NaN();
+              sensor_obj["tC"] |
+              std::numeric_limits<float>::quiet_NaN();
           const bool corrected = sensor_obj["corr"] | false;
-          const String sensor_label = g_labels["sensors"][addr] | "";
+          const String sensor_label =
+              g_labels["sensors"][addr] | "";
 
           const char* temp_str =
               isnan(temp_c) ? "NaN" : String(temp_c, 2).c_str();
@@ -772,6 +1195,93 @@ void ProcessConsoleRoot() {
             F("ERR highlight (use 'highlight missing on|off' or "
               "'highlight stale <min>')"));
       }
+
+    } else if (command == "dummy" && tokens.size() >= 2) {
+      const String& mode = tokens[1];
+      if (mode == "on") {
+        g_use_dummy_data = true;
+        BuildDummyData();
+        Serial.println(F("dummy=on"));
+        GuiRequestRender();
+      } else if (mode == "off") {
+        g_use_dummy_data = false;
+        g_last_seen.clear();
+        EnsureDocuments();
+        Serial.println(F("dummy=off"));
+        GuiRequestRender();
+      } else {
+        Serial.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
+      }
+    } else if (command == "limits" && tokens.size() >= 2 && tokens[1] == "show") {
+      auto FromC = [&](float c) -> float {
+        return g_display_fahrenheit ? (c * 1.8f + 32.0f) : c;
+      };
+      const char* unit = g_display_fahrenheit ? "F" : "C";
+
+      Serial.printf("limits warn=%.2f..%.2f %s\n",
+                    FromC(g_warn_low_c),
+                    FromC(g_warn_high_c),
+                    unit);
+      Serial.printf("limits alert=%.2f..%.2f %s\n",
+                    FromC(g_alert_low_c),
+                    FromC(g_alert_high_c),
+                    unit);
+    } else if (command == "limits" && tokens.size() >= 4) {
+      const String& kind = tokens[1];
+      const float low_in  = tokens[2].toFloat();
+      const float high_in = tokens[3].toFloat();
+
+      if (high_in <= low_in) {
+        Serial.println(F("ERR limits (high must be > low)"));
+      } else {
+        auto ToC = [&](float v) -> float {
+          return g_display_fahrenheit ? (v - 32.0f) / 1.8f : v;
+        };
+        auto FromC = [&](float v) -> float {
+          return g_display_fahrenheit ? (v * 1.8f + 32.0f) : v;
+        };
+        const char* unit = g_display_fahrenheit ? "F" : "C";
+
+        if (kind == "warn") {
+          g_warn_low_c  = ToC(low_in);
+          g_warn_high_c = ToC(high_in);
+          SaveLimits();
+          Serial.printf("limits warn=%.2f..%.2f %s\n",
+                        FromC(g_warn_low_c),
+                        FromC(g_warn_high_c),
+                        unit);
+        } else if (kind == "alert") {
+          g_alert_low_c  = ToC(low_in);
+          g_alert_high_c = ToC(high_in);
+          SaveLimits();
+          Serial.printf("limits alert=%.2f..%.2f %s\n",
+                        FromC(g_alert_low_c),
+                        FromC(g_alert_high_c),
+                        unit);
+        } else {
+          Serial.println(
+              F("ERR limits (use 'limits warn <low> <high>' or "
+                "'limits alert <low> <high>' or 'limits show')"));
+        }
+      }
+    } else if (command == "buzzer" && tokens.size() >= 4) {
+      const long len_ms      = tokens[1].toInt();
+      const long gap_warn_ms = tokens[2].toInt();
+      const long gap_alert_ms= tokens[3].toInt();
+
+      if (len_ms <= 0 || gap_warn_ms < 0 || gap_alert_ms < 0) {
+        Serial.println(
+            F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>, gaps>=0)"));
+      } else {
+        g_beep_len_ms       = static_cast<uint32_t>(len_ms);
+        g_beep_gap_warn_ms  = static_cast<uint32_t>(gap_warn_ms);
+        g_beep_gap_alert_ms = static_cast<uint32_t>(gap_alert_ms);
+        SaveBuzzerSettings();
+        Serial.printf("buzzer len=%lu ms warn_gap=%lu ms alert_gap=%lu ms\n",
+                      static_cast<unsigned long>(g_beep_len_ms),
+                      static_cast<unsigned long>(g_beep_gap_warn_ms),
+                      static_cast<unsigned long>(g_beep_gap_alert_ms));
+      }
     } else {
       Serial.println(F("ERR (help)"));
     }
@@ -780,10 +1290,18 @@ void ProcessConsoleRoot() {
   }
 }
 
-// painlessMesh callbacks (names are ours; signatures must match).
+// -----------------------------------------------------------------------------
+// Mesh callbacks (root)
+// -----------------------------------------------------------------------------
+
 void OnReceiveRoot(uint32_t from, String& msg) {
   DLOG("[ROOT RX] from=%u len=%u: %s\n",
        from, static_cast<unsigned>(msg.length()), msg.c_str());
+
+  if (g_use_dummy_data) {
+    // In dummy mode, ignore real traffic to keep UI deterministic.
+    return;
+  }
 
   JsonDocument doc;
   if (deserializeJson(doc, msg) != DeserializationError::Ok) {
@@ -808,7 +1326,8 @@ void OnReceiveRoot(uint32_t from, String& msg) {
   node_obj["last"] = static_cast<uint32_t>(millis());
 
   const String node_id_str = String(node_id);
-  GuiUpdateNodeSummary(node_id_str.c_str(), bus_gpio,
+  GuiUpdateNodeSummary(node_id_str.c_str(),
+                       bus_gpio,
                        static_cast<uint32_t>(millis()));
 
   JsonObject sensors = node_obj["sensors"].to<JsonObject>();
@@ -836,8 +1355,7 @@ void OnReceiveRoot(uint32_t from, String& msg) {
     const float temp_c = sensor_out["tC"] | NAN;
     const float temp_f = isnan(temp_c) ? NAN : (1.8f * temp_c + 32.0f);
     const bool corrected = sensor_out["corr"] | false;
-    const char* label =
-        g_labels["sensors"][addr] | "";
+    const char* label = g_labels["sensors"][addr] | "";
 
     DLOG("    [%s]%s = %s%s\n",
          addr,
@@ -850,7 +1368,9 @@ void OnReceiveRoot(uint32_t from, String& msg) {
     GuiUpdateSensorRow(node_id_str.c_str(),
                        addr,
                        temp_f,
-                       (label != nullptr && strlen(label) > 0) ? label : nullptr,
+                       (label != nullptr && strlen(label) > 0)
+                           ? label
+                           : nullptr,
                        static_cast<uint32_t>(millis()));
   }
 
@@ -860,12 +1380,18 @@ void OnReceiveRoot(uint32_t from, String& msg) {
 void OnConnectionsChangedRoot() {
   LogConnections();
 
+  if (g_use_dummy_data) {
+    // Leave dummy view untouched.
+    GuiRequestRender();
+    return;
+  }
+
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
 
   const uint32_t now_ms = millis();
 
-  // Ensure each connected node has an entry with a last-seen timestamp.
+  // Ensure each connected node has an entry.
   for (const auto& node_id : mesh.getNodeList()) {
     const String key = String(node_id);
 
@@ -873,7 +1399,7 @@ void OnConnectionsChangedRoot() {
     if (node_obj.isNull()) {
       node_obj = nodes[key].to<JsonObject>();
     }
-    if (!node_obj.containsKey("last")) {
+    if (!node_obj["last"].is<uint32_t>()) {
       node_obj["last"] = now_ms;
     }
     if (!node_obj["sensors"].is<JsonObject>()) {
@@ -881,14 +1407,14 @@ void OnConnectionsChangedRoot() {
     }
   }
 
-  // Note: we do not delete stale nodes here; they simply age out visually.
+  // Do not delete nodes; they age out visually.
   GuiRequestRender();
 }
 
-
-}  // namespace
-
+// -----------------------------------------------------------------------------
 // Arduino entry points (root)
+// -----------------------------------------------------------------------------
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -896,13 +1422,16 @@ void setup() {
   g_last_seen.clear();
   g_labels.clear();
 
-  MigrateStorageIfNeeded();  // loads labels + units + highlight
+  MigrateStorageIfNeeded();
   EnsureDocuments();
 
   DisplayInit();
   GuiInit();
   GuiUpdateNetwork(0);
   GuiRequestRender();
+
+  pinMode(kBuzzerPin, OUTPUT);
+  digitalWrite(kBuzzerPin, LOW);
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);
@@ -926,6 +1455,7 @@ void setup() {
 void loop() {
   mesh.update();
   DisplayLoop();
+  BuzzerLoop();
   ProcessConsoleRoot();
 }
 
