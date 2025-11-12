@@ -23,8 +23,8 @@
 #define MICRO_CLI_H_
 
 #include <Arduino.h>
-#include <functional>
-#include <vector>
+#include <functional.h>
+#include <vector.h>
 
 namespace microcli {
 
@@ -231,6 +231,7 @@ private:
 } // namespace microcli
 
 #endif // MICRO_CLI_H_
+
 
 // -----------------------------------------------------------------------------
 // --- MeshTemps integration stubs --------------------------------------------
@@ -674,3 +675,4 @@ static void ProcessConsole_Modular() { (void)g_cli.Poll(); }
 //   Serial.println(F("ready. Type 'help'."));
 
 #endif // MESHTEMPS_INTEGRATION_SNIPPET
+*/

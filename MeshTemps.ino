@@ -354,28 +354,54 @@ static int GetNodeRank(const String &node_id) {
 // Key: "known"
 void SaveKnownTopology() {
   EnsureDocuments();
-  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
+  JsonObject nodes_cur = g_last_seen["nodes"].as<JsonObject>();
 
+  // Load prior snapshot (if any) so we can merge.
   JsonDocument kd;
-  JsonObject out_nodes = kd["nodes"].to<JsonObject>();
+  {
+    g_root_preferences.begin("meshroot", /*readOnly=*/true);
+    const String prev = g_root_preferences.getString("known", "");
+    g_root_preferences.end();
+    if (!prev.isEmpty()) {
+      (void)deserializeJson(kd, prev);  // best-effort
+    }
+  }
 
-  for (JsonPair n : nodes) {
-    const String node_id = n.key().c_str();
-    JsonObject nobj = n.value();
-    JsonObject sensors = nobj["sensors"].as<JsonObject>();
-    JsonArray arr = out_nodes[node_id].to<JsonArray>();
+  JsonObject nodes_out = kd["nodes"].to<JsonObject>();
+
+  // Merge: ensure every current node/sensor is present in the saved set.
+  for (JsonPair n : nodes_cur) {
+    const char* node_id = n.key().c_str();
+    JsonArray arr = nodes_out[node_id].to<JsonArray>();
+
+    // Build a small set to avoid duplicates.
+    std::vector<String> have;
+    have.reserve(arr.size());
+    for (JsonVariant v : arr) {
+      if (v.is<const char*>()) have.emplace_back(v.as<const char*>());
+    }
+
+    auto has = [&](const String& addr) {
+      for (const auto& x : have) if (x == addr) return true;
+      return false;
+    };
+
+    JsonObject sensors = n.value()["sensors"].as<JsonObject>();
     for (JsonPair s : sensors) {
-      arr.add(s.key().c_str());
+      const char* addr = s.key().c_str();
+      if (addr && strlen(addr) == 16 && !has(addr)) {
+        arr.add(addr);
+      }
     }
   }
 
   String json;
   serializeJson(kd, json);
-
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putString("known", json);
   g_root_preferences.end();
 }
+
 
 // Load topology and pre-populate g_last_seen so tiles render after reboot.
 // We seed "last" with now to start age at 0 and allow normal staleness aging.
@@ -993,6 +1019,76 @@ void GuiApplyFlashPhase() {
   }
 }
 
+// Update just the "Age: N min" labels and stale/missing state.
+// No layout work, no object (re)creation.
+static void GuiAgeTick(uint32_t now_ms) {
+  EnsureDocuments();
+  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
+
+  for (auto &kv : g_tiles) {
+    const String &node_id = kv.first;
+    TileWidgets &tw = kv.second;
+
+    JsonObject node_obj = nodes[node_id];
+    if (node_obj.isNull()) continue;
+
+    uint32_t latest_ms = node_obj["last"] | 0U;
+    JsonObject sensors = node_obj["sensors"].as<JsonObject>();
+    for (JsonPair s_entry : sensors) {
+      const uint32_t s_last = s_entry.value()["last"] | 0U;
+      if (s_last > latest_ms) latest_ms = s_last;
+    }
+
+    const uint32_t age_min = (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
+
+    // Update Age label text only (no relayout).
+    if (tw.label_age) {
+      char age_buf[24];
+      snprintf(age_buf, sizeof(age_buf), "Age: %lu min", (unsigned long)age_min);
+      lv_label_set_text(tw.label_age, age_buf);
+    }
+
+    // Re-evaluate stale/missing and only flip colors if state changed.
+    const bool was_missing = tw.is_missing;
+    const bool was_stale   = tw.is_stale;
+
+    const bool node_connected = false;  // tiles here are "known topology", connectivity is handled in full rebuilds
+    const bool is_missing = g_highlight_missing_nodes && !node_connected &&
+                            (g_stale_minutes_threshold > 0) &&
+                            (age_min >= g_stale_minutes_threshold);
+    const bool is_stale = node_connected && (g_stale_minutes_threshold > 0) &&
+                          (age_min >= g_stale_minutes_threshold);
+
+    if (is_missing != was_missing || is_stale != was_stale) {
+      tw.is_missing = is_missing;
+      tw.is_stale   = is_stale;
+
+      // Minimal recolor only; do not touch layout.
+      lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24);
+      lv_color_t fg = lv_color_white();
+
+      if (tw.node_has_alert) {
+        bg = lv_color_make(0xB7, 0x1C, 0x1C);
+      } else if (is_stale || tw.node_has_warning) {
+        bg = lv_color_make(0x8A, 0x5A, 0x00);
+      } else if (is_missing) {
+        bg = lv_color_make(0x20, 0x40, 0x60);
+      }
+
+      tw.bg_normal = bg;
+      tw.fg_normal = fg;
+
+      // Apply new base colors immediately (non-flash phase).
+      lv_obj_set_style_bg_color(tw.tile, tw.bg_normal, 0);
+      lv_obj_set_style_text_color(tw.label_loc, tw.fg_normal, 0);
+      lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
+      for (int i = 0; i < tw.sensor_count && tw.sensor_label[i]; ++i) {
+        lv_obj_set_style_text_color(tw.sensor_label[i], tw.sensor_color[i], 0);
+      }
+    }
+  }
+}
+
 void GuiRebuildTiles() {
   if (g_ui_tile_container == nullptr)
     return;
@@ -1299,11 +1395,16 @@ void DisplayLoop() {
     last_flash_ms = now_ms;
   }
 
-  // Periodic full GUI rebuild for age/status.
+  // Periodic light update for age/status text only (no full rebuild).
   if (now_ms - last_force_ms >= 60000U) {
-    g_gui_dirty = true;
+    if (lvgl_port_lock(-1)) {
+      GuiAgeTick(now_ms);
+      UpdateUptimeLabel();
+      lvgl_port_unlock();
+    }
     last_force_ms = now_ms;
   }
+
 
   if ((g_gui_dirty || g_flash_dirty) && (now_ms - last_build_ms >= 50U)) {
     if (lvgl_port_lock(-1)) {
