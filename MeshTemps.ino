@@ -20,7 +20,7 @@
 #include <array>
 #include <vector>
 
-using Address = std::array<uint8_t, 8>;  // DS18B20 64-bit ROM code
+using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
 
 // Linear: T_corr = a1 * T_raw + a0
 struct Coeff {
@@ -34,7 +34,7 @@ enum CalStage {
   kCalBoil,
 };
 
-#include "Config.h"  // Mesh / IO configuration, addrToHex()
+#include "Config.h" // Mesh / IO configuration, addrToHex()
 
 // -----------------------------------------------------------------------------
 // Shared mesh and logging
@@ -43,20 +43,20 @@ enum CalStage {
 Scheduler user_scheduler;
 painlessMesh mesh;
 
-bool g_debug_enabled = true;
+bool g_debug_enabled = false;
 
-#define DLOG(fmt, ...)                                       \
-  do {                                                       \
-    if (g_debug_enabled) {                                   \
-      Serial.printf((fmt), ##__VA_ARGS__);                   \
-    }                                                        \
+#define DLOG(fmt, ...)                                                         \
+  do {                                                                         \
+    if (g_debug_enabled) {                                                     \
+      Serial.printf((fmt), ##__VA_ARGS__);                                     \
+    }                                                                          \
   } while (0)
 
 // Forward declarations used on ROOT builds from LogConnections().
 #if MESH_IS_ROOT
 void GuiUpdateNetwork(size_t peers);
 void GuiRequestRender();
-#endif  // MESH_IS_ROOT
+#endif // MESH_IS_ROOT
 
 namespace {
 
@@ -67,44 +67,46 @@ void LogConnections() {
 #if MESH_IS_ROOT
   GuiUpdateNetwork(peer_count);
   GuiRequestRender();
-#endif  // MESH_IS_ROOT
+#endif // MESH_IS_ROOT
 }
 
-}  // namespace
+} // namespace
 
 // -----------------------------------------------------------------------------
 // ROOT BUILD
 // -----------------------------------------------------------------------------
 #if MESH_IS_ROOT
 
-#include <Preferences.h>
-#include <esp_display_panel.hpp>
-#include <lvgl.h>
-#include "lvgl_v8_port.h"
 #include "esp_panel_board_custom_conf.h"
-#include <map>
+#include "lvgl_v8_port.h"
+#include <Preferences.h>
+#include <algorithm> // for std::sort
+#include <esp_display_panel.hpp>
 #include <limits>
+#include <lvgl.h>
+#include <map>
 
 using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
 using esp_panel::drivers::LCD;
 
-constexpr int kStorageVersionCurrent = 5;
+constexpr int kStorageVersionCurrent = 6;
 
 // Buzzer (root)
 constexpr int kBuzzerPin = 6;
-constexpr uint32_t kDefaultBeepLenMs      = 150;    // ms buzzer ON
-constexpr uint32_t kDefaultGapWarnMs      = 10000;  // ms between warning beeps
-constexpr uint32_t kDefaultGapAlertMs     = 5000;   // ms between alert beeps
+constexpr uint32_t kDefaultBeepLenMs = 150;   // ms buzzer ON
+constexpr uint32_t kDefaultGapWarnMs = 10000; // ms between warning beeps
+constexpr uint32_t kDefaultGapAlertMs = 5000; // ms between alert beeps
 
-uint32_t g_beep_len_ms       = kDefaultBeepLenMs;
-uint32_t g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+uint32_t g_beep_len_ms = kDefaultBeepLenMs;
+uint32_t g_beep_gap_warn_ms = kDefaultGapWarnMs;
 uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
 
 // Flashing (root)
-constexpr uint32_t kDefaultFlashIntervalMs = 5000;  // ms between flash toggles; 0 = off
+constexpr uint32_t kDefaultFlashIntervalMs =
+    5000; // ms between flash toggles; 0 = off
 uint32_t g_flash_interval_ms = kDefaultFlashIntervalMs;
-bool g_flash_phase = false;  // toggled in DisplayLoop()
+bool g_flash_phase = false; // toggled in DisplayLoop()
 
 // Persistent root prefs.
 Preferences g_root_preferences;
@@ -117,9 +119,9 @@ JsonDocument g_labels;
 Task g_task_announce;
 
 // Units / highlight config.
-bool g_display_fahrenheit = true;          // true = °F, false = °C
+bool g_display_fahrenheit = true; // true = °F, false = °C
 bool g_highlight_missing_nodes = true;
-uint32_t g_stale_minutes_threshold = 5;   // minutes
+uint32_t g_stale_minutes_threshold = 5; // minutes
 
 // Dummy data mode (non-persistent).
 bool g_use_dummy_data = false;
@@ -135,26 +137,26 @@ bool g_any_warning = false;
 bool g_any_alert = false;
 
 // LVGL GUI state (root).
-lv_obj_t* g_ui_label_title = nullptr;
-lv_obj_t* g_ui_label_peers = nullptr;
-lv_obj_t* g_ui_label_uptime = nullptr;
-lv_obj_t* g_ui_tile_container = nullptr;
+lv_obj_t *g_ui_label_title = nullptr;
+lv_obj_t *g_ui_label_peers = nullptr;
+lv_obj_t *g_ui_label_uptime = nullptr;
+lv_obj_t *g_ui_tile_container = nullptr;
 
 volatile bool g_gui_dirty = false;
 volatile size_t g_ui_peers = 0;
 
-Board* g_board = nullptr;
+Board *g_board = nullptr;
 
 // Per-node persistent tile widgets.
 struct TileWidgets {
-  lv_obj_t* tile = nullptr;
-  lv_obj_t* label_loc = nullptr;
-  lv_obj_t* label_age = nullptr;
-  lv_obj_t* sensor_label[2] = {nullptr, nullptr};
+  lv_obj_t *tile = nullptr;
+  lv_obj_t *label_loc = nullptr;
+  lv_obj_t *label_age = nullptr;
+  lv_obj_t *sensor_label[2] = {nullptr, nullptr};
 
   // Base (non-flash) colors.
   lv_color_t bg_normal;
-  lv_color_t fg_normal;   // header + age
+  lv_color_t fg_normal; // header + age
 
   // Flash-phase colors (for warn/alert tiles).
   lv_color_t bg_flash;
@@ -177,7 +179,7 @@ volatile bool g_flash_dirty = false;
 
 namespace {
 
-void GuiRebuildTiles();  // forward
+void GuiRebuildTiles(); // forward
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -236,7 +238,8 @@ void SaveLimits() {
 }
 
 void LoadLimits() {
-  // Start from whatever defaults are in the globals; only override with valid ranges.
+  // Start from whatever defaults are in the globals; only override with valid
+  // ranges.
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const float wl = g_root_preferences.getFloat("warn_low_c", g_warn_low_c);
   const float wh = g_root_preferences.getFloat("warn_high_c", g_warn_high_c);
@@ -256,7 +259,7 @@ void LoadLimits() {
 
 void LoadDisplayUnits() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const int stored = g_root_preferences.getInt("units", 1);  // default °F
+  const int stored = g_root_preferences.getInt("units", 1); // default °F
   g_root_preferences.end();
   g_display_fahrenheit = (stored != 0);
 }
@@ -274,14 +277,12 @@ void LoadHighlightSettings() {
   g_root_preferences.end();
 
   g_highlight_missing_nodes = (missing != 0);
-  g_stale_minutes_threshold =
-      stale > 0 ? static_cast<uint32_t>(stale) : 10U;
+  g_stale_minutes_threshold = stale > 0 ? static_cast<uint32_t>(stale) : 10U;
 }
 
 void SaveHighlightSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putInt("hl_missing",
-                            g_highlight_missing_nodes ? 1 : 0);
+  g_root_preferences.putInt("hl_missing", g_highlight_missing_nodes ? 1 : 0);
   g_root_preferences.putInt("hl_stale_min",
                             static_cast<int>(g_stale_minutes_threshold));
   g_root_preferences.end();
@@ -289,21 +290,24 @@ void SaveHighlightSettings() {
 
 void SaveBuzzerSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putULong("beep_len_ms",       g_beep_len_ms);
-  g_root_preferences.putULong("beep_gap_warn_ms",  g_beep_gap_warn_ms);
+  g_root_preferences.putULong("beep_len_ms", g_beep_len_ms);
+  g_root_preferences.putULong("beep_gap_warn_ms", g_beep_gap_warn_ms);
   g_root_preferences.putULong("beep_gap_alert_ms", g_beep_gap_alert_ms);
   g_root_preferences.end();
 }
 
 void LoadBuzzerSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const uint32_t len  = g_root_preferences.getULong("beep_len_ms",       kDefaultBeepLenMs);
-  const uint32_t gw   = g_root_preferences.getULong("beep_gap_warn_ms",  kDefaultGapWarnMs);
-  const uint32_t ga   = g_root_preferences.getULong("beep_gap_alert_ms", kDefaultGapAlertMs);
+  const uint32_t len =
+      g_root_preferences.getULong("beep_len_ms", kDefaultBeepLenMs);
+  const uint32_t gw =
+      g_root_preferences.getULong("beep_gap_warn_ms", kDefaultGapWarnMs);
+  const uint32_t ga =
+      g_root_preferences.getULong("beep_gap_alert_ms", kDefaultGapAlertMs);
   g_root_preferences.end();
 
-  g_beep_len_ms       = (len > 0) ? len : kDefaultBeepLenMs;
-  g_beep_gap_warn_ms  = gw;
+  g_beep_len_ms = (len > 0) ? len : kDefaultBeepLenMs;
+  g_beep_gap_warn_ms = gw;
   g_beep_gap_alert_ms = ga;
 }
 
@@ -322,15 +326,106 @@ void LoadFlashSettings() {
 }
 
 void EnsureDocuments() {
-  if (!g_last_seen["nodes"].is<JsonObject>()) {
+  if (!g_last_seen["nodes"].is<JsonObject>())
     g_last_seen["nodes"].to<JsonObject>();
-  }
-  if (!g_labels["nodes"].is<JsonObject>()) {
+  if (!g_labels["nodes"].is<JsonObject>())
     g_labels["nodes"].to<JsonObject>();
-  }
-  if (!g_labels["sensors"].is<JsonObject>()) {
+  if (!g_labels["sensors"].is<JsonObject>())
     g_labels["sensors"].to<JsonObject>();
+  if (!g_labels["order"].is<JsonObject>())
+    g_labels["order"].to<JsonObject>(); // global sensor order (existing)
+  if (!g_labels["tile_order"].is<JsonObject>())
+    g_labels["tile_order"].to<JsonObject>(); // node/tile order (existing)
+
+  // NEW: per-node sensor order map: sorder[nodeId][addr16] = rank
+  if (!g_labels["sorder"].is<JsonObject>())
+    g_labels["sorder"].to<JsonObject>();
+}
+
+// Default high rank means "unspecified / after ranked ones"
+static int GetNodeRank(const String &node_id) {
+  JsonVariant v = g_labels["tile_order"][node_id];
+  if (v.is<int>())
+    return v.as<int>();
+  return 1000000;
+}
+
+// Persist only the topology (node IDs and sensor addr16s), not temperatures.
+// Key: "known"
+void SaveKnownTopology() {
+  EnsureDocuments();
+  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
+
+  JsonDocument kd;
+  JsonObject out_nodes = kd["nodes"].to<JsonObject>();
+
+  for (JsonPair n : nodes) {
+    const String node_id = n.key().c_str();
+    JsonObject nobj = n.value();
+    JsonObject sensors = nobj["sensors"].as<JsonObject>();
+    JsonArray arr = out_nodes[node_id].to<JsonArray>();
+    for (JsonPair s : sensors) {
+      arr.add(s.key().c_str());
+    }
   }
+
+  String json;
+  serializeJson(kd, json);
+
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putString("known", json);
+  g_root_preferences.end();
+}
+
+// Load topology and pre-populate g_last_seen so tiles render after reboot.
+// We seed "last" with now to start age at 0 and allow normal staleness aging.
+void LoadKnownTopology() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const String json = g_root_preferences.getString("known", "");
+  g_root_preferences.end();
+
+  if (json.isEmpty())
+    return;
+
+  JsonDocument kd;
+  if (deserializeJson(kd, json) != DeserializationError::Ok)
+    return;
+
+  EnsureDocuments();
+  JsonObject nodes_out = g_last_seen["nodes"].to<JsonObject>();
+  JsonObject nodes_in = kd["nodes"].as<JsonObject>();
+  const uint32_t now_ms = millis();
+
+  for (JsonPair np : nodes_in) {
+    const String node_id = np.key().c_str();
+    JsonObject node_obj = nodes_out[node_id].to<JsonObject>();
+    if (!node_obj["sensors"].is<JsonObject>()) {
+      node_obj["sensors"].to<JsonObject>();
+    }
+    node_obj["busGpio"] = node_obj["busGpio"] | -1;
+    node_obj["last"] = now_ms;
+
+    JsonObject sensors = node_obj["sensors"].to<JsonObject>();
+    JsonArray addrs = np.value().as<JsonArray>();
+    for (JsonVariant v : addrs) {
+      const char *addr = v.as<const char *>();
+      if (addr && strlen(addr) == 16) {
+        JsonObject s = sensors[addr].to<JsonObject>();
+        s["last"] = now_ms; // seed fresh; values will fill when data arrives
+        // leave tC/corr absent until an update comes in
+      }
+    }
+  }
+}
+
+// Remove persisted topology and clear in-memory nodes.
+void EraseKnownTopology() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.remove("known");
+  g_root_preferences.end();
+
+  // Clear in-memory nodes (labels untouched).
+  g_last_seen["nodes"].to<JsonObject>().clear();
 }
 
 void MigrateStorageIfNeeded() {
@@ -339,7 +434,14 @@ void MigrateStorageIfNeeded() {
   if (version == 0 || version == 1) {
     // Old: labels only.
     LoadLabels();
+
     EnsureDocuments();
+
+    // After LoadFlashSettings();
+    LoadFlashSettings();
+
+    // NEW: pull any previously saved topology to pre-populate tiles
+    LoadKnownTopology();
 
     g_display_fahrenheit = true;
     SaveDisplayUnits();
@@ -349,15 +451,15 @@ void MigrateStorageIfNeeded() {
     SaveHighlightSettings();
 
     // Initialize default limits and persist.
-    g_warn_low_c   = 5.0f;
-    g_warn_high_c  = 26.0f;
-    g_alert_low_c  = 3.0f;
+    g_warn_low_c = 5.0f;
+    g_warn_high_c = 26.0f;
+    g_alert_low_c = 3.0f;
     g_alert_high_c = 30.0f;
     SaveLimits();
 
     // Buzzer + flash defaults.
-    g_beep_len_ms       = kDefaultBeepLenMs;
-    g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+    g_beep_len_ms = kDefaultBeepLenMs;
+    g_beep_gap_warn_ms = kDefaultGapWarnMs;
     g_beep_gap_alert_ms = kDefaultGapAlertMs;
     SaveBuzzerSettings();
 
@@ -375,14 +477,20 @@ void MigrateStorageIfNeeded() {
     LoadDisplayUnits();
     LoadHighlightSettings();
 
-    g_warn_low_c   = 5.0f;
-    g_warn_high_c  = 26.0f;
-    g_alert_low_c  = 3.0f;
+    // After LoadFlashSettings();
+    LoadFlashSettings();
+
+    // NEW: pull any previously saved topology to pre-populate tiles
+    LoadKnownTopology();
+
+    g_warn_low_c = 5.0f;
+    g_warn_high_c = 26.0f;
+    g_alert_low_c = 3.0f;
     g_alert_high_c = 30.0f;
     SaveLimits();
 
-    g_beep_len_ms       = kDefaultBeepLenMs;
-    g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+    g_beep_len_ms = kDefaultBeepLenMs;
+    g_beep_gap_warn_ms = kDefaultGapWarnMs;
     g_beep_gap_alert_ms = kDefaultGapAlertMs;
     SaveBuzzerSettings();
 
@@ -401,8 +509,14 @@ void MigrateStorageIfNeeded() {
     LoadHighlightSettings();
     LoadLimits();
 
-    g_beep_len_ms       = kDefaultBeepLenMs;
-    g_beep_gap_warn_ms  = kDefaultGapWarnMs;
+    // After LoadFlashSettings();
+    LoadFlashSettings();
+
+    // NEW: pull any previously saved topology to pre-populate tiles
+    LoadKnownTopology();
+
+    g_beep_len_ms = kDefaultBeepLenMs;
+    g_beep_gap_warn_ms = kDefaultGapWarnMs;
     g_beep_gap_alert_ms = kDefaultGapAlertMs;
     SaveBuzzerSettings();
 
@@ -422,6 +536,12 @@ void MigrateStorageIfNeeded() {
     LoadLimits();
     LoadBuzzerSettings();
 
+    // After LoadFlashSettings();
+    LoadFlashSettings();
+
+    // NEW: pull any previously saved topology to pre-populate tiles
+    LoadKnownTopology();
+
     g_flash_interval_ms = kDefaultFlashIntervalMs;
     SaveFlashSettings();
 
@@ -437,8 +557,135 @@ void MigrateStorageIfNeeded() {
   LoadLimits();
   LoadBuzzerSettings();
   LoadFlashSettings();
+
+  // NEW: pull any previously saved topology to pre-populate tiles
+  LoadKnownTopology();
 }
 
+// Upper-case canonical form for 16-hex DS18B20 IDs.
+// Keeps only the first 16 chars; caller should validate length elsewhere.
+static String CanonAddr16(const String &addr) {
+  String out;
+  out.reserve(16);
+  for (size_t i = 0; i < addr.length() && out.length() < 16; ++i) {
+    char c = addr[i];
+    if (c >= 'a' && c <= 'f')
+      c = static_cast<char>(c - 'a' + 'A');
+    out += c;
+  }
+  return out;
+}
+
+// Global (node-agnostic) rank.
+static int GetSensorRankGlobal(const String &addr16) {
+  const String key = CanonAddr16(addr16);
+  JsonVariant v = g_labels["order"][key];
+  if (v.is<int>())
+    return v.as<int>();
+  return 1000000;
+}
+
+// Node-specific rank, falling back to global if unset.
+static int GetSensorRankForNode(const String &node_id, const String &addr16) {
+  const String key = CanonAddr16(addr16);
+  JsonVariant v = g_labels["sorder"][node_id][key];
+  if (v.is<int>())
+    return v.as<int>();
+  return GetSensorRankGlobal(key);
+}
+
+// Find the [start,end) span (0-based token index) of a whitespace-delimited
+// token.
+static bool FindTokenSpan(const String &line, int token_index, int *start_out,
+                          int *end_out) {
+  if (!start_out || !end_out)
+    return false;
+  int n = static_cast<int>(line.length());
+  int idx = -1;
+  int i = 0;
+  while (i < n) {
+    // Skip leading whitespace
+    while (i < n && isspace(static_cast<unsigned char>(line[i])))
+      ++i;
+    if (i >= n)
+      break;
+    int s = i;
+    while (i < n && !isspace(static_cast<unsigned char>(line[i])))
+      ++i;
+    int e = i; // exclusive
+    ++idx;
+    if (idx == token_index) {
+      *start_out = s;
+      *end_out = e;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Keep printable bytes only (>=0x20); drop control characters like CR/LF/TAB.
+static String SanitizePrintable(const String &in) {
+  String out;
+  out.reserve(in.length());
+  for (size_t i = 0; i < in.length(); ++i) {
+    unsigned char c = static_cast<unsigned char>(in[i]);
+    if (c >= 0x20)
+      out += static_cast<char>(c);
+  }
+  return out;
+}
+
+// Extract label text after the 2nd token (command + id/addr), handling optional
+// quotes. Examples accepted:
+//   node 1234 Main Floor South
+//   node 1234 "Main Floor \"South\""
+//   name A1B2C3D4E5F6A7B8 Rack\ 1\ Inlet   (backslashes are preserved except
+//   for \" and \\)
+static bool ExtractLabelAfterSecondToken(const String &line,
+                                         String *out_label) {
+  if (!out_label)
+    return false;
+
+  int s0, e0, s1, e1;
+  if (!FindTokenSpan(line, 0, &s0, &e0))
+    return false; // command
+  if (!FindTokenSpan(line, 1, &s1, &e1))
+    return false; // id/addr
+
+  // Start scanning just after token #1, skipping whitespace.
+  int i = e1;
+  const int n = static_cast<int>(line.length());
+  while (i < n && isspace(static_cast<unsigned char>(line[i])))
+    ++i;
+  if (i >= n)
+    return false; // no label provided
+
+  String raw = line.substring(i);
+  raw.trim();
+
+  // If quoted, strip outer quotes and unescape \" and \\.
+  if (raw.length() >= 2 && raw[0] == '"' && raw[raw.length() - 1] == '"') {
+    String inner = raw.substring(1, raw.length() - 1);
+    String unesc;
+    unesc.reserve(inner.length());
+    for (size_t k = 0; k < inner.length(); ++k) {
+      char c = inner[k];
+      if (c == '\\' && k + 1 < inner.length()) {
+        char nchar = inner[k + 1];
+        if (nchar == '"' || nchar == '\\') {
+          unesc += nchar;
+          ++k;
+          continue;
+        }
+      }
+      unesc += c;
+    }
+    raw = unesc;
+  }
+
+  *out_label = SanitizePrintable(raw);
+  return out_label->length() > 0;
+}
 
 // ---------------------------------------------------------------------------
 // Display + GUI setup
@@ -464,21 +711,21 @@ void DisplayInit() {
 
 #if LVGL_PORT_AVOID_TEARING_MODE
   {
-    LCD* lcd = g_board->getLCD();
+    LCD *lcd = g_board->getLCD();
     if (lcd != nullptr) {
       lcd->configFrameBufferNumber(LVGL_PORT_DISP_BUFFER_NUM);
 
-  #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
-      auto* bus = lcd->getBus();
+#if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
+      auto *bus = lcd->getBus();
       if (bus != nullptr &&
           bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
-        static_cast<BusRGB*>(bus)->configRGB_BounceBufferSize(
+        static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(
             lcd->getFrameWidth() * 10);
       }
-  #endif
+#endif
     }
   }
-#endif  // LVGL_PORT_AVOID_TEARING_MODE
+#endif // LVGL_PORT_AVOID_TEARING_MODE
 
   if (!g_board->begin()) {
     Serial.println(F("[Display] board->begin() failed"));
@@ -503,7 +750,7 @@ void GuiInit() {
     return;
   }
 
-  lv_obj_t* screen = lv_scr_act();
+  lv_obj_t *screen = lv_scr_act();
   lv_obj_set_style_pad_all(screen, 0, 0);
 
   // Disable all scrolling on the root screen
@@ -511,7 +758,7 @@ void GuiInit() {
   lv_obj_set_scrollbar_mode(screen, LV_SCROLLBAR_MODE_OFF);
 
   // Top bar.
-  lv_obj_t* bar = lv_obj_create(screen);
+  lv_obj_t *bar = lv_obj_create(screen);
   lv_obj_set_size(bar, lv_pct(100), 36);
   lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
   lv_obj_set_style_pad_all(bar, 4, 0);
@@ -543,7 +790,7 @@ void GuiInit() {
   // Work out available height so we don't overlap the bar.
   lv_coord_t scr_h = lv_obj_get_height(screen);
   if (scr_h == 0) {
-    lv_disp_t* disp = lv_disp_get_default();
+    lv_disp_t *disp = lv_disp_get_default();
     if (disp) {
       scr_h = lv_disp_get_ver_res(disp);
     }
@@ -562,10 +809,8 @@ void GuiInit() {
   lv_obj_set_style_border_width(g_ui_tile_container, 0, 0);
 
   lv_obj_set_flex_flow(g_ui_tile_container, LV_FLEX_FLOW_ROW_WRAP);
-  lv_obj_set_flex_align(g_ui_tile_container,
-                        LV_FLEX_ALIGN_START,
-                        LV_FLEX_ALIGN_START,
-                        LV_FLEX_ALIGN_START);
+  lv_obj_set_flex_align(g_ui_tile_container, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
 
   // No scrolling for the tile container.
   lv_obj_clear_flag(g_ui_tile_container, LV_OBJ_FLAG_SCROLLABLE);
@@ -580,9 +825,7 @@ void GuiInit() {
 }
 
 // Called when node metadata changes.
-void GuiUpdateNodeSummary(const char* node_id,
-                          int bus_gpio,
-                          uint32_t last_ms) {
+void GuiUpdateNodeSummary(const char *node_id, int bus_gpio, uint32_t last_ms) {
   (void)node_id;
   (void)bus_gpio;
   (void)last_ms;
@@ -590,11 +833,8 @@ void GuiUpdateNodeSummary(const char* node_id,
 }
 
 // Called when sensor data changes.
-void GuiUpdateSensorRow(const char* node_id,
-                        const char* addr,
-                        float temp_f,
-                        const char* label,
-                        uint32_t last_ms) {
+void GuiUpdateSensorRow(const char *node_id, const char *addr, float temp_f,
+                        const char *label, uint32_t last_ms) {
   (void)node_id;
   (void)addr;
   (void)temp_f;
@@ -609,7 +849,7 @@ void UpdateUptimeLabel() {
   }
   const uint32_t seconds = millis() / 1000U;
   const uint32_t minutes = seconds / 60U;
-  const uint32_t hours   = minutes / 60U;
+  const uint32_t hours = minutes / 60U;
 
   char buffer[16];
   // Always show HH:MM (hours can go above 99 fine).
@@ -668,8 +908,7 @@ void BuzzerBeepOnce() {
   DLOG("[BUZZER] Beep\n");
 }
 
-TileWidgets& GetOrCreateTile(const String& node_id_str,
-                             lv_coord_t tile_w,
+TileWidgets &GetOrCreateTile(const String &node_id_str, lv_coord_t tile_w,
                              lv_coord_t tile_h) {
   auto it = g_tiles.find(node_id_str);
   if (it != g_tiles.end()) {
@@ -715,12 +954,9 @@ void GuiApplyFlashPhase() {
   for (auto &entry : g_tiles) {
     TileWidgets &tw = entry.second;
 
-    const bool flashable =
-        (tw.node_has_alert || tw.node_has_warning);
+    const bool flashable = (tw.node_has_alert || tw.node_has_warning);
     const bool flash_active =
-        flashable &&
-        (g_flash_interval_ms > 0) &&
-        g_flash_phase;
+        flashable && (g_flash_interval_ms > 0) && g_flash_phase;
 
     // If nothing changed for this tile, do nothing.
     if (flash_active == tw.last_flash_active) {
@@ -737,8 +973,7 @@ void GuiApplyFlashPhase() {
       lv_obj_set_style_text_color(tw.label_age, tw.fg_flash, 0);
       for (int i = 0; i < tw.sensor_count; ++i) {
         if (tw.sensor_label[i]) {
-          lv_obj_set_style_text_color(tw.sensor_label[i],
-                                      tw.fg_flash, 0);
+          lv_obj_set_style_text_color(tw.sensor_label[i], tw.fg_flash, 0);
         }
       }
     } else {
@@ -750,8 +985,8 @@ void GuiApplyFlashPhase() {
       lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
       for (int i = 0; i < tw.sensor_count; ++i) {
         if (tw.sensor_label[i]) {
-          lv_obj_set_style_text_color(tw.sensor_label[i],
-                                      tw.sensor_color[i], 0);
+          lv_obj_set_style_text_color(tw.sensor_label[i], tw.sensor_color[i],
+                                      0);
         }
       }
     }
@@ -759,9 +994,8 @@ void GuiApplyFlashPhase() {
 }
 
 void GuiRebuildTiles() {
-  if (g_ui_tile_container == nullptr) {
+  if (g_ui_tile_container == nullptr)
     return;
-  }
 
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
@@ -769,11 +1003,10 @@ void GuiRebuildTiles() {
   // Snapshot current connections.
   auto node_list = mesh.getNodeList();
   std::vector<uint32_t> connected_ids(node_list.begin(), node_list.end());
-
   auto is_connected = [&](uint32_t node_id) -> bool {
-    for (uint32_t id : connected_ids) {
-      if (id == node_id) return true;
-    }
+    for (uint32_t id : connected_ids)
+      if (id == node_id)
+        return true;
     return false;
   };
 
@@ -789,54 +1022,81 @@ void GuiRebuildTiles() {
   g_any_warning = false;
   g_any_alert = false;
 
-  // Iterate all known nodes and update/create tiles.
-  for (JsonPair node_entry : nodes) {
-    const String node_id_str = node_entry.key().c_str();
-    JsonObject node_obj = node_entry.value();
+  // Sort nodes by explicit tile_order, then label, then id.
+  std::vector<String> node_ids;
+  node_ids.reserve(nodes.size());
+  for (JsonPair e : nodes)
+    node_ids.emplace_back(e.key().c_str());
 
-    TileWidgets& tw = GetOrCreateTile(node_id_str, tile_w, tile_h);
+  std::sort(node_ids.begin(), node_ids.end(),
+            [&](const String &a, const String &b) {
+              const int ra = GetNodeRank(a);
+              const int rb = GetNodeRank(b);
+              if (ra != rb)
+                return ra < rb;
 
-    // Location: label or node id.
+              const String la = (g_labels["nodes"][a] | "");
+              const String lb = (g_labels["nodes"][b] | "");
+              if (la.length() && lb.length()) {
+                if (la != lb)
+                  return la < lb;
+              } else if (la.length() || lb.length()) {
+                return la.length() > lb.length(); // labeled first
+              }
+              return a < b;
+            });
+
+  for (const String &node_id_str : node_ids) {
+    JsonObject node_obj = nodes[node_id_str];
+
+    TileWidgets &tw = GetOrCreateTile(node_id_str, tile_w, tile_h);
+
+    // Location (label or node id).
     String loc = g_labels["nodes"][node_id_str] | "";
-    if (loc.isEmpty()) {
+    if (loc.isEmpty())
       loc = node_id_str;
-    }
 
     // Connection + age.
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
 
-    char* endptr = nullptr;
+    char *endptr = nullptr;
     const uint32_t node_id_u32 =
         static_cast<uint32_t>(strtoul(node_id_str.c_str(), &endptr, 10));
     const bool node_connected =
         (endptr != node_id_str.c_str()) && is_connected(node_id_u32);
 
     uint32_t latest_ms = node_obj["last"] | 0U;
-    for (JsonPair sensor_entry : sensors) {
-      JsonObject s = sensor_entry.value();
-      const uint32_t s_last = s["last"] | 0U;
-      if (s_last > latest_ms) {
+
+    // Collect and sort sensor addresses for THIS node only.
+    std::vector<String> addrs;
+    addrs.reserve(8);
+    for (JsonPair s_entry : sensors) {
+      addrs.emplace_back(s_entry.key().c_str());
+      const uint32_t s_last = s_entry.value()["last"] | 0U;
+      if (s_last > latest_ms)
         latest_ms = s_last;
-      }
     }
 
+    std::sort(addrs.begin(), addrs.end(),
+              [&](const String &a, const String &b) {
+                const int ra = GetSensorRankForNode(node_id_str, a);
+                const int rb = GetSensorRankForNode(node_id_str, b);
+                if (ra != rb)
+                  return ra < rb;
+                return a < b; // stable, readable fallback
+              });
+
     const uint32_t age_min =
-        (latest_ms <= now_ms)
-            ? (now_ms - latest_ms) / 60000U
-            : 0U;
+        (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
 
-    const bool is_missing =
-        g_highlight_missing_nodes &&
-        !node_connected &&
-        (g_stale_minutes_threshold > 0) &&
-        (age_min >= g_stale_minutes_threshold);
+    const bool is_missing = g_highlight_missing_nodes && !node_connected &&
+                            (g_stale_minutes_threshold > 0) &&
+                            (age_min >= g_stale_minutes_threshold);
 
-    const bool is_stale =
-        node_connected &&
-        (g_stale_minutes_threshold > 0) &&
-        (age_min >= g_stale_minutes_threshold);
+    const bool is_stale = node_connected && (g_stale_minutes_threshold > 0) &&
+                          (age_min >= g_stale_minutes_threshold);
 
-    // Build up to 2 sensor views.
+    // Up to 2 sensor rows.
     struct SensorView {
       String label;
       float temp_c = NAN;
@@ -849,15 +1109,16 @@ void GuiRebuildTiles() {
     bool node_has_alert = false;
     bool node_has_warning = false;
 
-    for (JsonPair sensor_entry : sensors) {
-      if (sv_count >= 2) break;
+    for (const String &addr : addrs) {
+      if (sv_count >= 2)
+        break;
 
-      const String addr = sensor_entry.key().c_str();
-      JsonObject s = sensor_entry.value();
+      JsonObject s = sensors[addr].as<JsonObject>();
 
-      SensorView& v = sv[sv_count++];
+      SensorView &v = sv[sv_count++];
       v.label = (g_labels["sensors"][addr] | "");
-      if (v.label.isEmpty()) v.label = addr;
+      if (v.label.isEmpty())
+        v.label = CanonAddr16(addr);
 
       if (s["tC"].is<float>()) {
         v.temp_c = s["tC"].as<float>();
@@ -866,157 +1127,140 @@ void GuiRebuildTiles() {
 
       if (v.has_value) {
         const float t = v.temp_c;
-
-        if (!isnan(g_alert_low_c) && t < g_alert_low_c) {
+        if (!isnan(g_alert_low_c) && t < g_alert_low_c)
           v.is_alert = true;
-        }
-        if (!isnan(g_alert_high_c) && t > g_alert_high_c) {
+        if (!isnan(g_alert_high_c) && t > g_alert_high_c)
           v.is_alert = true;
-        }
-
         if (!v.is_alert) {
-          if (!isnan(g_warn_low_c) && t < g_warn_low_c) {
+          if (!isnan(g_warn_low_c) && t < g_warn_low_c)
             v.is_warning = true;
-          }
-          if (!isnan(g_warn_high_c) && t > g_warn_high_c) {
+          if (!isnan(g_warn_high_c) && t > g_warn_high_c)
             v.is_warning = true;
-          }
         }
       }
 
-      if (v.is_alert) {
+      if (v.is_alert)
         node_has_alert = true;
-      } else if (v.is_warning) {
+      else if (v.is_warning)
         node_has_warning = true;
-      }
     }
 
-    // Decide base colors for this tile (normal phase).
-    lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24);  // dark green
-    lv_color_t fg = lv_color_white();                 // header/age
-
+    // Colors.
+    lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24); // dark green
+    lv_color_t fg = lv_color_white();                // header/age
     if (node_has_alert) {
-      bg = lv_color_make(0xB7, 0x1C, 0x1C);          // deep red
+      bg = lv_color_make(0xB7, 0x1C, 0x1C);
       fg = lv_color_white();
       g_any_alert = true;
     } else if (is_stale || node_has_warning) {
-      bg = lv_color_make(0x8A, 0x5A, 0x00);          // dark amber
+      bg = lv_color_make(0x8A, 0x5A, 0x00);
       fg = lv_color_white();
       g_any_warning = true;
     } else if (is_missing) {
-      bg = lv_color_make(0x20, 0x40, 0x60);          // muted blue-gray
+      bg = lv_color_make(0x20, 0x40, 0x60);
       fg = lv_color_white();
     }
 
-    // Store state in tile.
-    tw.node_has_alert   = node_has_alert;
+    tw.node_has_alert = node_has_alert;
     tw.node_has_warning = node_has_warning;
-    tw.is_missing       = is_missing;
-    tw.is_stale         = is_stale;
+    tw.is_missing = is_missing;
+    tw.is_stale = is_stale;
 
     tw.bg_normal = bg;
     tw.fg_normal = fg;
 
-    // Flash colors (used only by GuiApplyFlashPhase()).
     if (node_has_alert || node_has_warning) {
-      // Flash = light grey background with black text.
       tw.bg_flash = lv_color_make(0xCC, 0xCC, 0xCC);
       tw.fg_flash = lv_color_black();
     } else {
-      // Non-flashing nodes: flash == normal (no visible change).
       tw.bg_flash = bg;
       tw.fg_flash = fg;
     }
 
-    // Update location label.
+    // Header + age.
     lv_label_set_text(tw.label_loc, loc.c_str());
     lv_obj_align(tw.label_loc, LV_ALIGN_TOP_MID, 0, 0);
 
-    // Update age label.
     char age_buf[24];
     snprintf(age_buf, sizeof(age_buf), "Age: %lu min",
              static_cast<unsigned long>(age_min));
     lv_label_set_text(tw.label_age, age_buf);
     lv_obj_align(tw.label_age, LV_ALIGN_TOP_MID, 0, 20);
 
-    // Update sensor labels & store their "normal" colors.
+    // Sensor rows.
     tw.sensor_count = sv_count;
     for (int i = 0; i < 2; ++i) {
-      lv_obj_t* lbl = tw.sensor_label[i];
-      if (!lbl) continue;
+      lv_obj_t *lbl = tw.sensor_label[i];
+      if (!lbl)
+        continue;
 
       if (i >= sv_count) {
-        lv_label_set_text(lbl, "");
-        lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
+        // If the tile truly has no sensors, show a faint placeholder.
+        if (sv_count == 0) {
+          lv_label_set_text(lbl, "(no sensors)");
+          lv_obj_clear_flag(lbl, LV_OBJ_FLAG_HIDDEN);
+          tw.sensor_color[i] = lv_color_make(0xAA, 0xAA, 0xAA);
+          lv_obj_align(lbl, LV_ALIGN_BOTTOM_LEFT, 0, -8);
+        } else {
+          lv_label_set_text(lbl, "");
+          lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
+        }
         continue;
       }
 
       lv_obj_clear_flag(lbl, LV_OBJ_FLAG_HIDDEN);
 
-      const SensorView& v = sv[i];
-
+      const SensorView &v = sv[i];
       char buf[64];
       if (!v.has_value) {
         snprintf(buf, sizeof(buf), "%s: --", v.label.c_str());
       } else {
         float temp_disp = v.temp_c;
-        if (g_display_fahrenheit) {
+        if (g_display_fahrenheit)
           temp_disp = temp_disp * 1.8f + 32.0f;
-        }
         const char unit_ch = g_display_fahrenheit ? 'F' : 'C';
-        snprintf(buf, sizeof(buf), "%s: %.1f%c",
-                 v.label.c_str(),
-                 static_cast<double>(temp_disp),
-                 unit_ch);
+        snprintf(buf, sizeof(buf), "%s: %.1f%c", v.label.c_str(),
+                 static_cast<double>(temp_disp), unit_ch);
       }
       lv_label_set_text(lbl, buf);
 
       lv_color_t sensor_color;
-      if (!v.has_value) {
-        sensor_color = lv_color_make(0xCC, 0xCC, 0xCC); // light gray
-      } else if (v.is_alert) {
-        sensor_color = lv_color_make(0xFF, 0xFF, 0x80); // bright yellow
-      } else if (v.is_warning) {
-        sensor_color = lv_color_make(0xFF, 0xD7, 0x00); // gold
-      } else if (node_has_alert) {
-        sensor_color = lv_color_make(0xFF, 0xE0, 0xE0); // soft light
-      } else if (is_stale || node_has_warning) {
-        sensor_color = lv_color_make(0xFF, 0xF7, 0xE0); // warm cream
-      } else if (is_missing) {
-        sensor_color = lv_color_make(0xB0, 0xBE, 0xC5); // blue-gray
-      } else {
-        sensor_color = lv_color_make(0xE0, 0xFF, 0xE0); // light green
-      }
+      if (!v.has_value)
+        sensor_color = lv_color_make(0xCC, 0xCC, 0xCC);
+      else if (v.is_alert)
+        sensor_color = lv_color_make(0xFF, 0xFF, 0x80);
+      else if (v.is_warning)
+        sensor_color = lv_color_make(0xFF, 0xD7, 0x00);
+      else if (node_has_alert)
+        sensor_color = lv_color_make(0xFF, 0xE0, 0xE0);
+      else if (is_stale || node_has_warning)
+        sensor_color = lv_color_make(0xFF, 0xF7, 0xE0);
+      else if (is_missing)
+        sensor_color = lv_color_make(0xB0, 0xBE, 0xC5);
+      else
+        sensor_color = lv_color_make(0xE0, 0xFF, 0xE0);
 
       tw.sensor_color[i] = sensor_color;
 
-      // Position sensors near bottom.
-      const int y_offset = (sv_count == 1)
-                               ? -8
-                               : (i == 0 ? -26 : -8);
+      const int y_offset = (sv_count == 1) ? -8 : (i == 0 ? -26 : -8);
       lv_obj_align(lbl, LV_ALIGN_BOTTOM_LEFT, 0, y_offset);
     }
 
-    // Apply NORMAL (non-flash) appearance only.
+    // Apply NORMAL (non-flash).
     lv_obj_set_style_bg_color(tw.tile, tw.bg_normal, 0);
     lv_obj_set_style_bg_opa(tw.tile, LV_OPA_COVER, 0);
-
     lv_obj_set_style_text_color(tw.label_loc, tw.fg_normal, 0);
     lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
-
-    for (int i = 0; i < tw.sensor_count; ++i) {
+    for (int i = 0; i < tw.sensor_count && i < 2; ++i) {
       if (tw.sensor_label[i]) {
-        lv_obj_set_style_text_color(tw.sensor_label[i],
-                                    tw.sensor_color[i], 0);
+        lv_obj_set_style_text_color(tw.sensor_label[i], tw.sensor_color[i], 0);
       }
     }
-
-    // Let GuiApplyFlashPhase() decide flashing; start from "not flashed".
     tw.last_flash_active = false;
   }
 }
 
-}  // namespace
+} // namespace
 
 // -----------------------------------------------------------------------------
 // GUI helpers callable from elsewhere
@@ -1027,10 +1271,7 @@ void GuiUpdateNetwork(size_t peers) {
   g_gui_dirty = true;
 }
 
-
-void GuiRequestRender() {
-  g_gui_dirty = true;
-}
+void GuiRequestRender() { g_gui_dirty = true; }
 
 // -----------------------------------------------------------------------------
 // Display loop: rebuild tiles + buzzer + periodic refresh
@@ -1047,7 +1288,7 @@ void DisplayLoop() {
   if (g_flash_interval_ms > 0 && (g_any_alert || g_any_warning)) {
     if (now_ms - last_flash_ms >= g_flash_interval_ms) {
       g_flash_phase = !g_flash_phase;
-      g_flash_dirty = true;      // <--- instead of g_gui_dirty
+      g_flash_dirty = true; // <--- instead of g_gui_dirty
       last_flash_ms = now_ms;
     }
   } else {
@@ -1064,8 +1305,7 @@ void DisplayLoop() {
     last_force_ms = now_ms;
   }
 
-  if ((g_gui_dirty || g_flash_dirty) &&
-      (now_ms - last_build_ms >= 50U)) {
+  if ((g_gui_dirty || g_flash_dirty) && (now_ms - last_build_ms >= 50U)) {
     if (lvgl_port_lock(-1)) {
 
       if (g_gui_dirty) {
@@ -1078,12 +1318,12 @@ void DisplayLoop() {
           lv_label_set_text(g_ui_label_peers, buffer);
         }
 
-        GuiRebuildTiles();  // data/layout only
+        GuiRebuildTiles(); // data/layout only
       }
 
       if (g_flash_dirty) {
         g_flash_dirty = false;
-        GuiApplyFlashPhase();  // lightweight color toggle
+        GuiApplyFlashPhase(); // lightweight color toggle
       }
 
       UpdateUptimeLabel();
@@ -1093,18 +1333,16 @@ void DisplayLoop() {
   }
 }
 
-
-
 void BuzzerLoop() {
   // Static state so we can be called every loop() tick.
-  static bool     buzzer_on     = false;
+  static bool buzzer_on = false;
   static uint32_t beep_start_ms = 0;
-  static uint32_t last_beep_ms  = 0;
+  static uint32_t last_beep_ms = 0;
 
   const uint32_t now_ms = millis();
 
   // Priority: ALERT > WARNING (warning includes stale/etc via g_any_warning).
-  const bool have_alert   = g_any_alert;
+  const bool have_alert = g_any_alert;
   const bool have_warning = (!have_alert && g_any_warning);
 
   uint32_t gap_ms = 0;
@@ -1115,9 +1353,7 @@ void BuzzerLoop() {
   }
 
   // If no conditions or disabled, ensure buzzer is off and reset schedule.
-  if ((!have_alert && !have_warning) ||
-      gap_ms == 0 ||
-      g_beep_len_ms == 0) {
+  if ((!have_alert && !have_warning) || gap_ms == 0 || g_beep_len_ms == 0) {
     if (buzzer_on) {
       digitalWrite(kBuzzerPin, LOW);
       buzzer_on = false;
@@ -1171,9 +1407,8 @@ void ProcessConsoleRoot() {
     if (ch != '\n') {
       input_line += ch;
       if (input_line.length() > kMaxConsoleLineLength) {
-        const int excess =
-            static_cast<int>(input_line.length()) -
-            static_cast<int>(kMaxConsoleLineLength);
+        const int excess = static_cast<int>(input_line.length()) -
+                           static_cast<int>(kMaxConsoleLineLength);
         input_line.remove(0, excess);
       }
       continue;
@@ -1209,13 +1444,16 @@ void ProcessConsoleRoot() {
       continue;
     }
 
-    const String& command = tokens[0];
+    const String &command = tokens[0];
 
     auto print_help = []() {
       Serial.println(F("Commands (root):"));
       Serial.println(F("  ls"));
-      Serial.println(F("  node <id> <location>"));
-      Serial.println(F("  name <addr16> <label>"));
+      Serial.println(F("  node <id> <location...>     NOTE: label may contain "
+                       "spaces; quotes optional"));
+      Serial.println(F("  name <addr16> <label...>    NOTE: label may contain "
+                       "spaces; quotes optional"));
+
       Serial.println(F("  save | load | erase"));
       Serial.println(F("  debug on|off"));
       Serial.println(F("  units c|f"));
@@ -1227,6 +1465,14 @@ void ProcessConsoleRoot() {
       Serial.println(F("  limits show"));
       Serial.println(F("  buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>"));
       Serial.println(F("  flash <interval_ms|off>"));
+      Serial.println(
+          F("  order <addr16> <rank> | order clear <addr16> | order list"));
+      Serial.println(
+          F("  nodes clear                 # clear all known nodes (tiles)"));
+      Serial.println(F(
+          "  node rm <nodeId>            # remove one node (and its sensors)"));
+      Serial.println(
+          F("  norder <nodeId> <rank> | norder clear <nodeId> | norder list"));
     };
 
     if (command == "help" || command == "?") {
@@ -1243,76 +1489,101 @@ void ProcessConsoleRoot() {
         const String node_label = g_labels["nodes"][node_id] | "";
 
         if (node_label.length() > 0) {
-          Serial.printf("node %s \"%s\":\n",
-                        node_id.c_str(), node_label.c_str());
+          Serial.printf("node %s \"%s\":\n", node_id.c_str(),
+                        node_label.c_str());
         } else {
           Serial.printf("node %s:\n", node_id.c_str());
         }
 
         JsonObject sensors = node_obj["sensors"].as<JsonObject>();
+        bool any_sensor = false;
         for (JsonPair sensor_entry : sensors) {
+          any_sensor = true;
           const String addr = sensor_entry.key().c_str();
           JsonObject sensor_obj = sensor_entry.value();
 
           const float temp_c =
-              sensor_obj["tC"] |
-              std::numeric_limits<float>::quiet_NaN();
+              sensor_obj["tC"] | std::numeric_limits<float>::quiet_NaN();
           const bool corrected = sensor_obj["corr"] | false;
-          const String sensor_label =
-              g_labels["sensors"][addr] | "";
+          const String sensor_label = g_labels["sensors"][addr] | "";
+          const String addr_canon = CanonAddr16(addr);
 
-          const char* temp_str =
-              isnan(temp_c) ? "NaN" : String(temp_c, 2).c_str();
+          // Keep a real String in scope so the buffer lives through printf.
+          String temp_s = isnan(temp_c) ? String("NaN") : String(temp_c, 2);
 
           if (sensor_label.length() > 0) {
-            Serial.printf("  %s \"%s\" : %s%s\n",
-                          addr.c_str(),
-                          sensor_label.c_str(),
-                          temp_str,
+            Serial.printf("  %s \"%s\" : %s%s\n", addr_canon.c_str(),
+                          sensor_label.c_str(), temp_s,
                           corrected ? " (corr)" : "");
           } else {
-            Serial.printf("  %s : %s%s\n",
-                          addr.c_str(),
-                          temp_str,
+            Serial.printf("  %s : %s%s\n", addr_canon.c_str(), temp_s,
                           corrected ? " (corr)" : "");
           }
+        }
+        if (!any_sensor) {
+          Serial.println(F("  (no sensors)"));
         }
       }
 
       GuiRequestRender();
-
-    } else if (command == "node" && tokens.size() >= 3) {
-      g_labels["nodes"][tokens[1]] = tokens[2];
-      SaveLabels();
+      // Remove a single node: node rm <id>
+    } else if (command == "node" && tokens.size() >= 3 && tokens[1] == "rm") {
+      const String &id = tokens[2];
+      EnsureDocuments();
+      JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
+      if (!nodes.containsKey(id)) {
+        Serial.println(F("not found"));
+      } else {
+        nodes.remove(id);
+        SaveKnownTopology(); // persist new topology
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      }
+    }
+    // Clear all nodes (tiles): nodes clear
+    else if (command == "nodes" && tokens.size() >= 2 && tokens[1] == "clear") {
+      EraseKnownTopology(); // clears NVS + in-memory nodes
+      SaveKnownTopology();  // write empty doc back for consistency
       Serial.println(F("ok"));
       GuiRequestRender();
-
-    } else if (command == "name" && tokens.size() >= 3) {
-      g_labels["sensors"][tokens[1]] = tokens[2];
-      SaveLabels();
-      Serial.println(F("ok"));
-      GuiRequestRender();
-
+    } else if (command == "node" && tokens.size() >= 2) {
+      // node <id> <location...>   (spaces allowed; quotes optional)
+      String label;
+      if (!ExtractLabelAfterSecondToken(input_line, &label)) {
+        Serial.println(F("ERR node (usage: node <id> <location...>)"));
+      } else {
+        g_labels["nodes"][tokens[1]] = label;
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      }
+    } else if (command == "name" && tokens.size() >= 2) {
+      // name <addr16> <label...>  (spaces allowed; quotes optional)
+      String label;
+      if (!ExtractLabelAfterSecondToken(input_line, &label)) {
+        Serial.println(F("ERR name (usage: name <addr16> <label...>)"));
+      } else {
+        g_labels["sensors"][tokens[1]] = label;
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      }
     } else if (command == "save") {
       SaveLabels();
       Serial.println(F("saved"));
-
     } else if (command == "load") {
       LoadLabels();
       Serial.println(F("loaded"));
       GuiRequestRender();
-
     } else if (command == "erase") {
       EraseLabels();
       Serial.println(F("erased"));
       GuiRequestRender();
-
     } else if (command == "debug" && tokens.size() >= 2) {
       g_debug_enabled = (tokens[1] == "on");
       Serial.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
-
     } else if (command == "units" && tokens.size() >= 2) {
-      const String& mode = tokens[1];
+      const String &mode = tokens[1];
       if (mode.equalsIgnoreCase("c")) {
         g_display_fahrenheit = false;
         SaveDisplayUnits();
@@ -1326,10 +1597,9 @@ void ProcessConsoleRoot() {
       } else {
         Serial.println(F("ERR units (use 'units c' or 'units f')"));
       }
-
     } else if (command == "highlight" && tokens.size() >= 3) {
-      const String& target = tokens[1];
-      const String& value = tokens[2];
+      const String &target = tokens[1];
+      const String &value = tokens[2];
 
       if (target == "missing") {
         if (value == "on") {
@@ -1349,21 +1619,17 @@ void ProcessConsoleRoot() {
       } else if (target == "stale") {
         const long minutes = value.toInt();
         if (minutes > 0) {
-          g_stale_minutes_threshold =
-              static_cast<uint32_t>(minutes);
+          g_stale_minutes_threshold = static_cast<uint32_t>(minutes);
           SaveHighlightSettings();
           Serial.printf("highlight stale=%ld min\n", minutes);
           GuiRequestRender();
         } else {
-          Serial.println(
-              F("ERR highlight stale (use positive minutes)"));
+          Serial.println(F("ERR highlight stale (use positive minutes)"));
         }
       } else {
-        Serial.println(
-            F("ERR highlight (use 'highlight missing on|off' or "
-              "'highlight stale <min>')"));
+        Serial.println(F("ERR highlight (use 'highlight missing on|off' or "
+                         "'highlight stale <min>')"));
       }
-
     } else if (command == "flash" && tokens.size() >= 2) {
       if (tokens[1].equalsIgnoreCase("off")) {
         g_flash_interval_ms = 0;
@@ -1374,8 +1640,8 @@ void ProcessConsoleRoot() {
       } else {
         const long interval = tokens[1].toInt();
         if (interval < 0) {
-          Serial.println(
-              F("ERR flash (use 'flash <interval_ms>' with >=0, or 'flash off')"));
+          Serial.println(F("ERR flash (use 'flash <interval_ms>' with >=0, or "
+                           "'flash off')"));
         } else {
           g_flash_interval_ms = static_cast<uint32_t>(interval);
           SaveFlashSettings();
@@ -1386,9 +1652,8 @@ void ProcessConsoleRoot() {
                         g_flash_interval_ms ? "enabled" : "off");
         }
       }
-
     } else if (command == "dummy" && tokens.size() >= 2) {
-      const String& mode = tokens[1];
+      const String &mode = tokens[1];
       if (mode == "on") {
         g_use_dummy_data = true;
         BuildDummyData();
@@ -1403,25 +1668,20 @@ void ProcessConsoleRoot() {
       } else {
         Serial.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
       }
-
-    } else if (command == "limits" && tokens.size() >= 2 && tokens[1] == "show") {
+    } else if (command == "limits" && tokens.size() >= 2 &&
+               tokens[1] == "show") {
       auto FromC = [&](float c) -> float {
         return g_display_fahrenheit ? (c * 1.8f + 32.0f) : c;
       };
-      const char* unit = g_display_fahrenheit ? "F" : "C";
+      const char *unit = g_display_fahrenheit ? "F" : "C";
 
-      Serial.printf("limits warn=%.2f..%.2f %s\n",
-                    FromC(g_warn_low_c),
-                    FromC(g_warn_high_c),
-                    unit);
-      Serial.printf("limits alert=%.2f..%.2f %s\n",
-                    FromC(g_alert_low_c),
-                    FromC(g_alert_high_c),
-                    unit);
-
+      Serial.printf("limits warn=%.2f..%.2f %s\n", FromC(g_warn_low_c),
+                    FromC(g_warn_high_c), unit);
+      Serial.printf("limits alert=%.2f..%.2f %s\n", FromC(g_alert_low_c),
+                    FromC(g_alert_high_c), unit);
     } else if (command == "limits" && tokens.size() >= 4) {
-      const String& kind = tokens[1];
-      const float low_in  = tokens[2].toFloat();
+      const String &kind = tokens[1];
+      const float low_in = tokens[2].toFloat();
       const float high_in = tokens[3].toFloat();
 
       if (high_in <= low_in) {
@@ -1433,47 +1693,165 @@ void ProcessConsoleRoot() {
         auto FromC = [&](float v) -> float {
           return g_display_fahrenheit ? (v * 1.8f + 32.0f) : v;
         };
-        const char* unit = g_display_fahrenheit ? "F" : "C";
+        const char *unit = g_display_fahrenheit ? "F" : "C";
 
         if (kind == "warn") {
-          g_warn_low_c  = ToC(low_in);
+          g_warn_low_c = ToC(low_in);
           g_warn_high_c = ToC(high_in);
           SaveLimits();
-          Serial.printf("limits warn=%.2f..%.2f %s\n",
-                        FromC(g_warn_low_c),
-                        FromC(g_warn_high_c),
-                        unit);
+          Serial.printf("limits warn=%.2f..%.2f %s\n", FromC(g_warn_low_c),
+                        FromC(g_warn_high_c), unit);
         } else if (kind == "alert") {
-          g_alert_low_c  = ToC(low_in);
+          g_alert_low_c = ToC(low_in);
           g_alert_high_c = ToC(high_in);
           SaveLimits();
-          Serial.printf("limits alert=%.2f..%.2f %s\n",
-                        FromC(g_alert_low_c),
-                        FromC(g_alert_high_c),
-                        unit);
+          Serial.printf("limits alert=%.2f..%.2f %s\n", FromC(g_alert_low_c),
+                        FromC(g_alert_high_c), unit);
         } else {
-          Serial.println(
-              F("ERR limits (use 'limits warn <low> <high>' or "
-                "'limits alert <low> <high>' or 'limits show')"));
+          Serial.println(F("ERR limits (use 'limits warn <low> <high>' or "
+                           "'limits alert <low> <high>' or 'limits show')"));
         }
       }
     } else if (command == "buzzer" && tokens.size() >= 4) {
-      const long len_ms      = tokens[1].toInt();
+      const long len_ms = tokens[1].toInt();
       const long gap_warn_ms = tokens[2].toInt();
-      const long gap_alert_ms= tokens[3].toInt();
+      const long gap_alert_ms = tokens[3].toInt();
 
       if (len_ms <= 0 || gap_warn_ms < 0 || gap_alert_ms < 0) {
-        Serial.println(
-            F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>, gaps>=0)"));
+        Serial.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> "
+                         "<alert_gap_ms>, gaps>=0)"));
       } else {
-        g_beep_len_ms       = static_cast<uint32_t>(len_ms);
-        g_beep_gap_warn_ms  = static_cast<uint32_t>(gap_warn_ms);
+        g_beep_len_ms = static_cast<uint32_t>(len_ms);
+        g_beep_gap_warn_ms = static_cast<uint32_t>(gap_warn_ms);
         g_beep_gap_alert_ms = static_cast<uint32_t>(gap_alert_ms);
         SaveBuzzerSettings();
         Serial.printf("buzzer len=%lu ms warn_gap=%lu ms alert_gap=%lu ms\n",
                       static_cast<unsigned long>(g_beep_len_ms),
                       static_cast<unsigned long>(g_beep_gap_warn_ms),
                       static_cast<unsigned long>(g_beep_gap_alert_ms));
+      }
+    } else if (command == "order" && tokens.size() >= 2) {
+      EnsureDocuments();
+      JsonObject ord = g_labels["order"].to<JsonObject>();
+
+      const String &sub = tokens[1];
+      if (sub == "list") {
+        bool any = false;
+        for (JsonPair p : ord) {
+          any = true;
+          Serial.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
+        }
+        if (!any)
+          Serial.println(F("(empty)"));
+        Serial.println(F("ok"));
+      } else if (sub == "clear" && tokens.size() >= 3) {
+        const String key = CanonAddr16(tokens[2]);
+        ord.remove(key);
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      } else if (tokens.size() >= 3) {
+        const String key = CanonAddr16(tokens[1]);
+        const int rank = tokens[2].toInt(); // lower = earlier
+        ord[key] = rank;
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      } else {
+        Serial.println(F("ERR order (use 'order <addr16> <rank>' | 'order "
+                         "clear <addr16>' | 'order list')"));
+      }
+    } else if (command == "norder" && tokens.size() >= 2) {
+      EnsureDocuments();
+      JsonObject ord = g_labels["tile_order"].to<JsonObject>();
+
+      const String &sub = tokens[1];
+      if (sub == "list") {
+        for (JsonPair p : ord) {
+          Serial.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
+        }
+        Serial.println(F("ok"));
+      } else if (sub == "clear" && tokens.size() >= 3) {
+        ord.remove(tokens[2]);
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      } else if (tokens.size() >= 3) {
+        const String &node_id = tokens[1];
+        const int rank = tokens[2].toInt(); // lower = earlier
+        ord[node_id] = rank;
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      } else {
+        Serial.println(F("ERR norder (use 'norder <nodeId> <rank>' | "
+                         "'norder clear <nodeId>' | 'norder list')"));
+      }
+    } else if (command == "sorder" && tokens.size() >= 2) {
+      // Per-node sensor order: sorder <nodeId> <addr16> <rank>
+      //                        sorder clear <nodeId> <addr16>
+      //                        sorder list [nodeId]
+      EnsureDocuments();
+      JsonObject sroot = g_labels["sorder"].to<JsonObject>();
+
+      const String &sub = tokens[1];
+      if (sub == "list") {
+        if (tokens.size() >= 3) {
+          const String node_id = tokens[2];
+          JsonObject m = sroot[node_id].as<JsonObject>();
+          if (m.isNull()) {
+            Serial.println(F("(empty)"));
+          } else {
+            bool any = false;
+            for (JsonPair p : m) {
+              any = true;
+              Serial.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
+            }
+            if (!any)
+              Serial.println(F("(empty)"));
+          }
+          Serial.println(F("ok"));
+        } else {
+          // List all node-specific maps
+          bool any_node = false;
+          for (JsonPair node_pair : sroot) {
+            any_node = true;
+            Serial.printf("[%s]\n", node_pair.key().c_str());
+            JsonObject m = node_pair.value();
+            bool any = false;
+            for (JsonPair p : m) {
+              any = true;
+              Serial.printf("  %s : %d\n", p.key().c_str(),
+                            p.value().as<int>());
+            }
+            if (!any)
+              Serial.println(F("  (empty)"));
+          }
+          if (!any_node)
+            Serial.println(F("(empty)"));
+          Serial.println(F("ok"));
+        }
+      } else if (sub == "clear" && tokens.size() >= 4) {
+        const String node_id = tokens[2];
+        const String key = CanonAddr16(tokens[3]);
+        JsonObject m = sroot[node_id].to<JsonObject>();
+        m.remove(key);
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      } else if (tokens.size() >= 4) {
+        const String node_id = tokens[1];
+        const String key = CanonAddr16(tokens[2]);
+        const int rank = tokens[3].toInt();
+        JsonObject m = sroot[node_id].to<JsonObject>();
+        m[key] = rank;
+        SaveLabels();
+        Serial.println(F("ok"));
+        GuiRequestRender();
+      } else {
+        Serial.println(F(
+            "ERR sorder (use 'sorder <nodeId> <addr16> <rank>' | 'sorder clear "
+            "<nodeId> <addr16>' | 'sorder list [nodeId]')"));
       }
     } else {
       Serial.println(F("ERR (help)"));
@@ -1487,9 +1865,12 @@ void ProcessConsoleRoot() {
 // Mesh callbacks (root)
 // -----------------------------------------------------------------------------
 
-void OnReceiveRoot(uint32_t from, String& msg) {
-  DLOG("[ROOT RX] from=%u len=%u: %s\n",
-       from, static_cast<unsigned>(msg.length()), msg.c_str());
+void OnReceiveRoot(uint32_t from, String &msg) {
+
+  bool topology_changed = false;
+
+  DLOG("[ROOT RX] from=%u len=%u: %s\n", from,
+       static_cast<unsigned>(msg.length()), msg.c_str());
 
   if (g_use_dummy_data) {
     // In dummy mode, ignore real traffic to keep UI deterministic.
@@ -1502,7 +1883,7 @@ void OnReceiveRoot(uint32_t from, String& msg) {
     return;
   }
 
-  const char* type = doc["type"] | "temps";
+  const char *type = doc["type"] | "temps";
   if (strcmp(type, "temps") != 0) {
     DLOG("  ! ignoring type '%s'\n", type);
     return;
@@ -1514,28 +1895,34 @@ void OnReceiveRoot(uint32_t from, String& msg) {
   const int bus_gpio = doc["busGpio"] | -1;
 
   JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
+  bool node_was_new = nodes[String(node_id)].isNull();
   JsonObject node_obj = nodes[String(node_id)].to<JsonObject>();
+  if (node_was_new)
+    topology_changed = true;
   node_obj["busGpio"] = bus_gpio;
   node_obj["last"] = static_cast<uint32_t>(millis());
 
   const String node_id_str = String(node_id);
-  GuiUpdateNodeSummary(node_id_str.c_str(),
-                       bus_gpio,
+  GuiUpdateNodeSummary(node_id_str.c_str(), bus_gpio,
                        static_cast<uint32_t>(millis()));
 
   JsonObject sensors = node_obj["sensors"].to<JsonObject>();
   JsonArray sensor_array = doc["sensors"].as<JsonArray>();
 
-  DLOG("  nodeId=%u bus_gpio=%d sensors=%d\n",
-       node_id, bus_gpio, sensor_array.size());
+  DLOG("  nodeId=%u bus_gpio=%d sensors=%d\n", node_id, bus_gpio,
+       sensor_array.size());
 
   for (JsonObject sensor_in : sensor_array) {
-    const char* addr = sensor_in["addr"] | "";
+    const char *addr = sensor_in["addr"] | "";
     if (addr == nullptr || strlen(addr) != 16) {
       continue;
     }
 
+    JsonObject prev = sensors[addr];
+    const bool sensor_was_new = prev.isNull();
     JsonObject sensor_out = sensors[addr].to<JsonObject>();
+    if (sensor_was_new)
+      topology_changed = true;
 
     if (sensor_in["tC"].is<float>()) {
       sensor_out["tC"] = sensor_in["tC"].as<float>();
@@ -1548,23 +1935,23 @@ void OnReceiveRoot(uint32_t from, String& msg) {
     const float temp_c = sensor_out["tC"] | NAN;
     const float temp_f = isnan(temp_c) ? NAN : (1.8f * temp_c + 32.0f);
     const bool corrected = sensor_out["corr"] | false;
-    const char* label = g_labels["sensors"][addr] | "";
+    const char *label = g_labels["sensors"][addr] | "";
 
-    DLOG("    [%s]%s = %s%s\n",
-         addr,
+    DLOG("    [%s]%s = %s%s\n", addr,
          (label != nullptr && strlen(label) > 0)
              ? (String(" \"") + label + "\"").c_str()
              : "",
          isnan(temp_f) ? "NaN" : String(temp_f, 2).c_str(),
          corrected ? " (corr)" : "");
 
-    GuiUpdateSensorRow(node_id_str.c_str(),
-                       addr,
-                       temp_f,
-                       (label != nullptr && strlen(label) > 0)
-                           ? label
-                           : nullptr,
+    GuiUpdateSensorRow(node_id_str.c_str(), addr, temp_f,
+                       (label != nullptr && strlen(label) > 0) ? label
+                                                               : nullptr,
                        static_cast<uint32_t>(millis()));
+  }
+
+  if (topology_changed) {
+    SaveKnownTopology();
   }
 
   GuiRequestRender();
@@ -1574,23 +1961,24 @@ void OnConnectionsChangedRoot() {
   LogConnections();
 
   if (g_use_dummy_data) {
-    // Leave dummy view untouched.
     GuiRequestRender();
     return;
   }
 
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-
   const uint32_t now_ms = millis();
 
+  bool topology_changed = false;
+
   // Ensure each connected node has an entry.
-  for (const auto& node_id : mesh.getNodeList()) {
+  for (const auto &node_id : mesh.getNodeList()) {
     const String key = String(node_id);
 
     JsonObject node_obj = nodes[key];
     if (node_obj.isNull()) {
       node_obj = nodes[key].to<JsonObject>();
+      topology_changed = true;
     }
     if (!node_obj["last"].is<uint32_t>()) {
       node_obj["last"] = now_ms;
@@ -1598,6 +1986,10 @@ void OnConnectionsChangedRoot() {
     if (!node_obj["sensors"].is<JsonObject>()) {
       node_obj["sensors"].to<JsonObject>();
     }
+  }
+
+  if (topology_changed) {
+    SaveKnownTopology();
   }
 
   // Do not delete nodes; they age out visually.
@@ -1618,6 +2010,9 @@ void setup() {
   MigrateStorageIfNeeded();
   EnsureDocuments();
 
+  // NEW: pre-populate tiles from persisted topology
+  LoadKnownTopology();
+
   DisplayInit();
   GuiInit();
   GuiUpdateNetwork(0);
@@ -1633,12 +2028,10 @@ void setup() {
   mesh.onReceive(&OnReceiveRoot);
   mesh.onChangedConnections(&OnConnectionsChangedRoot);
 
-  g_task_announce.set(
-      TASK_IMMEDIATE, TASK_FOREVER,
-      []() {
-        RootAnnounce();
-        g_task_announce.delay(ROOT_ANNOUNCE_MS);
-      });
+  g_task_announce.set(TASK_IMMEDIATE, TASK_FOREVER, []() {
+    RootAnnounce();
+    g_task_announce.delay(ROOT_ANNOUNCE_MS);
+  });
   user_scheduler.addTask(g_task_announce);
   g_task_announce.enable();
 
@@ -1655,11 +2048,12 @@ void loop() {
 // -----------------------------------------------------------------------------
 // LEAF BUILD
 // -----------------------------------------------------------------------------
-#else  // !MESH_IS_ROOT
+#else // !MESH_IS_ROOT
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
 #include <Preferences.h>
+#include <map>
 
 std::vector<Address> g_devices;
 
@@ -1680,31 +2074,44 @@ struct CalEntry {
 std::vector<CalEntry> g_cal_entries;
 Preferences g_leaf_prefs;
 
-// Live calibration session.
-struct CalSession {
-  CalStage stage = kCalIdle;
-  String addr;
-  float last_raw = NAN;
-
-  bool have_ice = false;
-  bool have_boil = false;
-
+// Per-sensor work-in-progress (raw locks while calibrating).
+struct CalPoint {
+  float last_raw = NAN; // last live reading during an active stage
+  bool ice_locked = false;
   float raw_ice = 0.0f;
   float act_ice = 0.0f;
+  bool boil_locked = false;
   float raw_boil = 0.0f;
   float act_boil = 0.0f;
+
+  // NEW: stability tracking (per active calibration session)
+  uint32_t last_change_ms = 0; // when the reading last changed
+  bool steady = false;         // true if unchanged for >= kSteadyMs
+};
+
+// All WIP points keyed by sensor address (hex16)
+std::map<String, CalPoint> g_cal_work;
+
+// Live calibration session: a stage plus a set of active sensors.
+struct CalSession {
+  CalStage stage = kCalIdle;        // kCalIdle, kCalIce, kCalBoil
+  std::vector<String> active_addrs; // hex16 addresses currently being tracked
 };
 
 CalSession g_cal_session;
 Task g_task_cal;
 
+// Steady-state detection: unchanged reading for >=30s at 0.001 C tolerance.
+constexpr uint32_t kSteadyMs = 30000; // ms
+constexpr float kSteadyEpsC = 0.001f; // °C
+
 namespace {
 
-bool FindDeviceByAddr(const String& addr16, Address* out_addr) {
+bool FindDeviceByAddr(const String &addr16, Address *out_addr) {
   if (addr16.length() != 16) {
     return false;
   }
-  for (const auto& address : g_devices) {
+  for (const auto &address : g_devices) {
     if (addr16.equalsIgnoreCase(addrToHex(address.data()))) {
       *out_addr = address;
       return true;
@@ -1713,7 +2120,7 @@ bool FindDeviceByAddr(const String& addr16, Address* out_addr) {
   return false;
 }
 
-int FindCalIndex(const String& addr) {
+int FindCalIndex(const String &addr) {
   for (size_t i = 0; i < g_cal_entries.size(); ++i) {
     if (g_cal_entries[i].addr.equalsIgnoreCase(addr)) {
       return static_cast<int>(i);
@@ -1722,7 +2129,7 @@ int FindCalIndex(const String& addr) {
   return -1;
 }
 
-void SetCal(const String& addr, const Coeff& coeff) {
+void SetCal(const String &addr, const Coeff &coeff) {
   const int index = FindCalIndex(addr);
   if (index >= 0) {
     g_cal_entries[static_cast<size_t>(index)].coeff = coeff;
@@ -1731,14 +2138,12 @@ void SetCal(const String& addr, const Coeff& coeff) {
   }
 }
 
-bool IsIdentity(const Coeff& coeff) {
-  return (fabsf(coeff.a1 - 1.0f) < 1e-6f) &&
-         (fabsf(coeff.a0) < 1e-6f);
+bool IsIdentity(const Coeff &coeff) {
+  return (fabsf(coeff.a1 - 1.0f) < 1e-6f) && (fabsf(coeff.a0) < 1e-6f);
 }
 
-float ApplyCorrection(float temp_raw_c,
-                      const String& addr16,
-                      bool* out_corrected) {
+float ApplyCorrection(float temp_raw_c, const String &addr16,
+                      bool *out_corrected) {
   const int index = FindCalIndex(addr16);
   if (index < 0) {
     if (out_corrected != nullptr) {
@@ -1747,7 +2152,7 @@ float ApplyCorrection(float temp_raw_c,
     return temp_raw_c;
   }
 
-  const Coeff& coeff = g_cal_entries[static_cast<size_t>(index)].coeff;
+  const Coeff &coeff = g_cal_entries[static_cast<size_t>(index)].coeff;
   const float temp_corr = coeff.a1 * temp_raw_c + coeff.a0;
 
   if (out_corrected != nullptr) {
@@ -1762,7 +2167,7 @@ void SaveAllCalibration() {
 
   JsonDocument index_doc;
   JsonArray index_array = index_doc.to<JsonArray>();
-  for (const auto& entry : g_cal_entries) {
+  for (const auto &entry : g_cal_entries) {
     index_array.add(entry.addr);
   }
 
@@ -1770,16 +2175,13 @@ void SaveAllCalibration() {
   serializeJson(index_doc, index_json);
   g_leaf_prefs.putString("index", index_json);
 
-  for (const auto& entry : g_cal_entries) {
+  for (const auto &entry : g_cal_entries) {
     char key[32];
     snprintf(key, sizeof(key), "c_%s", entry.addr.c_str());
 
-    const Coeff& c = entry.coeff;
+    const Coeff &c = entry.coeff;
     char value[64];
-    snprintf(value,
-             sizeof(value),
-             "%.8f,%.8f",
-             static_cast<double>(c.a1),
+    snprintf(value, sizeof(value), "%.8f,%.8f", static_cast<double>(c.a1),
              static_cast<double>(c.a0));
     g_leaf_prefs.putString(key, value);
   }
@@ -1797,7 +2199,7 @@ void LoadAllCalibration() {
     JsonDocument index_doc;
     if (deserializeJson(index_doc, index_json) == DeserializationError::Ok) {
       for (JsonVariant value : index_doc.as<JsonArray>()) {
-        const String addr = value.as<const char*>();
+        const String addr = value.as<const char *>();
 
         char key[32];
         snprintf(key, sizeof(key), "c_%s", addr.c_str());
@@ -1811,8 +2213,7 @@ void LoadAllCalibration() {
 
           int parsed = sscanf(cal_str.c_str(), "%f,%f", &a1, &a0);
           if (parsed != 2) {
-            parsed = sscanf(cal_str.c_str(),
-                            "%f,%f,%f", &legacy_a2, &a1, &a0);
+            parsed = sscanf(cal_str.c_str(), "%f,%f,%f", &legacy_a2, &a1, &a0);
           }
           if (parsed >= 2) {
             coeff.a1 = a1;
@@ -1827,136 +2228,253 @@ void LoadAllCalibration() {
   g_leaf_prefs.end();
 }
 
-void ClearCalibration(const String& addr) {
+void ClearCalibration(const String &addr) {
   const int index = FindCalIndex(addr);
   if (index >= 0) {
-    g_cal_entries.erase(g_cal_entries.begin() +
-                        static_cast<size_t>(index));
+    g_cal_entries.erase(g_cal_entries.begin() + static_cast<size_t>(index));
   }
   SaveAllCalibration();
 }
 
-// Live calibration task.
-void CalibrationTaskFn() {
-  if (g_cal_session.stage == kCalIdle ||
-      g_cal_session.addr.length() != 16) {
-    g_task_cal.disable();
-    return;
+// Collect a vector of all currently attached sensor addresses (hex16).
+static std::vector<String> AllAttachedAddr16() {
+  std::vector<String> out;
+  out.reserve(g_devices.size());
+  for (const auto &addr : g_devices) {
+    out.push_back(addrToHex(addr.data()));
   }
-
-  Address addr;
-  if (!FindDeviceByAddr(g_cal_session.addr, &addr)) {
-    Serial.println(F("CAL ERROR: sensor not found; aborting"));
-    g_cal_session.stage = kCalIdle;
-    g_task_cal.disable();
-    return;
-  }
-
-  g_ds18.requestTemperatures();
-  const float temp_c =
-      g_ds18.getTempC(reinterpret_cast<const uint8_t*>(addr.data()));
-  g_cal_session.last_raw = temp_c;
-
-  const char* stage_str =
-      (g_cal_session.stage == kCalIce) ? "ICE" : "BOIL";
-
-  if (!isnan(temp_c)) {
-    Serial.printf("CAL %s %s : raw=%.3f C\n",
-                  stage_str,
-                  g_cal_session.addr.c_str(),
-                  temp_c);
-  }
-
-  g_task_cal.delay(1000);
+  return out;
 }
 
-void CalibrationStart(const String& addr16, CalStage stage) {
-  if (addr16.length() != 16) {
-    Serial.println(F("ERR addr16"));
+// Start a session for a provided list of addresses (must be non-empty).
+static void CalibrationStartFor(const std::vector<String> &addrs,
+                                CalStage stage) {
+  if (addrs.empty()) {
+    Serial.println(F("CAL ERROR: no sensors"));
     return;
   }
 
   g_cal_session.stage = stage;
-  g_cal_session.addr = addr16;
-  g_cal_session.last_raw = NAN;
+  g_cal_session.active_addrs = addrs;
 
-  if (stage == kCalIce) {
-    g_cal_session.have_ice = false;
-  }
-  if (stage == kCalBoil) {
-    g_cal_session.have_boil = false;
+  // Ensure work slots exist.
+  for (const auto &a : g_cal_session.active_addrs) {
+    (void)g_cal_work[a]; // default-construct if missing
   }
 
-  Serial.printf("CAL %s started for %s\n",
-                (stage == kCalIce ? "ICE" : "BOIL"),
-                addr16.c_str());
+  for (const auto &a : g_cal_session.active_addrs) {
+    CalPoint &cp = g_cal_work[a]; // default-construct if missing
+    cp.last_raw = NAN;            // force first sample to "change"
+    cp.last_change_ms = millis();
+    cp.steady = false;
+  }
+
+  const char *st = (stage == kCalIce) ? "ICE" : "BOIL";
+  if (addrs.size() == 1) {
+    Serial.printf("CAL %s started for %s\n", st, addrs[0].c_str());
+  } else {
+    Serial.printf("CAL %s started for %u sensors\n", st,
+                  static_cast<unsigned>(addrs.size()));
+  }
 
   g_task_cal.enableIfNot();
 }
 
-void CalibrationLock(float actual_c) {
+// Overload: start for a single address (validates it exists).
+static void CalibrationStart(const String &addr16, CalStage stage) {
+  if (addr16.length() != 16) {
+    Serial.println(F("ERR addr16"));
+    return;
+  }
+  Address dummy;
+  if (!FindDeviceByAddr(addr16, &dummy)) {
+    Serial.println(F("CAL ERROR: sensor not found"));
+    return;
+  }
+  CalibrationStartFor(std::vector<String>{addr16}, stage);
+}
+
+// Start for all attached sensors.
+static void CalibrationStartAll(CalStage stage) {
+  auto all = AllAttachedAddr16();
+  CalibrationStartFor(all, stage);
+}
+
+// Lock current stage for all active sensors with a single actual reference.
+static void CalibrationLockAll(float actual_c) {
   if (g_cal_session.stage == kCalIdle) {
     Serial.println(F("CAL idle"));
     return;
   }
-  if (isnan(g_cal_session.last_raw)) {
-    Serial.println(F("CAL no reading yet"));
-    return;
+
+  const bool is_ice = (g_cal_session.stage == kCalIce);
+  const char *tag = is_ice ? "ICE" : "BOIL";
+
+  size_t locked = 0;
+  for (const auto &addr : g_cal_session.active_addrs) {
+    CalPoint &cp = g_cal_work[addr];
+    if (isnan(cp.last_raw)) {
+      Serial.printf("CAL %s %s : no reading yet\n", tag, addr.c_str());
+      continue;
+    }
+    if (is_ice) {
+      cp.raw_ice = cp.last_raw;
+      cp.act_ice = actual_c;
+      cp.ice_locked = true;
+    } else {
+      cp.raw_boil = cp.last_raw;
+      cp.act_boil = actual_c;
+      cp.boil_locked = true;
+    }
+    ++locked;
+    Serial.printf("CAL %s %s : raw=%.3fC locked (act=%.3fC)\n", tag,
+                  addr.c_str(), static_cast<double>(cp.last_raw),
+                  static_cast<double>(actual_c));
   }
 
-  if (g_cal_session.stage == kCalIce) {
-    g_cal_session.raw_ice = g_cal_session.last_raw;
-    g_cal_session.act_ice = actual_c;
-    g_cal_session.have_ice = true;
-    Serial.println(F("ICE locked."));
-    g_cal_session.stage = kCalIdle;
-  } else if (g_cal_session.stage == kCalBoil) {
-    g_cal_session.raw_boil = g_cal_session.last_raw;
-    g_cal_session.act_boil = actual_c;
-    g_cal_session.have_boil = true;
-    Serial.println(F("BOIL locked."));
-    g_cal_session.stage = kCalIdle;
+  Serial.printf("CAL %s locks captured: %u\n", tag,
+                static_cast<unsigned>(locked));
+
+  // Stop live sampling until next start.
+  g_cal_session.stage = kCalIdle;
+  g_cal_session.active_addrs.clear();
+  g_task_cal.disable();
+}
+
+// Solve and save coefficients for every sensor with both points captured.
+static void CalibrationSolveAndSaveAll() {
+  size_t saved = 0;
+  for (auto &kv : g_cal_work) {
+    const String &addr = kv.first;
+    CalPoint &cp = kv.second;
+
+    if (!(cp.ice_locked && cp.boil_locked))
+      continue;
+
+    const float x1 = cp.raw_ice, y1 = cp.act_ice;
+    const float x2 = cp.raw_boil, y2 = cp.act_boil;
+
+    if (fabsf(x2 - x1) < 1e-4f) {
+      Serial.printf("CAL ERROR %s: identical raw points\n", addr.c_str());
+      continue;
+    }
+
+    Coeff coeff;
+    coeff.a1 = (y2 - y1) / (x2 - x1);
+    coeff.a0 = y1 - coeff.a1 * x1;
+
+    SetCal(addr, coeff);
+    ++saved;
+
+    Serial.printf("CAL SAVED %s : a1=%.6f a0=%.6f\n", addr.c_str(),
+                  static_cast<double>(coeff.a1), static_cast<double>(coeff.a0));
+    Serial.printf(
+        "  check: ice  raw=%.3f -> %.3f (want %.3f)\n", static_cast<double>(x1),
+        static_cast<double>(coeff.a1 * x1 + coeff.a0), static_cast<double>(y1));
+    Serial.printf(
+        "  check: boil raw=%.3f -> %.3f (want %.3f)\n", static_cast<double>(x2),
+        static_cast<double>(coeff.a1 * x2 + coeff.a0), static_cast<double>(y2));
+
+    // Clear locks after saving so user can re-run later if desired.
+    cp.ice_locked = false;
+    cp.boil_locked = false;
+  }
+
+  if (saved > 0) {
+    SaveAllCalibration();
+    Serial.printf("CAL saved %u sensor(s)\n", static_cast<unsigned>(saved));
+  } else {
+    Serial.println(F("CAL nothing to save (need both ICE and BOIL)"));
   }
 }
 
-void CalibrationSolveAndSave() {
-  if (!g_cal_session.have_ice || !g_cal_session.have_boil) {
-    Serial.println(F("CAL not complete"));
+// Live sampling task: print each active sensor once per second during ICE/BOIL.
+void CalibrationTaskFn() {
+  if (g_cal_session.stage == kCalIdle || g_cal_session.active_addrs.empty()) {
+    g_task_cal.disable();
     return;
   }
 
-  const float x1 = g_cal_session.raw_ice;
-  const float y1 = g_cal_session.act_ice;
-  const float x2 = g_cal_session.raw_boil;
-  const float y2 = g_cal_session.act_boil;
+  // Trigger conversions once for all sensors.
+  g_ds18.requestTemperatures();
 
-  if (fabsf(x2 - x1) < 1e-4f) {
-    Serial.println(F("CAL ERROR: identical raw points"));
-    return;
+  const bool is_ice = (g_cal_session.stage == kCalIce);
+  const char *tag = is_ice ? "ICE" : "BOIL";
+  const uint32_t now_ms = millis();
+
+  // Build one concise status line for all active sensors.
+  String line;
+  line.reserve(128);
+  line += "CAL ";
+  line += tag;
+  line += ": ";
+
+  for (size_t i = 0; i < g_cal_session.active_addrs.size(); ++i) {
+    const String &addr16 = g_cal_session.active_addrs[i];
+
+    Address addr;
+    if (!FindDeviceByAddr(addr16, &addr)) {
+      // Print short id + missing marker.
+      const String short_id =
+          addr16.substring(max(0, (int)addr16.length() - 4));
+      line += short_id;
+      line += "=NaN";
+      if (i + 1 < g_cal_session.active_addrs.size())
+        line += "  ";
+      continue;
+    }
+
+    const float t_c =
+        g_ds18.getTempC(reinterpret_cast<const uint8_t *>(addr.data()));
+
+    CalPoint &cp = g_cal_work[addr16];
+
+    // Update stability state.
+    bool changed = false;
+    if (isnan(cp.last_raw) && !isnan(t_c)) {
+      changed = true;
+    } else if (!isnan(cp.last_raw) && !isnan(t_c)) {
+      if (fabsf(t_c - cp.last_raw) > kSteadyEpsC) {
+        changed = true;
+      }
+    } else if (isnan(t_c) != isnan(cp.last_raw)) {
+      changed = true;
+    }
+
+    if (changed) {
+      cp.last_raw = t_c;
+      cp.last_change_ms = now_ms;
+      cp.steady = false;
+    } else {
+      if (now_ms - cp.last_change_ms >= kSteadyMs) {
+        cp.steady = true;
+      }
+    }
+
+    // Append compact display: last 4 hex chars + value [+* if steady]
+    const String short_id = addr16.substring(max(0, (int)addr16.length() - 4));
+    line += short_id;
+    line += '=';
+
+    if (!isnan(t_c)) {
+      // Match prior precision (3 decimals).
+      line += String(t_c, 3);
+      if (cp.steady) {
+        line += '*';
+      }
+    } else {
+      line += "NaN";
+    }
+
+    if (i + 1 < g_cal_session.active_addrs.size()) {
+      line += "  ";
+    }
   }
 
-  Coeff coeff;
-  coeff.a1 = (y2 - y1) / (x2 - x1);
-  coeff.a0 = y1 - coeff.a1 * x1;
+  Serial.println(line);
 
-  SetCal(g_cal_session.addr, coeff);
-  SaveAllCalibration();
-
-  Serial.printf("CAL SAVED %s : a1=%.6f a0=%.6f\n",
-                g_cal_session.addr.c_str(),
-                static_cast<double>(coeff.a1),
-                static_cast<double>(coeff.a0));
-  Serial.printf("  check: ice  raw=%.3f -> %.3f (want %.3f)\n",
-                static_cast<double>(x1),
-                static_cast<double>(coeff.a1 * x1 + coeff.a0),
-                static_cast<double>(y1));
-  Serial.printf("  check: boil raw=%.3f -> %.3f (want %.3f)\n",
-                static_cast<double>(x2),
-                static_cast<double>(coeff.a1 * x2 + coeff.a0),
-                static_cast<double>(y2));
-
-  g_cal_session = CalSession{};
-  g_task_cal.disable();
+  // Run at ~1 Hz as before.
+  g_task_cal.delay(1000);
 }
 
 void ScanSensors() {
@@ -1965,15 +2483,13 @@ void ScanSensors() {
 
   DeviceAddress raw;
   const int count = g_ds18.getDeviceCount();
-  DLOG("[LEAF] scanning DS18B20 on GPIO %d: found=%d\n",
-       ONEWIRE_PIN, count);
+  DLOG("[LEAF] scanning DS18B20 on GPIO %d: found=%d\n", ONEWIRE_PIN, count);
 
   for (int i = 0; i < count; ++i) {
     if (g_ds18.getAddress(raw, i)) {
       g_devices.emplace_back();
       memcpy(g_devices.back().data(), raw, 8);
-      DLOG("  addr[%d]=%s\n", i,
-           addrToHex(g_devices.back().data()).c_str());
+      DLOG("  addr[%d]=%s\n", i, addrToHex(g_devices.back().data()).c_str());
     }
   }
 
@@ -1993,10 +2509,10 @@ void SendTemperatures() {
 
   JsonArray sensors = doc["sensors"].to<JsonArray>();
 
-  for (const auto& address : g_devices) {
+  for (const auto &address : g_devices) {
     const String addr16 = addrToHex(address.data());
     const float temp_raw_c =
-        g_ds18.getTempC(reinterpret_cast<const uint8_t*>(address.data()));
+        g_ds18.getTempC(reinterpret_cast<const uint8_t *>(address.data()));
 
     bool corrected = false;
     const float temp_out_c =
@@ -2012,11 +2528,8 @@ void SendTemperatures() {
     }
 
     if (!isnan(temp_raw_c)) {
-      DLOG("[LEAF MEAS] %s raw=%.2fC out=%.2fC%s\n",
-           addr16.c_str(),
-           temp_raw_c,
-           temp_out_c,
-           corrected ? " (corr)" : "");
+      DLOG("[LEAF MEAS] %s raw=%.2fC out=%.2fC%s\n", addr16.c_str(), temp_raw_c,
+           temp_out_c, corrected ? " (corr)" : "");
     } else {
       DLOG("[LEAF MEAS] %s = (disconnected)\n", addr16.c_str());
     }
@@ -2026,18 +2539,39 @@ void SendTemperatures() {
   serializeJson(doc, message);
 
   const bool use_unicast =
-      (g_root_id != 0U) &&
-      ((millis() - g_root_last_seen_ms) < 15000U);
+      (g_root_id != 0U) && ((millis() - g_root_last_seen_ms) < 15000U);
 
-  DLOG("[LEAF TX %s] %s\n",
-       use_unicast ? "unicast" : "bcast",
-       message.c_str());
+  DLOG("[LEAF TX %s] %s\n", use_unicast ? "unicast" : "bcast", message.c_str());
 
   if (use_unicast) {
     mesh.sendSingle(g_root_id, message);
   } else {
     mesh.sendBroadcast(message);
   }
+}
+
+// Approximate boiling point of water [°C] from station pressure in inches of
+// Hg. Uses Antoine equation (valid ~1–100°C): log10(P_mmHg) = A - B / (C + T)
+// A=8.07131, B=1730.63, C=233.426  (water)
+static float boilingPointC_fromInHg(float inHg) {
+  if (inHg <= 0.0f)
+    return NAN;
+
+  const float P_mmHg = inHg * 25.4f; // 1 inHg = 25.4 mmHg
+  if (P_mmHg <= 0.0f)
+    return NAN;
+
+  const float A = 8.07131f;
+  const float B = 1730.63f;
+  const float C = 233.426f;
+
+  float logP = log10f(P_mmHg);
+  float denom = A - logP;
+  if (denom == 0.0f)
+    return NAN;
+
+  float T = B / denom - C; // °C
+  return T;
 }
 
 void ProcessConsoleLeaf() {
@@ -2055,9 +2589,8 @@ void ProcessConsoleLeaf() {
       input_line += ch;
 
       if (input_line.length() > kMaxConsoleLineLength) {
-        const int excess =
-            static_cast<int>(input_line.length()) -
-            static_cast<int>(kMaxConsoleLineLength);
+        const int excess = static_cast<int>(input_line.length()) -
+                           static_cast<int>(kMaxConsoleLineLength);
         input_line.remove(0, excess);
       }
       continue;
@@ -2096,7 +2629,7 @@ void ProcessConsoleLeaf() {
       continue;
     }
 
-    const String& command = tokens[0];
+    const String &command = tokens[0];
 
     if (command == "debug" && tokens.size() >= 2) {
       g_debug_enabled = (tokens[1] == "on");
@@ -2110,44 +2643,71 @@ void ProcessConsoleLeaf() {
       SendTemperatures();
       Serial.println(F("ok"));
 
-    } else if (command == "cal" && tokens.size() >= 2) {
-      const String& sub = tokens[1];
+    } else if (command == "boilpt" && tokens.size() >= 2) {
+      float inHg = tokens[1].toFloat();
+      float TbC = boilingPointC_fromInHg(inHg);
+      if (isnan(TbC)) {
+        Serial.println(F("ERR invalid pressure"));
+      } else {
+        float TbF = TbC * 9.0f / 5.0f + 32.0f;
+        Serial.printf("Boiling point at %.3f inHg: %.3f C (%.3f F)\n",
+                      (double)inHg, (double)TbC, (double)TbF);
+      }
 
-      if (sub == "ice" && tokens.size() >= 3) {
-        CalibrationStart(tokens[2], kCalIce);
+    } else if (command == "cal" && tokens.size() >= 2) {
+      const String &sub = tokens[1];
+
+      if (sub == "ice") {
+        if (tokens.size() >= 3) {
+          // Single sensor
+          CalibrationStart(tokens[2], kCalIce);
+        } else {
+          // All sensors
+          CalibrationStartAll(kCalIce);
+        }
         Serial.println(F("ok"));
 
-      } else if (sub == "boil" && tokens.size() >= 3) {
-        CalibrationStart(tokens[2], kCalBoil);
+      } else if (sub == "boil") {
+        if (tokens.size() >= 3) {
+          CalibrationStart(tokens[2], kCalBoil);
+        } else {
+          CalibrationStartAll(kCalBoil);
+        }
         Serial.println(F("ok"));
 
       } else if (sub == "lock" && tokens.size() >= 3) {
-        CalibrationLock(tokens[2].toFloat());
+        CalibrationLockAll(tokens[2].toFloat());
         Serial.println(F("ok"));
 
       } else if (sub == "solve") {
-        CalibrationSolveAndSave();
+        CalibrationSolveAndSaveAll();
         Serial.println(F("ok"));
 
       } else if (sub == "list") {
-        for (const auto& entry : g_cal_entries) {
-          const Coeff& c = entry.coeff;
-          Serial.printf("%s : a1=%.6f a0=%.6f\n",
-                        entry.addr.c_str(),
-                        static_cast<double>(c.a1),
-                        static_cast<double>(c.a0));
+        // Show all saved coefficients (same as before).
+        for (const auto &entry : g_cal_entries) {
+          const Coeff &c = entry.coeff;
+          Serial.printf("%s : a1=%.6f a0=%.6f\n", entry.addr.c_str(),
+                        static_cast<double>(c.a1), static_cast<double>(c.a0));
         }
 
-      } else if (sub == "show" && tokens.size() >= 3) {
-        const int idx = FindCalIndex(tokens[2]);
-        if (idx >= 0) {
-          const Coeff& c = g_cal_entries[static_cast<size_t>(idx)].coeff;
-          Serial.printf("%s : a1=%.6f a0=%.6f\n",
-                        tokens[2].c_str(),
-                        static_cast<double>(c.a1),
-                        static_cast<double>(c.a0));
+      } else if (sub == "show") {
+        if (tokens.size() >= 3) {
+          const int idx = FindCalIndex(tokens[2]);
+          if (idx >= 0) {
+            const Coeff &c = g_cal_entries[static_cast<size_t>(idx)].coeff;
+            Serial.printf("%s : a1=%.6f a0=%.6f\n", tokens[2].c_str(),
+                          static_cast<double>(c.a1), static_cast<double>(c.a0));
+          } else {
+            Serial.println(F("not found"));
+          }
         } else {
-          Serial.println(F("not found"));
+          // No addr: show all saved (convenience).
+          for (const auto &entry : g_cal_entries) {
+            const Coeff &c = entry.coeff;
+            Serial.printf("%s : a1=%.6f a0=%.6f\n", entry.addr.c_str(),
+                          static_cast<double>(c.a1), static_cast<double>(c.a0));
+          }
         }
 
       } else if (sub == "clear" && tokens.size() >= 3) {
@@ -2164,20 +2724,25 @@ void ProcessConsoleLeaf() {
 
       } else {
         Serial.println(
-            F("cal cmds: ice <addr16> | boil <addr16> | "
-              "lock <actualC> | solve | list | show <addr16> | "
-              "clear <addr16> | save | load"));
+            F("cal cmds:\n"
+              "  cal ice [addr16]     # start ICE for one or ALL sensors\n"
+              "  cal boil [addr16]    # start BOIL for one or ALL sensors\n"
+              "  cal lock <actualC>   # lock current stage for all active "
+              "sensors\n"
+              "  cal solve            # solve+save all sensors with ICE+BOIL\n"
+              "  cal list             # list saved coefficients\n"
+              "  cal show [addr16]    # show saved coeff(s)\n"
+              "  cal clear <addr16>   # clear saved coeff for one\n"
+              "  cal save | cal load  # persist/load saved coeffs"));
       }
 
     } else if (command == "help" || command == "?") {
       Serial.println(F("Commands (leaf):"));
-      Serial.println(F("  debug on|off | scan | sendnow"));
-      Serial.println(
-          F("  cal ice <addr16> | cal boil <addr16> | "
-            "cal lock <actualC> | cal solve"));
-      Serial.println(
-          F("  cal list | cal show <addr16> | cal clear <addr16> | "
-            "cal save | cal load"));
+      Serial.println(F("  debug on|off | scan | sendnow | boilpt <inHg>"));
+      Serial.println(F("  cal ice [addr16] | cal boil [addr16]"));
+      Serial.println(F("  cal lock <actualC> | cal solve"));
+      Serial.println(F("  cal list | cal show [addr16] | cal clear <addr16> | "
+                       "cal save | cal load"));
 
     } else {
       Serial.println(F("ERR (help)"));
@@ -2188,9 +2753,9 @@ void ProcessConsoleLeaf() {
 }
 
 // painlessMesh callbacks (leaf).
-void OnReceiveLeaf(uint32_t from, String& msg) {
-  DLOG("[LEAF RX] from=%u len=%u: %s\n",
-       from, static_cast<unsigned>(msg.length()), msg.c_str());
+void OnReceiveLeaf(uint32_t from, String &msg) {
+  DLOG("[LEAF RX] from=%u len=%u: %s\n", from,
+       static_cast<unsigned>(msg.length()), msg.c_str());
 
   JsonDocument doc;
   if (deserializeJson(doc, msg) != DeserializationError::Ok) {
@@ -2198,7 +2763,7 @@ void OnReceiveLeaf(uint32_t from, String& msg) {
     return;
   }
 
-  const char* type = doc["type"] | "";
+  const char *type = doc["type"] | "";
   if (strcmp(type, "root_announce") == 0) {
     const uint32_t root_id = doc["rootId"] | 0U;
     if (root_id != 0U) {
@@ -2209,11 +2774,9 @@ void OnReceiveLeaf(uint32_t from, String& msg) {
   }
 }
 
-void OnConnectionsChangedLeaf() {
-  LogConnections();
-}
+void OnConnectionsChangedLeaf() { LogConnections(); }
 
-}  // namespace
+} // namespace
 
 // Arduino entry points (leaf)
 void setup() {
@@ -2230,19 +2793,16 @@ void setup() {
   mesh.onReceive(&OnReceiveLeaf);
   mesh.onChangedConnections(&OnConnectionsChangedLeaf);
 
-  g_task_send.set(
-      TASK_IMMEDIATE,
-      TASK_FOREVER,
-      []() {
-        SendTemperatures();
-        g_task_send.delay(SEND_PERIOD_MS);
-      });
+  g_task_send.set(TASK_IMMEDIATE, TASK_FOREVER, []() {
+    SendTemperatures();
+    g_task_send.delay(SEND_PERIOD_MS);
+  });
   user_scheduler.addTask(g_task_send);
   g_task_send.enable();
 
   g_task_cal.set(TASK_IMMEDIATE, TASK_FOREVER, CalibrationTaskFn);
   user_scheduler.addTask(g_task_cal);
-  g_task_cal.disable();  // Enabled by CalibrationStart().
+  g_task_cal.disable(); // Enabled by CalibrationStart().
 
   Serial.println(F("LEAF ready. Type 'help'."));
 }
@@ -2252,4 +2812,4 @@ void loop() {
   ProcessConsoleLeaf();
 }
 
-#endif  // MESH_IS_ROOT
+#endif // MESH_IS_ROOT
