@@ -19,7 +19,6 @@
 
 #include "serial_console.h"
 
-
 #include <array>
 #include <vector>
 
@@ -79,10 +78,27 @@ void LogConnections() {
 static String JoinTokens(int argc, const String argv[], int start) {
   String out;
   for (int i = start; i < argc; ++i) {
-    if (i > start) out += ' ';
+    if (i > start)
+      out += ' ';
     out += argv[i];
   }
   return out;
+}
+
+// Prints document usage in both ArduinoJson v6 and v7.
+static void PrintJsonStats(Print &out, const char *name,
+                           const JsonDocument &doc) {
+  const unsigned usage = static_cast<unsigned>(doc.memoryUsage());
+  const bool over = doc.overflowed();
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+  // v7: no capacity()
+  out.printf("%s: usage=%uB%s\n", name, usage, over ? " (OVERFLOW)" : "");
+#else
+  // v6: capacity() is available
+  const unsigned cap = static_cast<unsigned>(doc.capacity());
+  out.printf("%s: usage=%u/%uB%s\n", name, usage, cap,
+             over ? " (OVERFLOW)" : "");
+#endif
 }
 
 } // namespace
@@ -119,7 +135,7 @@ uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
 
 // Flashing (root)
 constexpr uint32_t kDefaultFlashIntervalMs =
-    5000; // ms between flash toggles; 0 = off
+    1000; // ms between flash toggles; 0 = off
 uint32_t g_flash_interval_ms = kDefaultFlashIntervalMs;
 bool g_flash_phase = false; // toggled in DisplayLoop()
 
@@ -127,8 +143,9 @@ bool g_flash_phase = false; // toggled in DisplayLoop()
 Preferences g_root_preferences;
 
 // Last-seen data and labels (persisted labels, volatile last_seen).
-JsonDocument g_last_seen;
-JsonDocument g_labels;
+// At global scope (v7 supports StaticJsonDocument)
+static StaticJsonDocument<65536> g_last_seen; // was 32768
+static StaticJsonDocument<8192> g_labels;
 
 // Mesh tasks.
 Task g_task_announce;
@@ -199,6 +216,35 @@ void GuiRebuildTiles(); // forward
 // ---------------------------------------------------------------------------
 // Storage helpers
 // ---------------------------------------------------------------------------
+
+// Per-node alert/warning mute under g_labels["mute"][nodeId]:
+// bit0 = LOW side muted; bit1 = HIGH side muted.
+enum NodeMuteMask : uint8_t {
+  kMuteNone = 0,
+  kMuteLow = 1 << 0,
+  kMuteHigh = 1 << 1,
+  kMuteBoth = kMuteLow | kMuteHigh
+};
+
+static uint8_t GetNodeMuteMask(const String &node_id) {
+  JsonVariant v = g_labels["mute"][node_id];
+  if (v.is<int>())
+    return static_cast<uint8_t>(v.as<int>()) & 0x3;
+  return kMuteNone;
+}
+
+static const char *NodeMuteMaskToString(uint8_t m) {
+  switch (m & 0x3) {
+  case kMuteNone:
+    return "off";
+  case kMuteLow:
+    return "low";
+  case kMuteHigh:
+    return "high";
+  default:
+    return "both";
+  }
+}
 
 int LoadStorageVersion() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
@@ -348,13 +394,14 @@ void EnsureDocuments() {
   if (!g_labels["sensors"].is<JsonObject>())
     g_labels["sensors"].to<JsonObject>();
   if (!g_labels["order"].is<JsonObject>())
-    g_labels["order"].to<JsonObject>(); // global sensor order (existing)
+    g_labels["order"].to<JsonObject>();
   if (!g_labels["tile_order"].is<JsonObject>())
-    g_labels["tile_order"].to<JsonObject>(); // node/tile order (existing)
-
-  // NEW: per-node sensor order map: sorder[nodeId][addr16] = rank
+    g_labels["tile_order"].to<JsonObject>();
   if (!g_labels["sorder"].is<JsonObject>())
     g_labels["sorder"].to<JsonObject>();
+  // NEW:
+  if (!g_labels["mute"].is<JsonObject>())
+    g_labels["mute"].to<JsonObject>();
 }
 
 // Default high rank means "unspecified / after ranked ones"
@@ -365,66 +412,105 @@ static int GetNodeRank(const String &node_id) {
   return 1000000;
 }
 
-// Persist only the topology (node IDs and sensor addr16s), not temperatures.
-// Key: "known"
-void SaveKnownTopology() {
-  EnsureDocuments();
-  JsonObject nodes_cur = g_last_seen["nodes"].as<JsonObject>();
+// --- Topology persistence: robust, quiet, and idempotent --------------------
+static String g_known_cache; // last JSON we wrote or observed in NVS
+static uint32_t g_known_last_ms = 0;
 
-  // Load prior snapshot (if any) so we can merge.
-  JsonDocument kd;
-  {
-    g_root_preferences.begin("meshroot", /*readOnly=*/true);
-    const String prev = g_root_preferences.getString("known", "");
-    g_root_preferences.end();
-    if (!prev.isEmpty()) {
-      (void)deserializeJson(kd, prev);  // best-effort
-    }
+// Tiny helper: build {"nodes":["123","456",...]} without ArduinoJson heap.
+static String BuildKnownJson(const std::vector<String> &ids) {
+  // Precompute reserve for fewer reallocs.
+  size_t total = 12; // {"nodes":[]}
+  for (const auto &s : ids)
+    total += s.length() + 3; // quotes + comma
+  String out;
+  out.reserve(total);
+  out += F("{\"nodes\":[");
+  for (size_t i = 0; i < ids.size(); ++i) {
+    out += '"';
+    out += ids[i];
+    out += '"';
+    if (i + 1 < ids.size())
+      out += ',';
   }
-
-  JsonObject nodes_out = kd["nodes"].to<JsonObject>();
-
-  // Merge: ensure every current node/sensor is present in the saved set.
-  for (JsonPair n : nodes_cur) {
-    const char* node_id = n.key().c_str();
-    JsonArray arr = nodes_out[node_id].to<JsonArray>();
-
-    // Build a small set to avoid duplicates.
-    std::vector<String> have;
-    have.reserve(arr.size());
-    for (JsonVariant v : arr) {
-      if (v.is<const char*>()) have.emplace_back(v.as<const char*>());
-    }
-
-    auto has = [&](const String& addr) {
-      for (const auto& x : have) if (x == addr) return true;
-      return false;
-    };
-
-    JsonObject sensors = n.value()["sensors"].as<JsonObject>();
-    for (JsonPair s : sensors) {
-      const char* addr = s.key().c_str();
-      if (addr && strlen(addr) == 16 && !has(addr)) {
-        arr.add(addr);
-      }
-    }
-  }
-
-  String json;
-  serializeJson(kd, json);
-  g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putString("known", json);
-  g_root_preferences.end();
+  out += "]}";
+  return out;
 }
 
+// Optional: count nodes in an existing NVS string, used to skip shrink-writes.
+static size_t CountPrevNodes(const String &prev) {
+  if (prev.isEmpty())
+    return 0;
+  JsonDocument d;
+  if (deserializeJson(d, prev) != DeserializationError::Ok)
+    return 0;
+  JsonArray a = d["nodes"].as<JsonArray>();
+  return a.isNull() ? 0 : a.size();
+}
+
+void SaveKnownTopology() {
+  EnsureDocuments();
+  JsonObjectConst nodes_cur = g_last_seen["nodes"].as<JsonObjectConst>();
+  if (nodes_cur.isNull())
+    return; // nothing to do
+
+  // Collect + sort unique IDs from current view.
+  std::vector<String> ids;
+  ids.reserve(nodes_cur.size());
+  for (JsonPairConst n : nodes_cur)
+    ids.emplace_back(n.key().c_str());
+  if (ids.empty())
+    return; // never persist empty set
+  std::sort(ids.begin(), ids.end());
+
+  // Build next JSON without heap surprises.
+  const String next = BuildKnownJson(ids);
+
+  const uint32_t now_ms = millis();
+  // RAM guard: if identical to what we just handled recently, skip.
+  if (next == g_known_cache && (now_ms - g_known_last_ms) < 2000U)
+    return;
+
+  // Read previous from NVS.
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const String prev = g_root_preferences.getString("known", "");
+  g_root_preferences.end();
+
+  // If equal, refresh cache and exit.
+  if (next == prev) {
+    g_known_cache = next;
+    g_known_last_ms = now_ms;
+    return;
+  }
+
+  // Skip writes that would shrink the set (protect against transient churn).
+  const size_t prev_cnt = CountPrevNodes(prev);
+  if (ids.size() < prev_cnt) {
+    // Update cache so we don't hammer NVS while the mesh is noisy.
+    g_known_cache = next;
+    g_known_last_ms = now_ms;
+    return;
+  }
+
+  Serial.printf("Updating known topology: %u node(s)\n",
+                static_cast<unsigned>(ids.size()));
+
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  (void)g_root_preferences.putString("known", next);
+  g_root_preferences.end();
+
+  g_known_cache = next;
+  g_known_last_ms = now_ms;
+}
 
 // Load topology and pre-populate g_last_seen so tiles render after reboot.
 // We seed "last" with now to start age at 0 and allow normal staleness aging.
+// Load "known" and pre-seed g_last_seen with empty nodes so tiles appear on
+// boot. Accepts old schema (object of nodes->addr arrays) or new schema (array
+// of ids).
 void LoadKnownTopology() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const String json = g_root_preferences.getString("known", "");
   g_root_preferences.end();
-
   if (json.isEmpty())
     return;
 
@@ -434,28 +520,34 @@ void LoadKnownTopology() {
 
   EnsureDocuments();
   JsonObject nodes_out = g_last_seen["nodes"].to<JsonObject>();
-  JsonObject nodes_in = kd["nodes"].as<JsonObject>();
   const uint32_t now_ms = millis();
 
-  for (JsonPair np : nodes_in) {
-    const String node_id = np.key().c_str();
-    JsonObject node_obj = nodes_out[node_id].to<JsonObject>();
-    if (!node_obj["sensors"].is<JsonObject>()) {
-      node_obj["sensors"].to<JsonObject>();
+  // v2: {"nodes": ["123","456",...]}
+  if (kd["nodes"].is<JsonArray>()) {
+    for (JsonVariant v : kd["nodes"].as<JsonArray>()) {
+      const char *id = v.as<const char *>();
+      if (!id || !*id)
+        continue;
+      JsonObject node_obj = nodes_out[id].to<JsonObject>();
+      node_obj["busGpio"] = node_obj["busGpio"] | -1;
+      node_obj["last"] = now_ms;
+      node_obj["sensors"]
+          .to<JsonObject>(); // start empty; rows fill on first data
     }
-    node_obj["busGpio"] = node_obj["busGpio"] | -1;
-    node_obj["last"] = now_ms;
+    return;
+  }
 
-    JsonObject sensors = node_obj["sensors"].to<JsonObject>();
-    JsonArray addrs = np.value().as<JsonArray>();
-    for (JsonVariant v : addrs) {
-      const char *addr = v.as<const char *>();
-      if (addr && strlen(addr) == 16) {
-        JsonObject s = sensors[addr].to<JsonObject>();
-        s["last"] = now_ms; // seed fresh; values will fill when data arrives
-        // leave tC/corr absent until an update comes in
-      }
+  // v1 (legacy): {"nodes": { "123": [ "ADDR...", ... ], ... }}
+  if (kd["nodes"].is<JsonObject>()) {
+    for (JsonPair p : kd["nodes"].as<JsonObject>()) {
+      const char *id = p.key().c_str();
+      JsonObject node_obj = nodes_out[id].to<JsonObject>();
+      node_obj["busGpio"] = node_obj["busGpio"] | -1;
+      node_obj["last"] = now_ms;
+      node_obj["sensors"].to<JsonObject>(); // do NOT pre-seed addresses anymore
     }
+    // Optional one-time migration to v2: rewrite to node-id array
+    SaveKnownTopology();
   }
 }
 
@@ -615,6 +707,12 @@ static String CanonAddr16(const String &addr) {
     out += c;
   }
   return out;
+}
+
+// Make a stable JSON key for a node id.
+static void FormatNodeKey(uint32_t node_id, char *out, size_t out_len) {
+  // 10 digits max for uint32 + NUL fits in 16 bytes.
+  snprintf(out, out_len, "%lu", static_cast<unsigned long>(node_id));
 }
 
 // Global (node-agnostic) rank.
@@ -1045,29 +1143,35 @@ static void GuiAgeTick(uint32_t now_ms) {
     TileWidgets &tw = kv.second;
 
     JsonObject node_obj = nodes[node_id];
-    if (node_obj.isNull()) continue;
+    if (node_obj.isNull())
+      continue;
 
     uint32_t latest_ms = node_obj["last"] | 0U;
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
     for (JsonPair s_entry : sensors) {
       const uint32_t s_last = s_entry.value()["last"] | 0U;
-      if (s_last > latest_ms) latest_ms = s_last;
+      if (s_last > latest_ms)
+        latest_ms = s_last;
     }
 
-    const uint32_t age_min = (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
+    const uint32_t age_min =
+        (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
 
     // Update Age label text only (no relayout).
     if (tw.label_age) {
       char age_buf[24];
-      snprintf(age_buf, sizeof(age_buf), "Age: %lu min", (unsigned long)age_min);
+      snprintf(age_buf, sizeof(age_buf), "Age: %lu min",
+               (unsigned long)age_min);
       lv_label_set_text(tw.label_age, age_buf);
     }
 
     // Re-evaluate stale/missing and only flip colors if state changed.
     const bool was_missing = tw.is_missing;
-    const bool was_stale   = tw.is_stale;
+    const bool was_stale = tw.is_stale;
 
-    const bool node_connected = false;  // tiles here are "known topology", connectivity is handled in full rebuilds
+    const bool node_connected =
+        false; // tiles here are "known topology", connectivity is handled in
+               // full rebuilds
     const bool is_missing = g_highlight_missing_nodes && !node_connected &&
                             (g_stale_minutes_threshold > 0) &&
                             (age_min >= g_stale_minutes_threshold);
@@ -1076,7 +1180,7 @@ static void GuiAgeTick(uint32_t now_ms) {
 
     if (is_missing != was_missing || is_stale != was_stale) {
       tw.is_missing = is_missing;
-      tw.is_stale   = is_stale;
+      tw.is_stale = is_stale;
 
       // Minimal recolor only; do not touch layout.
       lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24);
@@ -1236,17 +1340,29 @@ void GuiRebuildTiles() {
         v.has_value = !isnan(v.temp_c);
       }
 
+      const uint8_t node_mute = GetNodeMuteMask(node_id_str);
+
       if (v.has_value) {
         const float t = v.temp_c;
-        if (!isnan(g_alert_low_c) && t < g_alert_low_c)
-          v.is_alert = true;
-        if (!isnan(g_alert_high_c) && t > g_alert_high_c)
-          v.is_alert = true;
+
+        // --- ALERTS (apply mute) ---
+        bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
+        bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
+        if (low_alert && (node_mute & kMuteLow))
+          low_alert = false;
+        if (high_alert && (node_mute & kMuteHigh))
+          high_alert = false;
+        v.is_alert = (low_alert || high_alert);
+
+        // --- WARNINGS (only if not already alert; apply mute) ---
         if (!v.is_alert) {
-          if (!isnan(g_warn_low_c) && t < g_warn_low_c)
-            v.is_warning = true;
-          if (!isnan(g_warn_high_c) && t > g_warn_high_c)
-            v.is_warning = true;
+          bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
+          bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
+          if (low_warn && (node_mute & kMuteLow))
+            low_warn = false;
+          if (high_warn && (node_mute & kMuteHigh))
+            high_warn = false;
+          v.is_warning = (low_warn || high_warn);
         }
       }
 
@@ -1395,20 +1511,20 @@ void DisplayLoop() {
 
   const uint32_t now_ms = millis();
 
-  // Flashing: only mark flash-dirty, don't trigger full rebuild.
-  if (g_flash_interval_ms > 0 && (g_any_alert || g_any_warning)) {
+  // --- FIX: drive flash phase unconditionally ---
+  // Let GuiApplyFlashPhase() choose which tiles react.
+  if (g_flash_interval_ms > 0) {
     if (now_ms - last_flash_ms >= g_flash_interval_ms) {
       g_flash_phase = !g_flash_phase;
-      g_flash_dirty = true; // <--- instead of g_gui_dirty
+      g_flash_dirty = true; // only a lightweight color toggle
       last_flash_ms = now_ms;
     }
-  } else {
-    if (g_flash_phase) {
-      g_flash_phase = false;
-      g_flash_dirty = true;
-    }
-    last_flash_ms = now_ms;
+  } else if (g_flash_phase) {
+    // If flash is disabled, make sure we restore the "normal" phase once.
+    g_flash_phase = false;
+    g_flash_dirty = true;
   }
+  // --- end fix ---
 
   // Periodic light update for age/status text only (no full rebuild).
   if (now_ms - last_force_ms >= 60000U) {
@@ -1420,10 +1536,8 @@ void DisplayLoop() {
     last_force_ms = now_ms;
   }
 
-
   if ((g_gui_dirty || g_flash_dirty) && (now_ms - last_build_ms >= 50U)) {
     if (lvgl_port_lock(-1)) {
-
       if (g_gui_dirty) {
         g_gui_dirty = false;
 
@@ -1501,49 +1615,137 @@ void BuzzerLoop() {
 //   void Handler(void* ctx, int argc, const String argv[], Print& out)
 // -----------------------------------------------------------------------------
 
-static void CmdHelp(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv;
+static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
   g_console.PrintHelp(out);
 }
 
-static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv;
+static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  if (argc >= 2 && argv[1] == "erase") {
+    g_root_preferences.begin("meshroot", false);
+    g_root_preferences.remove("known");
+    g_root_preferences.end();
+    out.println(F("known erased"));
+    return;
+  }
+  g_root_preferences.begin("meshroot", true);
+  const String known = g_root_preferences.getString("known", "");
+  g_root_preferences.end();
+  out.println(known.isEmpty() ? F("(empty)") : known);
+}
+
+static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  EnsureDocuments();
+  JsonObject m = g_labels["mute"].to<JsonObject>();
+
+  // mute list
+  if (argc >= 2 && argv[1] == "list") {
+    bool any = false;
+    for (JsonPair p : m) {
+      any = true;
+      const uint8_t mask = static_cast<uint8_t>(p.value().as<int>()) & 0x3;
+      out.printf("%s : %s\n", p.key().c_str(), NodeMuteMaskToString(mask));
+    }
+    if (!any)
+      out.println(F("(empty)"));
+    out.println(F("ok"));
+    return;
+  }
+
+  // mute get <nodeId>
+  if (argc >= 3 && argv[1] == "get") {
+    const String node_id = argv[2];
+    const uint8_t mask = GetNodeMuteMask(node_id);
+    out.printf("%s : %s\n", node_id.c_str(), NodeMuteMaskToString(mask));
+    return;
+  }
+
+  // mute <nodeId> off|low|high|both
+  if (argc < 3) {
+    out.println(F("ERR mute (use: mute <nodeId> off|low|high|both | mute get "
+                  "<nodeId> | mute list)"));
+    return;
+  }
+
+  const String node_id = argv[1];
+  const String mode = argv[2];
+
+  uint8_t mask = kMuteNone;
+  if (mode.equalsIgnoreCase("off"))
+    mask = kMuteNone;
+  else if (mode.equalsIgnoreCase("low"))
+    mask = kMuteLow;
+  else if (mode.equalsIgnoreCase("high"))
+    mask = kMuteHigh;
+  else if (mode.equalsIgnoreCase("both") || mode.equalsIgnoreCase("all") ||
+           mode.equalsIgnoreCase("on"))
+    mask = kMuteBoth;
+  else {
+    out.println(F("ERR mute (use: off|low|high|both)"));
+    return;
+  }
+
+  m[node_id] = static_cast<int>(mask);
+  SaveLabels();
+  out.printf("mute %s=%s\n", node_id.c_str(), NodeMuteMaskToString(mask));
+  GuiRequestRender();
+}
+
+static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
   for (JsonPair node_entry : nodes) {
     const String node_id = node_entry.key().c_str();
     JsonObject node_obj = node_entry.value();
     const String node_label = g_labels["nodes"][node_id] | "";
-    if (node_label.length() > 0) out.printf("node %s \"%s\":\n", node_id.c_str(), node_label.c_str());
-    else                         out.printf("node %s:\n", node_id.c_str());
+    if (node_label.length() > 0)
+      out.printf("node %s \"%s\":\n", node_id.c_str(), node_label.c_str());
+    else
+      out.printf("node %s:\n", node_id.c_str());
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
     bool any_sensor = false;
     for (JsonPair sensor_entry : sensors) {
       any_sensor = true;
       const String addr = sensor_entry.key().c_str();
       JsonObject sensor_obj = sensor_entry.value();
-      const float temp_c = sensor_obj["tC"] | std::numeric_limits<float>::quiet_NaN();
+      const float temp_c =
+          sensor_obj["tC"] | std::numeric_limits<float>::quiet_NaN();
       const bool corrected = sensor_obj["corr"] | false;
       const String sensor_label = g_labels["sensors"][addr] | "";
       const String addr_canon = CanonAddr16(addr);
       String temp_s = isnan(temp_c) ? String("NaN") : String(temp_c, 2);
       if (sensor_label.length() > 0) {
-        out.printf("  %s \"%s\" : %s%s\n", addr_canon.c_str(), sensor_label.c_str(),
-                   temp_s.c_str(), corrected ? " (corr)" : "");
+        out.printf("  %s \"%s\" : %s%s\n", addr_canon.c_str(),
+                   sensor_label.c_str(), temp_s.c_str(),
+                   corrected ? " (corr)" : "");
       } else {
         out.printf("  %s : %s%s\n", addr_canon.c_str(), temp_s.c_str(),
                    corrected ? " (corr)" : "");
       }
     }
-    if (!any_sensor) out.println(F("  (no sensors)"));
+    if (!any_sensor)
+      out.println(F("  (no sensors)"));
   }
+
+  // At the end of OnReceiveRoot():
+  if (g_last_seen.overflowed()) {
+    Serial.println(F("[WARN] g_last_seen overflow; increase capacity"));
+  }
+
   GuiRequestRender();
 }
 
-static void CmdNode(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc >= 3 && argv[1] == "rm") {
-    const String& id = argv[2];
+    const String &id = argv[2];
 
     // Read-only lookup (won't create a member if missing)
     JsonObjectConst nodes_ro = g_last_seen["nodes"].as<JsonObjectConst>();
@@ -1568,7 +1770,11 @@ static void CmdNode(void* ctx, int argc, const String argv[], Print& out) {
 
   // node <id> <label...>  (keep your parser behavior)
   String line;
-  for (int i = 0; i < argc; ++i) { if (i) line += ' '; line += argv[i]; }
+  for (int i = 0; i < argc; ++i) {
+    if (i)
+      line += ' ';
+    line += argv[i];
+  }
   String label;
   if (!ExtractLabelAfterSecondToken(line, &label)) {
     out.println(F("ERR node (usage: node <id> <label...>)"));
@@ -1582,8 +1788,7 @@ static void CmdNode(void* ctx, int argc, const String argv[], Print& out) {
   GuiRequestRender();
 }
 
-
-static void CmdNodes(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdNodes(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc >= 2 && argv[1] == "clear") {
     EraseKnownTopology();
@@ -1595,10 +1800,18 @@ static void CmdNodes(void* ctx, int argc, const String argv[], Print& out) {
   }
 }
 
-static void CmdName(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdName(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  if (argc < 3) { out.println(F("ERR name (usage: name <addr16> <label...>)")); return; }
-  String line; for (int i = 0; i < argc; ++i) { if (i) line += ' '; line += argv[i]; }
+  if (argc < 3) {
+    out.println(F("ERR name (usage: name <addr16> <label...>)"));
+    return;
+  }
+  String line;
+  for (int i = 0; i < argc; ++i) {
+    if (i)
+      line += ' ';
+    line += argv[i];
+  }
   String label;
   if (!ExtractLabelAfterSecondToken(line, &label)) {
     out.println(F("ERR name (usage: name <addr16> <label...>)"));
@@ -1610,91 +1823,185 @@ static void CmdName(void* ctx, int argc, const String argv[], Print& out) {
   GuiRequestRender();
 }
 
-static void CmdSave(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv; SaveLabels(); out.println(F("saved"));
+static void CmdSave(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
+  SaveLabels();
+  out.println(F("saved"));
 }
-static void CmdLoad(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv; LoadLabels(); out.println(F("loaded")); GuiRequestRender();
+static void CmdLoad(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
+  LoadLabels();
+  out.println(F("loaded"));
+  GuiRequestRender();
 }
-static void CmdErase(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv; EraseLabels(); out.println(F("erased")); GuiRequestRender();
+static void CmdErase(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
+  EraseLabels();
+  out.println(F("erased"));
+  GuiRequestRender();
 }
 
-static void CmdDebug(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  if (argc < 2) { out.printf("debug=%s\n", g_debug_enabled ? "on" : "off"); return; }
+  (void)argc;
+  (void)argv;
+  PrintJsonStats(out, "g_last_seen", g_last_seen);
+  PrintJsonStats(out, "g_labels", g_labels);
+
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const String known = g_root_preferences.getString("known", "");
+  g_root_preferences.end();
+  out.printf("known NVS size=%u bytes\n", (unsigned)known.length());
+}
+
+static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  if (argc < 2) {
+    out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
+    return;
+  }
   g_debug_enabled = (argv[1] == "on");
   out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
 }
 
-static void CmdUnits(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdUnits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  if (argc < 2) { out.println(F("ERR units (use 'units c' or 'units f')")); return; }
+  if (argc < 2) {
+    out.println(F("ERR units (use 'units c' or 'units f')"));
+    return;
+  }
   if (argv[1].equalsIgnoreCase("c")) {
-    g_display_fahrenheit = false; SaveDisplayUnits(); out.println(F("units=C")); GuiRequestRender();
+    g_display_fahrenheit = false;
+    SaveDisplayUnits();
+    out.println(F("units=C"));
+    GuiRequestRender();
   } else if (argv[1].equalsIgnoreCase("f")) {
-    g_display_fahrenheit = true;  SaveDisplayUnits(); out.println(F("units=F")); GuiRequestRender();
+    g_display_fahrenheit = true;
+    SaveDisplayUnits();
+    out.println(F("units=F"));
+    GuiRequestRender();
   } else {
     out.println(F("ERR units (use 'units c' or 'units f')"));
   }
 }
 
-static void CmdHighlight(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdHighlight(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc < 3) {
-    out.println(F("ERR highlight (use 'highlight missing on|off' or 'highlight stale <min>')"));
+    out.println(F("ERR highlight (use 'highlight missing on|off' or 'highlight "
+                  "stale <min>')"));
     return;
   }
   if (argv[1] == "missing") {
-    if (argv[2] == "on")  { g_highlight_missing_nodes = true;  SaveHighlightSettings(); out.println(F("highlight missing=on"));  GuiRequestRender(); }
-    else if (argv[2] == "off") { g_highlight_missing_nodes = false; SaveHighlightSettings(); out.println(F("highlight missing=off")); GuiRequestRender(); }
-    else out.println(F("ERR highlight missing (use on|off)"));
+    if (argv[2] == "on") {
+      g_highlight_missing_nodes = true;
+      SaveHighlightSettings();
+      out.println(F("highlight missing=on"));
+      GuiRequestRender();
+    } else if (argv[2] == "off") {
+      g_highlight_missing_nodes = false;
+      SaveHighlightSettings();
+      out.println(F("highlight missing=off"));
+      GuiRequestRender();
+    } else
+      out.println(F("ERR highlight missing (use on|off)"));
   } else if (argv[1] == "stale") {
     const long m = argv[2].toInt();
-    if (m > 0) { g_stale_minutes_threshold = static_cast<uint32_t>(m); SaveHighlightSettings(); out.printf("highlight stale=%ld min\n", m); GuiRequestRender(); }
-    else out.println(F("ERR highlight stale (use positive minutes)"));
+    if (m > 0) {
+      g_stale_minutes_threshold = static_cast<uint32_t>(m);
+      SaveHighlightSettings();
+      out.printf("highlight stale=%ld min\n", m);
+      GuiRequestRender();
+    } else
+      out.println(F("ERR highlight stale (use positive minutes)"));
   } else {
-    out.println(F("ERR highlight (use 'highlight missing on|off' or 'highlight stale <min>')"));
+    out.println(F("ERR highlight (use 'highlight missing on|off' or 'highlight "
+                  "stale <min>')"));
   }
 }
 
-static void CmdDummy(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  if (argc < 2) { out.println(F("ERR dummy (use 'dummy on' or 'dummy off')")); return; }
-  if (argv[1] == "on")  { g_use_dummy_data = true;  BuildDummyData(); out.println(F("dummy=on"));  GuiRequestRender(); }
-  else if (argv[1] == "off") { g_use_dummy_data = false; g_last_seen.clear(); EnsureDocuments(); out.println(F("dummy=off")); GuiRequestRender(); }
-  else out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
+  if (argc < 2) {
+    out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
+    return;
+  }
+  if (argv[1] == "on") {
+    g_use_dummy_data = true;
+    BuildDummyData();
+    out.println(F("dummy=on"));
+    GuiRequestRender();
+  } else if (argv[1] == "off") {
+    g_use_dummy_data = false;
+    g_last_seen.clear();
+    EnsureDocuments();
+    out.println(F("dummy=off"));
+    GuiRequestRender();
+  } else
+    out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
 }
 
-static void CmdLimits(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  auto ToC   = [&](float v){ return g_display_fahrenheit ? (v - 32.0f)/1.8f : v; };
-  auto FromC = [&](float v){ return g_display_fahrenheit ? (v*1.8f + 32.0f) : v; };
-  const char* unit = g_display_fahrenheit ? "F" : "C";
+  auto ToC = [&](float v) {
+    return g_display_fahrenheit ? (v - 32.0f) / 1.8f : v;
+  };
+  auto FromC = [&](float v) {
+    return g_display_fahrenheit ? (v * 1.8f + 32.0f) : v;
+  };
+  const char *unit = g_display_fahrenheit ? "F" : "C";
   if (argc >= 2 && argv[1] == "show") {
-    out.printf("limits warn=%.2f..%.2f %s\n", FromC(g_warn_low_c),  FromC(g_warn_high_c),  unit);
-    out.printf("limits alert=%.2f..%.2f %s\n", FromC(g_alert_low_c), FromC(g_alert_high_c), unit);
+    out.printf("limits warn=%.2f..%.2f %s\n", FromC(g_warn_low_c),
+               FromC(g_warn_high_c), unit);
+    out.printf("limits alert=%.2f..%.2f %s\n", FromC(g_alert_low_c),
+               FromC(g_alert_high_c), unit);
     return;
   }
   if (argc >= 4 && (argv[1] == "warn" || argv[1] == "alert")) {
-    const float low_in  = argv[2].toFloat();
+    const float low_in = argv[2].toFloat();
     const float high_in = argv[3].toFloat();
-    if (high_in <= low_in) { out.println(F("ERR limits (high must be > low)")); return; }
-    if (argv[1] == "warn")  { g_warn_low_c  = ToC(low_in);  g_warn_high_c  = ToC(high_in);  SaveLimits(); out.printf("limits warn=%.2f..%.2f %s\n",  FromC(g_warn_low_c),  FromC(g_warn_high_c),  unit); }
-    else                    { g_alert_low_c = ToC(low_in);  g_alert_high_c = ToC(high_in); SaveLimits(); out.printf("limits alert=%.2f..%.2f %s\n", FromC(g_alert_low_c), FromC(g_alert_high_c), unit); }
+    if (high_in <= low_in) {
+      out.println(F("ERR limits (high must be > low)"));
+      return;
+    }
+    if (argv[1] == "warn") {
+      g_warn_low_c = ToC(low_in);
+      g_warn_high_c = ToC(high_in);
+      SaveLimits();
+      out.printf("limits warn=%.2f..%.2f %s\n", FromC(g_warn_low_c),
+                 FromC(g_warn_high_c), unit);
+    } else {
+      g_alert_low_c = ToC(low_in);
+      g_alert_high_c = ToC(high_in);
+      SaveLimits();
+      out.printf("limits alert=%.2f..%.2f %s\n", FromC(g_alert_low_c),
+                 FromC(g_alert_high_c), unit);
+    }
     return;
   }
-  out.println(F("ERR limits (use 'limits show' | 'limits warn <lo> <hi>' | 'limits alert <lo> <hi>')"));
+  out.println(F("ERR limits (use 'limits show' | 'limits warn <lo> <hi>' | "
+                "'limits alert <lo> <hi>')"));
 }
 
-static void CmdBuzzer(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  if (argc < 4) { out.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>, gaps>=0)")); return; }
+  if (argc < 4) {
+    out.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> "
+                  "<alert_gap_ms>, gaps>=0)"));
+    return;
+  }
   long len_ms = argv[1].toInt();
   long gap_warn_ms = argv[2].toInt();
   long gap_alert_ms = argv[3].toInt();
   if (len_ms <= 0 || gap_warn_ms < 0 || gap_alert_ms < 0) {
-    out.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>, gaps>=0)"));
+    out.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> "
+                  "<alert_gap_ms>, gaps>=0)"));
     return;
   }
   g_beep_len_ms = (uint32_t)len_ms;
@@ -1702,65 +2009,105 @@ static void CmdBuzzer(void* ctx, int argc, const String argv[], Print& out) {
   g_beep_gap_alert_ms = (uint32_t)gap_alert_ms;
   SaveBuzzerSettings();
   out.printf("buzzer len=%lu ms warn_gap=%lu ms alert_gap=%lu ms\n",
-             (unsigned long)g_beep_len_ms,
-             (unsigned long)g_beep_gap_warn_ms,
+             (unsigned long)g_beep_len_ms, (unsigned long)g_beep_gap_warn_ms,
              (unsigned long)g_beep_gap_alert_ms);
 }
 
-static void CmdFlash(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  if (argc < 2) { out.println(F("ERR flash (use 'flash <interval_ms>' or 'flash off')")); return; }
+  if (argc < 2) {
+    out.println(F("ERR flash (use 'flash <interval_ms>' or 'flash off')"));
+    return;
+  }
   if (argv[1].equalsIgnoreCase("off")) {
-    g_flash_interval_ms = 0; SaveFlashSettings(); g_flash_phase = false; g_gui_dirty = true; out.println(F("flash off"));
+    g_flash_interval_ms = 0;
+    SaveFlashSettings();
+    g_flash_phase = false;
+    g_gui_dirty = true;
+    out.println(F("flash off"));
   } else {
     long interval = argv[1].toInt();
-    if (interval < 0) { out.println(F("ERR flash (interval must be >=0, or 'off')")); return; }
-    g_flash_interval_ms = (uint32_t)interval; SaveFlashSettings(); g_flash_phase = false; g_gui_dirty = true;
-    out.printf("flash interval=%lu ms (%s)\n", (unsigned long)g_flash_interval_ms, g_flash_interval_ms ? "enabled" : "off");
+    if (interval < 0) {
+      out.println(F("ERR flash (interval must be >=0, or 'off')"));
+      return;
+    }
+    g_flash_interval_ms = (uint32_t)interval;
+    SaveFlashSettings();
+    g_flash_phase = false;
+    g_gui_dirty = true;
+    out.printf("flash interval=%lu ms (%s)\n",
+               (unsigned long)g_flash_interval_ms,
+               g_flash_interval_ms ? "enabled" : "off");
   }
 }
 
-static void CmdOrder(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   EnsureDocuments();
   JsonObject ord = g_labels["order"].to<JsonObject>();
   if (argc >= 2 && argv[1] == "list") {
     bool any = false;
-    for (JsonPair p : ord) { any = true; out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>()); }
-    if (!any) out.println(F("(empty)"));
+    for (JsonPair p : ord) {
+      any = true;
+      out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
+    }
+    if (!any)
+      out.println(F("(empty)"));
     out.println(F("ok"));
     return;
   }
   if (argc >= 3 && argv[1] == "clear") {
-    const String key = CanonAddr16(argv[2]); ord.remove(key); SaveLabels(); out.println(F("ok")); GuiRequestRender(); return;
+    const String key = CanonAddr16(argv[2]);
+    ord.remove(key);
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
   }
   if (argc >= 3) {
-    const String key = CanonAddr16(argv[1]); const int rank = argv[2].toInt();
-    ord[key] = rank; SaveLabels(); out.println(F("ok")); GuiRequestRender(); return;
+    const String key = CanonAddr16(argv[1]);
+    const int rank = argv[2].toInt();
+    ord[key] = rank;
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
   }
-  out.println(F("ERR order (use 'order <addr16> <rank>' | 'order clear <addr16>' | 'order list')"));
+  out.println(F("ERR order (use 'order <addr16> <rank>' | 'order clear "
+                "<addr16>' | 'order list')"));
 }
 
-static void CmdNorder(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   EnsureDocuments();
   JsonObject ord = g_labels["tile_order"].to<JsonObject>();
   if (argc >= 2 && argv[1] == "list") {
-    for (JsonPair p : ord) out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
+    for (JsonPair p : ord)
+      out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
     out.println(F("ok"));
     return;
   }
   if (argc >= 3 && argv[1] == "clear") {
-    ord.remove(argv[2]); SaveLabels(); out.println(F("ok")); GuiRequestRender(); return;
+    ord.remove(argv[2]);
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
   }
   if (argc >= 3) {
-    const String node_id = argv[1]; const int rank = argv[2].toInt();
-    ord[node_id] = rank; SaveLabels(); out.println(F("ok")); GuiRequestRender(); return;
+    const String node_id = argv[1];
+    const int rank = argv[2].toInt();
+    ord[node_id] = rank;
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
   }
-  out.println(F("ERR norder (use 'norder <nodeId> <rank>' | 'norder clear <nodeId>' | 'norder list')"));
+  out.println(F("ERR norder (use 'norder <nodeId> <rank>' | 'norder clear "
+                "<nodeId>' | 'norder list')"));
 }
 
-static void CmdSorder(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   EnsureDocuments();
   JsonObject sroot = g_labels["sorder"].to<JsonObject>();
@@ -1768,10 +2115,16 @@ static void CmdSorder(void* ctx, int argc, const String argv[], Print& out) {
     if (argc >= 3) {
       const String node_id = argv[2];
       JsonObject m = sroot[node_id].as<JsonObject>();
-      if (m.isNull()) out.println(F("(empty)")); else {
+      if (m.isNull())
+        out.println(F("(empty)"));
+      else {
         bool any = false;
-        for (JsonPair p : m) { any = true; out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>()); }
-        if (!any) out.println(F("(empty)"));
+        for (JsonPair p : m) {
+          any = true;
+          out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
+        }
+        if (!any)
+          out.println(F("(empty)"));
       }
       out.println(F("ok"));
       return;
@@ -1782,25 +2135,41 @@ static void CmdSorder(void* ctx, int argc, const String argv[], Print& out) {
       out.printf("[%s]\n", node_pair.key().c_str());
       JsonObject m = node_pair.value();
       bool any = false;
-      for (JsonPair p : m) { any = true; out.printf("  %s : %d\n", p.key().c_str(), p.value().as<int>()); }
-      if (!any) out.println(F("  (empty)"));
+      for (JsonPair p : m) {
+        any = true;
+        out.printf("  %s : %d\n", p.key().c_str(), p.value().as<int>());
+      }
+      if (!any)
+        out.println(F("  (empty)"));
     }
-    if (!any_node) out.println(F("(empty)"));
+    if (!any_node)
+      out.println(F("(empty)"));
     out.println(F("ok"));
     return;
   }
   if (argc >= 4 && argv[1] == "clear") {
     const String node_id = argv[2];
     const String key = CanonAddr16(argv[3]);
-    JsonObject m = sroot[node_id].to<JsonObject>(); m.remove(key); SaveLabels(); out.println(F("ok")); GuiRequestRender(); return;
+    JsonObject m = sroot[node_id].to<JsonObject>();
+    m.remove(key);
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
   }
   if (argc >= 4) {
     const String node_id = argv[1];
     const String key = CanonAddr16(argv[2]);
     const int rank = argv[3].toInt();
-    JsonObject m = sroot[node_id].to<JsonObject>(); m[key] = rank; SaveLabels(); out.println(F("ok")); GuiRequestRender(); return;
+    JsonObject m = sroot[node_id].to<JsonObject>();
+    m[key] = rank;
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
   }
-  out.println(F("ERR sorder (use 'sorder <nodeId> <addr16> <rank>' | 'sorder clear <nodeId> <addr16>' | 'sorder list [nodeId]')"));
+  out.println(F("ERR sorder (use 'sorder <nodeId> <addr16> <rank>' | 'sorder "
+                "clear <nodeId> <addr16>' | 'sorder list [nodeId]')"));
 }
 
 // -----------------------------------------------------------------------------
@@ -1853,10 +2222,18 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   const int bus_gpio = doc["busGpio"] | -1;
 
   JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-  bool node_was_new = nodes[String(node_id)].isNull();
-  JsonObject node_obj = nodes[String(node_id)].to<JsonObject>();
-  if (node_was_new)
+
+  char node_key[16];
+  FormatNodeKey(node_id, node_key, sizeof(node_key));
+
+  JsonObject node_obj;
+  if (!nodes.containsKey(node_key)) {
+    node_obj = nodes.createNestedObject(node_key); // copies key into doc
     topology_changed = true;
+  } else {
+    node_obj = nodes[node_key].as<JsonObject>();
+  }
+
   node_obj["busGpio"] = bus_gpio;
   node_obj["last"] = static_cast<uint32_t>(millis());
 
@@ -1876,11 +2253,12 @@ void OnReceiveRoot(uint32_t from, String &msg) {
       continue;
     }
 
-    JsonObject prev = sensors[addr];
-    const bool sensor_was_new = prev.isNull();
-    JsonObject sensor_out = sensors[addr].to<JsonObject>();
-    if (sensor_was_new)
-      topology_changed = true;
+    JsonObject sensor_out;
+    if (!sensors.containsKey(addr)) {
+      sensor_out = sensors.createNestedObject(addr); // copies key
+    } else {
+      sensor_out = sensors[addr].as<JsonObject>();
+    }
 
     if (sensor_in["tC"].is<float>()) {
       sensor_out["tC"] = sensor_in["tC"].as<float>();
@@ -1896,20 +2274,22 @@ void OnReceiveRoot(uint32_t from, String &msg) {
     const char *label = g_labels["sensors"][addr] | "";
 
     DLOG("    [%s]%s = %s%s\n", addr,
-         (label != nullptr && strlen(label) > 0)
-             ? (String(" \"") + label + "\"").c_str()
-             : "",
+         (label && *label) ? (String(" \"") + label + "\"").c_str() : "",
          isnan(temp_f) ? "NaN" : String(temp_f, 2).c_str(),
          corrected ? " (corr)" : "");
 
     GuiUpdateSensorRow(node_id_str.c_str(), addr, temp_f,
-                       (label != nullptr && strlen(label) > 0) ? label
-                                                               : nullptr,
+                       (label && *label) ? label : nullptr,
                        static_cast<uint32_t>(millis()));
   }
 
   if (topology_changed) {
     SaveKnownTopology();
+  }
+
+  // At the end of OnReceiveRoot():
+  if (g_last_seen.overflowed()) {
+    Serial.println(F("[WARN] g_last_seen overflow; increase capacity"));
   }
 
   GuiRequestRender();
@@ -1930,14 +2310,18 @@ void OnConnectionsChangedRoot() {
   bool topology_changed = false;
 
   // Ensure each connected node has an entry.
-  for (const auto &node_id : mesh.getNodeList()) {
-    const String key = String(node_id);
+  for (const auto &id : mesh.getNodeList()) {
+    char node_key[16];
+    FormatNodeKey(id, node_key, sizeof(node_key));
 
-    JsonObject node_obj = nodes[key];
-    if (node_obj.isNull()) {
-      node_obj = nodes[key].to<JsonObject>();
+    JsonObject node_obj;
+    if (!nodes.containsKey(node_key)) {
+      node_obj = nodes.createNestedObject(node_key); // copies key
       topology_changed = true;
+    } else {
+      node_obj = nodes[node_key].as<JsonObject>();
     }
+
     if (!node_obj["last"].is<uint32_t>()) {
       node_obj["last"] = now_ms;
     }
@@ -1969,7 +2353,7 @@ void setup() {
   EnsureDocuments();
 
   // NEW: pre-populate tiles from persisted topology
-  LoadKnownTopology();
+  // LoadKnownTopology();
 
   DisplayInit();
   GuiInit();
@@ -1979,25 +2363,32 @@ void setup() {
   pinMode(kBuzzerPin, OUTPUT);
   digitalWrite(kBuzzerPin, LOW);
 
-  g_console.RegisterCommand("help",   &CmdHelp,      "show help");
-  g_console.RegisterCommand("ls",     &CmdLs,        "list nodes/sensors");
-  g_console.RegisterCommand("node",   &CmdNode,      "label or rm a node");
-  g_console.RegisterCommand("nodes",  &CmdNodes,     "nodes clear");
-  g_console.RegisterCommand("name",   &CmdName,      "label a sensor");
-  g_console.RegisterCommand("save",   &CmdSave,      "save labels");
-  g_console.RegisterCommand("load",   &CmdLoad,      "load labels");
-  g_console.RegisterCommand("erase",  &CmdErase,     "erase labels");
-  g_console.RegisterCommand("debug",  &CmdDebug,     "debug on|off");
-  g_console.RegisterCommand("units",  &CmdUnits,     "units c|f");
-  g_console.RegisterCommand("highlight", &CmdHighlight, "highlight missing on|off | highlight stale <min>");
-  g_console.RegisterCommand("dummy",  &CmdDummy,     "dummy on|off");
-  g_console.RegisterCommand("limits", &CmdLimits,    "limits show | warn <lo> <hi> | alert <lo> <hi>");
-  g_console.RegisterCommand("buzzer", &CmdBuzzer,    "buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>");
-  g_console.RegisterCommand("flash",  &CmdFlash,     "flash <ms>|off");
-  g_console.RegisterCommand("order",  &CmdOrder,     "sensor global order");
-  g_console.RegisterCommand("norder", &CmdNorder,    "tile order");
-  g_console.RegisterCommand("sorder", &CmdSorder,    "per-node sensor order");
-
+  g_console.RegisterCommand("help", &CmdHelp, "show help");
+  g_console.RegisterCommand("ls", &CmdLs, "list nodes/sensors");
+  g_console.RegisterCommand("node", &CmdNode, "label or rm a node");
+  g_console.RegisterCommand("nodes", &CmdNodes, "nodes clear");
+  g_console.RegisterCommand("name", &CmdName, "label a sensor");
+  g_console.RegisterCommand("save", &CmdSave, "save labels");
+  g_console.RegisterCommand("load", &CmdLoad, "load labels");
+  g_console.RegisterCommand("erase", &CmdErase, "erase labels");
+  g_console.RegisterCommand("debug", &CmdDebug, "debug on|off");
+  g_console.RegisterCommand("units", &CmdUnits, "units c|f");
+  g_console.RegisterCommand("highlight", &CmdHighlight,
+                            "highlight missing on|off | highlight stale <min>");
+  g_console.RegisterCommand("dummy", &CmdDummy, "dummy on|off");
+  g_console.RegisterCommand("limits", &CmdLimits,
+                            "limits show | warn <lo> <hi> | alert <lo> <hi>");
+  g_console.RegisterCommand("buzzer", &CmdBuzzer,
+                            "buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>");
+  g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");
+  g_console.RegisterCommand("order", &CmdOrder, "sensor global order");
+  g_console.RegisterCommand("norder", &CmdNorder, "tile order");
+  g_console.RegisterCommand("sorder", &CmdSorder, "per-node sensor order");
+  g_console.RegisterCommand(
+      "mute", &CmdMute,
+      "mute <nodeId> off|low|high|both | mute get <nodeId> | mute list");
+  g_console.RegisterCommand("stats", &CmdStats, "json usage + known size");
+  g_console.RegisterCommand("known", &CmdKnown, "known [erase|show]");
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);
@@ -2021,7 +2412,6 @@ void loop() {
   DisplayLoop();
   BuzzerLoop();
   g_console.Poll(Serial, Serial);
-
 }
 
 // -----------------------------------------------------------------------------
@@ -2477,80 +2867,6 @@ void ScanSensors() {
   }
 }
 
-// -----------------------------------------------------------------------------
-// Console command handlers (LEAF)
-// -----------------------------------------------------------------------------
-
-static void CmdHelp(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv; g_console.PrintHelp(out);
-}
-
-static void CmdDebug(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx;
-  if (argc < 2) { out.printf("debug=%s\n", g_debug_enabled ? "on" : "off"); return; }
-  g_debug_enabled = (argv[1] == "on");
-  out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
-}
-
-static void CmdScan(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv; ScanSensors(); out.println(F("ok"));
-}
-
-static void CmdSendNow(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx; (void)argc; (void)argv; SendTemperatures(); out.println(F("ok"));
-}
-
-static void CmdBoilPt(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx;
-  if (argc < 2) { out.println(F("ERR boilpt <inHg>")); return; }
-  float inHg = argv[1].toFloat();
-  float TbC = boilingPointC_fromInHg(inHg);
-  if (isnan(TbC)) { out.println(F("ERR invalid pressure")); return; }
-  float TbF = TbC * 9.0f / 5.0f + 32.0f;
-  out.printf("Boiling point at %.3f inHg: %.3f C (%.3f F)\n",
-             (double)inHg, (double)TbC, (double)TbF);
-}
-
-static void CmdCal(void* ctx, int argc, const String argv[], Print& out) {
-  (void)ctx;
-  if (argc < 2) {
-    out.println(
-      F("cal cmds:\n"
-        "  cal ice [addr16]\n"
-        "  cal boil [addr16]\n"
-        "  cal lock <actualC>\n"
-        "  cal solve\n"
-        "  cal list\n"
-        "  cal show [addr16]\n"
-        "  cal clear <addr16>\n"
-        "  cal save | cal load"));
-    return;
-  }
-  const String sub = argv[1];
-  if (sub == "ice")  { if (argc >= 3) CalibrationStart(argv[2], kCalIce);  else CalibrationStartAll(kCalIce);  out.println(F("ok")); return; }
-  if (sub == "boil") { if (argc >= 3) CalibrationStart(argv[2], kCalBoil); else CalibrationStartAll(kCalBoil); out.println(F("ok")); return; }
-  if (sub == "lock") { if (argc < 3) { out.println(F("ERR cal lock <actualC>")); return; } CalibrationLockAll(argv[2].toFloat()); out.println(F("ok")); return; }
-  if (sub == "solve"){ CalibrationSolveAndSaveAll(); out.println(F("ok")); return; }
-  if (sub == "list") {
-    for (const auto &e : g_cal_entries) { const Coeff &c = e.coeff; out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(), (double)c.a1, (double)c.a0); }
-    return;
-  }
-  if (sub == "show") {
-    if (argc >= 3) {
-      const int idx = FindCalIndex(argv[2]);
-      if (idx >= 0) { const Coeff &c = g_cal_entries[(size_t)idx].coeff; out.printf("%s : a1=%.6f a0=%.6f\n", argv[2].c_str(), (double)c.a1, (double)c.a0); }
-      else out.println(F("not found"));
-    } else {
-      for (const auto &e : g_cal_entries) { const Coeff &c = e.coeff; out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(), (double)c.a1, (double)c.a0); }
-    }
-    return;
-  }
-  if (sub == "clear") { if (argc < 3) { out.println(F("ERR cal clear <addr16>")); return; } ClearCalibration(argv[2]); out.println(F("ok")); return; }
-  if (sub == "save")  { SaveAllCalibration(); out.println(F("saved")); return; }
-  if (sub == "load")  { LoadAllCalibration(); out.println(F("loaded")); return; }
-  out.println(F("ERR cal (type just 'cal' for help)"));
-}
-
 void SendTemperatures() {
   g_ds18.requestTemperatures();
 
@@ -2603,14 +2919,24 @@ void SendTemperatures() {
   }
 }
 
-// Approximate boiling point of water [°C] from station pressure in inches of
-// Hg. Uses Antoine equation (valid ~1–100°C): log10(P_mmHg) = A - B / (C + T)
-// A=8.07131, B=1730.63, C=233.426  (water)
-static float boilingPointC_fromInHg(float inHg) {
-  if (inHg <= 0.0f)
+// Station pressure from sea-level pressure (altimeter setting) and elevation.
+// ISA troposphere: P = P0 * (1 - 2.25577e-5 * h_m)^5.25588
+static float stationPressureFromSLP_inHg(float slp_inHg, float elev_ft) {
+  if (slp_inHg <= 0.0f)
     return NAN;
+  const float h_m = (elev_ft <= 0.0f) ? 0.0f : elev_ft * 0.3048f;
+  const float base = 1.0f - 2.25577e-5f * h_m;
+  if (base <= 0.0f)
+    return NAN; // out of model range
+  return slp_inHg * powf(base, 5.25588f);
+}
 
-  const float P_mmHg = inHg * 25.4f; // 1 inHg = 25.4 mmHg
+// Boiling point [°C] from STATION pressure in inHg using Antoine.
+// log10(P_mmHg) = A - B/(C + T), with A=8.07131, B=1730.63, C=233.426.
+static float boilingPointC_fromStationInHg(float station_inHg) {
+  if (station_inHg <= 0.0f)
+    return NAN;
+  const float P_mmHg = station_inHg * 25.4f; // 1 inHg = 25.4 mmHg
   if (P_mmHg <= 0.0f)
     return NAN;
 
@@ -2618,13 +2944,187 @@ static float boilingPointC_fromInHg(float inHg) {
   const float B = 1730.63f;
   const float C = 233.426f;
 
-  float logP = log10f(P_mmHg);
-  float denom = A - logP;
+  const float logP = log10f(P_mmHg);
+  const float denom = A - logP;
   if (denom == 0.0f)
     return NAN;
 
-  float T = B / denom - C; // °C
-  return T;
+  return B / denom - C; // °C
+}
+
+// Convenience: treat inHg as ALTIMETER (sea-level) if elevation is provided.
+// If elev_ft == 0, the value is effectively already station pressure.
+static float boilingPointC_fromInHgElev(float inHg, float elev_ft) {
+  const float station_inHg =
+      (elev_ft != 0.0f) ? stationPressureFromSLP_inHg(inHg, elev_ft) : inHg;
+  return boilingPointC_fromStationInHg(station_inHg);
+}
+
+// -----------------------------------------------------------------------------
+// Console command handlers (LEAF)
+// -----------------------------------------------------------------------------
+
+static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
+  g_console.PrintHelp(out);
+}
+
+static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  if (argc < 2) {
+    out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
+    return;
+  }
+  g_debug_enabled = (argv[1] == "on");
+  out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
+}
+
+static void CmdScan(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
+  ScanSensors();
+  out.println(F("ok"));
+}
+
+static void CmdSendNow(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
+  SendTemperatures();
+  out.println(F("ok"));
+}
+
+static void CmdBoilPt(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  if (argc < 2) {
+    out.println(F("ERR boilpt <inHg> [elev_ft]"));
+    return;
+  }
+
+  const float inHg = argv[1].toFloat();
+
+  if (argc >= 3) {
+    // Treat argv[1] as ALTIMERTER (sea-level) and argv[2] as elevation in feet.
+    const float elev_ft = argv[2].toFloat();
+    const float station_inHg = stationPressureFromSLP_inHg(inHg, elev_ft);
+    const float TbC = boilingPointC_fromStationInHg(station_inHg);
+    if (isnan(TbC)) {
+      out.println(F("ERR invalid inputs"));
+      return;
+    }
+    const float TbF = TbC * 9.0f / 5.0f + 32.0f;
+    out.printf("Boiling point at station %.3f inHg (AS=%.3f, elev=%.0f ft): "
+               "%.3f C (%.3f F)\n",
+               (double)station_inHg, (double)inHg, (double)elev_ft, (double)TbC,
+               (double)TbF);
+    return;
+  }
+
+  // Back-compat: single arg -> treat as STATION pressure directly.
+  const float TbC = boilingPointC_fromStationInHg(inHg);
+  if (isnan(TbC)) {
+    out.println(F("ERR invalid pressure"));
+    return;
+  }
+  const float TbF = TbC * 9.0f / 5.0f + 32.0f;
+  out.printf("Boiling point at %.3f inHg (station): %.3f C (%.3f F)\n",
+             (double)inHg, (double)TbC, (double)TbF);
+}
+
+static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  if (argc < 2) {
+    out.println(F("cal cmds:\n"
+                  "  cal ice [addr16]\n"
+                  "  cal boil [addr16]\n"
+                  "  cal lock <actualC>\n"
+                  "  cal solve\n"
+                  "  cal list\n"
+                  "  cal show [addr16]\n"
+                  "  cal clear <addr16>\n"
+                  "  cal save | cal load"));
+    return;
+  }
+  const String sub = argv[1];
+  if (sub == "ice") {
+    if (argc >= 3)
+      CalibrationStart(argv[2], kCalIce);
+    else
+      CalibrationStartAll(kCalIce);
+    out.println(F("ok"));
+    return;
+  }
+  if (sub == "boil") {
+    if (argc >= 3)
+      CalibrationStart(argv[2], kCalBoil);
+    else
+      CalibrationStartAll(kCalBoil);
+    out.println(F("ok"));
+    return;
+  }
+  if (sub == "lock") {
+    if (argc < 3) {
+      out.println(F("ERR cal lock <actualC>"));
+      return;
+    }
+    CalibrationLockAll(argv[2].toFloat());
+    out.println(F("ok"));
+    return;
+  }
+  if (sub == "solve") {
+    CalibrationSolveAndSaveAll();
+    out.println(F("ok"));
+    return;
+  }
+  if (sub == "list") {
+    for (const auto &e : g_cal_entries) {
+      const Coeff &c = e.coeff;
+      out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(), (double)c.a1,
+                 (double)c.a0);
+    }
+    return;
+  }
+  if (sub == "show") {
+    if (argc >= 3) {
+      const int idx = FindCalIndex(argv[2]);
+      if (idx >= 0) {
+        const Coeff &c = g_cal_entries[(size_t)idx].coeff;
+        out.printf("%s : a1=%.6f a0=%.6f\n", argv[2].c_str(), (double)c.a1,
+                   (double)c.a0);
+      } else
+        out.println(F("not found"));
+    } else {
+      for (const auto &e : g_cal_entries) {
+        const Coeff &c = e.coeff;
+        out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(), (double)c.a1,
+                   (double)c.a0);
+      }
+    }
+    return;
+  }
+  if (sub == "clear") {
+    if (argc < 3) {
+      out.println(F("ERR cal clear <addr16>"));
+      return;
+    }
+    ClearCalibration(argv[2]);
+    out.println(F("ok"));
+    return;
+  }
+  if (sub == "save") {
+    SaveAllCalibration();
+    out.println(F("saved"));
+    return;
+  }
+  if (sub == "load") {
+    LoadAllCalibration();
+    out.println(F("loaded"));
+    return;
+  }
+  out.println(F("ERR cal (type just 'cal' for help)"));
 }
 
 // painlessMesh callbacks (leaf).
@@ -2668,12 +3168,12 @@ void setup() {
   mesh.onReceive(&OnReceiveLeaf);
   mesh.onChangedConnections(&OnConnectionsChangedLeaf);
 
-  g_console.RegisterCommand("help",   &CmdHelp,    "show help");
-  g_console.RegisterCommand("debug",  &CmdDebug,   "debug on|off");
-  g_console.RegisterCommand("scan",   &CmdScan,    "enumerate DS18B20");
-  g_console.RegisterCommand("sendnow",&CmdSendNow, "send temperatures now");
-  g_console.RegisterCommand("boilpt", &CmdBoilPt,  "boilpt <inHg>");
-  g_console.RegisterCommand("cal",    &CmdCal,     "calibration commands");
+  g_console.RegisterCommand("help", &CmdHelp, "show help");
+  g_console.RegisterCommand("debug", &CmdDebug, "debug on|off");
+  g_console.RegisterCommand("scan", &CmdScan, "enumerate DS18B20");
+  g_console.RegisterCommand("sendnow", &CmdSendNow, "send temperatures now");
+  g_console.RegisterCommand("boilpt", &CmdBoilPt, "boilpt <inHg> [elev_ft]");
+  g_console.RegisterCommand("cal", &CmdCal, "calibration commands");
 
   g_task_send.set(TASK_IMMEDIATE, TASK_FOREVER, []() {
     SendTemperatures();

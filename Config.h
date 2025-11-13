@@ -3,7 +3,8 @@
 #define DBG_BAUD 115200
 #endif
 
-// Set this to your LED pin if you have one (common ESP32-S3 devkits use 38 or 48; else -1 to disable)
+// Set this to your LED pin if you have one (common ESP32-S3 devkits use 38 or
+// 48; else -1 to disable)
 #ifndef DBG_LED_PIN
 #define DBG_LED_PIN -1
 #endif
@@ -15,9 +16,9 @@
 #endif
 
 // ===== Mesh credentials (routerless) =====
-#define MESH_PREFIX    "MeshTemps"
-#define MESH_PASSWORD  "mesh-pass-1234"   // >= 8 chars
-#define MESH_PORT      5555
+#define MESH_PREFIX "MeshTemps"
+#define MESH_PASSWORD "mesh-pass-1234" // >= 8 chars
+#define MESH_PORT 5555
 
 // ===== Leaf DS18B20 settings =====
 #ifndef ONEWIRE_PIN
@@ -33,16 +34,16 @@
 #endif
 
 // ===== ArduinoJson v7 capacities =====
-#define JSON_SMALL   512
-#define JSON_MED     1024
-#define JSON_BIG     4096
+#define JSON_SMALL 512
+#define JSON_MED 1024
+#define JSON_BIG 4096
 
 inline String addrToHex(const uint8_t *addr) {
   static const char *H = "0123456789ABCDEF";
   char s[17] = {0};
   for (int i = 0; i < 8; ++i) {
-    s[i*2]   = H[(addr[i] >> 4) & 0xF];
-    s[i*2+1] = H[(addr[i]) & 0xF];
+    s[i * 2] = H[(addr[i] >> 4) & 0xF];
+    s[i * 2 + 1] = H[(addr[i]) & 0xF];
   }
   return String(s);
 }
