@@ -56,13 +56,18 @@ bool g_debug_enabled = false;
     }                                                                          \
   } while (0)
 
+  // --- Forward decls to satisfy Arduino's auto-prototype pass ---
+struct TileWidgets;  // Incomplete type is enough for function prototypes
+
+// Avoid Arduino auto-prototype depending on lvgl.h types.
+TileWidgets &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
+                             int16_t tile_h);
+
 // Forward declarations used on ROOT builds from LogConnections().
 #if MESH_IS_ROOT
 void GuiUpdateNetwork(size_t peers);
 void GuiRequestRender();
 #endif // MESH_IS_ROOT
-
-namespace {
 
 void LogConnections() {
   const size_t peer_count = mesh.getNodeList().size();
@@ -88,20 +93,19 @@ static String JoinTokens(int argc, const String argv[], int start) {
 // Prints document usage in both ArduinoJson v6 and v7.
 static void PrintJsonStats(Print &out, const char *name,
                            const JsonDocument &doc) {
-  const unsigned usage = static_cast<unsigned>(doc.memoryUsage());
-  const bool over = doc.overflowed();
 #if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
-  // v7: no capacity()
+  const unsigned usage = 0u;  // v7: memoryUsage() deprecated, returns 0
+  const bool over = doc.overflowed();
   out.printf("%s: usage=%uB%s\n", name, usage, over ? " (OVERFLOW)" : "");
 #else
-  // v6: capacity() is available
+  const unsigned usage = static_cast<unsigned>(doc.memoryUsage());
+  const bool over = doc.overflowed();
   const unsigned cap = static_cast<unsigned>(doc.capacity());
   out.printf("%s: usage=%u/%uB%s\n", name, usage, cap,
              over ? " (OVERFLOW)" : "");
 #endif
 }
 
-} // namespace
 
 // -----------------------------------------------------------------------------
 // ROOT BUILD
@@ -121,7 +125,9 @@ using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
 using esp_panel::drivers::LCD;
 
-constexpr int kStorageVersionCurrent = 6;
+constexpr int kStorageVersionCurrent = 7;
+
+bool g_topology_persist_enabled = true;
 
 // Buzzer (root)
 constexpr int kBuzzerPin = 6;
@@ -143,9 +149,13 @@ bool g_flash_phase = false; // toggled in DisplayLoop()
 Preferences g_root_preferences;
 
 // Last-seen data and labels (persisted labels, volatile last_seen).
-// At global scope (v7 supports StaticJsonDocument)
-static StaticJsonDocument<65536> g_last_seen; // was 32768
-static StaticJsonDocument<8192> g_labels;
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+static JsonDocument g_last_seen;
+static JsonDocument g_labels;
+#else
+static StaticJsonDocument<65536> g_last_seen;  // was 32768
+static StaticJsonDocument<8192>  g_labels;
+#endif
 
 // Mesh tasks.
 Task g_task_announce;
@@ -174,7 +184,10 @@ lv_obj_t *g_ui_label_peers = nullptr;
 lv_obj_t *g_ui_label_uptime = nullptr;
 lv_obj_t *g_ui_tile_container = nullptr;
 
-volatile bool g_gui_dirty = false;
+volatile bool g_layout_dirty = false;   // expensive: create/reflow tiles
+volatile bool g_values_dirty = false;   // cheap: rewrite texts/colors only
+volatile bool g_flash_dirty  = false;   // cheap: flash-phase color swap (existing)
+
 volatile size_t g_ui_peers = 0;
 
 Board *g_board = nullptr;
@@ -207,10 +220,6 @@ struct TileWidgets {
 
 std::map<String, TileWidgets> g_tiles;
 
-volatile bool g_flash_dirty = false;
-
-namespace {
-
 void GuiRebuildTiles(); // forward
 
 // ---------------------------------------------------------------------------
@@ -227,11 +236,20 @@ enum NodeMuteMask : uint8_t {
 };
 
 static uint8_t GetNodeMuteMask(const String &node_id) {
-  JsonVariant v = g_labels["mute"][node_id];
-  if (v.is<int>())
-    return static_cast<uint8_t>(v.as<int>()) & 0x3;
+  const String node_hex = CanonNodeHex8(node_id);
+  JsonVariant v = g_labels["mute"][node_hex];
+  if (v.is<int>()) return static_cast<uint8_t>(v.as<int>()) & 0x3;
+
+  // Legacy decimal fallback
+  uint32_t u = 0;
+  if (ParseNodeIdToU32(node_hex, &u)) {
+    char dec[16]; snprintf(dec, sizeof(dec), "%lu", (unsigned long)u);
+    v = g_labels["mute"][dec];
+    if (v.is<int>()) return static_cast<uint8_t>(v.as<int>()) & 0x3;
+  }
   return kMuteNone;
 }
+
 
 static const char *NodeMuteMaskToString(uint8_t m) {
   switch (m & 0x3) {
@@ -244,6 +262,18 @@ static const char *NodeMuteMaskToString(uint8_t m) {
   default:
     return "both";
   }
+}
+
+// NEW (helpers, near other Save*/Load* helpers)
+static void SaveTopoPersistFlag() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putInt("topo_persist", g_topology_persist_enabled ? 1 : 0);
+  g_root_preferences.end();
+}
+static void LoadTopoPersistFlag() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  g_topology_persist_enabled = (g_root_preferences.getInt("topo_persist", 1) != 0);
+  g_root_preferences.end();
 }
 
 int LoadStorageVersion() {
@@ -406,163 +436,192 @@ void EnsureDocuments() {
 
 // Default high rank means "unspecified / after ranked ones"
 static int GetNodeRank(const String &node_id) {
-  JsonVariant v = g_labels["tile_order"][node_id];
-  if (v.is<int>())
-    return v.as<int>();
+  const String hex = CanonNodeHex8(node_id);
+  JsonVariant v = g_labels["tile_order"][hex];
+  if (v.is<int>()) return v.as<int>();
+
+  // Legacy decimal fallback
+  uint32_t u = 0;
+  if (ParseNodeIdToU32(hex, &u)) {
+    char dec[16]; snprintf(dec, sizeof(dec), "%lu", (unsigned long)u);
+    v = g_labels["tile_order"][dec];
+    if (v.is<int>()) return v.as<int>();
+  }
   return 1000000;
 }
 
-// --- Topology persistence: robust, quiet, and idempotent --------------------
-static String g_known_cache; // last JSON we wrote or observed in NVS
-static uint32_t g_known_last_ms = 0;
 
-// Tiny helper: build {"nodes":["123","456",...]} without ArduinoJson heap.
-static String BuildKnownJson(const std::vector<String> &ids) {
-  // Precompute reserve for fewer reallocs.
-  size_t total = 12; // {"nodes":[]}
-  for (const auto &s : ids)
-    total += s.length() + 3; // quotes + comma
-  String out;
-  out.reserve(total);
-  out += F("{\"nodes\":[");
-  for (size_t i = 0; i < ids.size(); ++i) {
-    out += '"';
-    out += ids[i];
-    out += '"';
-    if (i + 1 < ids.size())
-      out += ',';
-  }
-  out += "]}";
-  return out;
-}
+// --- Topology persistence: fixed-size binary array of node IDs -------------
+constexpr size_t kMaxKnownNodes = 20;
 
-// Optional: count nodes in an existing NVS string, used to skip shrink-writes.
-static size_t CountPrevNodes(const String &prev) {
-  if (prev.isEmpty())
-    return 0;
-  JsonDocument d;
-  if (deserializeJson(d, prev) != DeserializationError::Ok)
-    return 0;
-  JsonArray a = d["nodes"].as<JsonArray>();
-  return a.isNull() ? 0 : a.size();
-}
-
-void SaveKnownTopology() {
-  EnsureDocuments();
-  JsonObjectConst nodes_cur = g_last_seen["nodes"].as<JsonObjectConst>();
-  if (nodes_cur.isNull())
-    return; // nothing to do
-
-  // Collect + sort unique IDs from current view.
-  std::vector<String> ids;
-  ids.reserve(nodes_cur.size());
-  for (JsonPairConst n : nodes_cur)
-    ids.emplace_back(n.key().c_str());
-  if (ids.empty())
-    return; // never persist empty set
-  std::sort(ids.begin(), ids.end());
-
-  // Build next JSON without heap surprises.
-  const String next = BuildKnownJson(ids);
-
-  const uint32_t now_ms = millis();
-  // RAM guard: if identical to what we just handled recently, skip.
-  if (next == g_known_cache && (now_ms - g_known_last_ms) < 2000U)
-    return;
-
-  // Read previous from NVS.
+// Read sorted known IDs from NVS ("known_bin") into a vector (<= kMaxKnownNodes).
+static bool ReadKnownFromNVS(std::vector<uint32_t>* out_ids) {
+  out_ids->clear();
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const String prev = g_root_preferences.getString("known", "");
+  const size_t nbytes = g_root_preferences.getBytesLength("known_bin");
+  if (nbytes == 0 || (nbytes % sizeof(uint32_t)) != 0) {
+    g_root_preferences.end();
+    return false;
+  }
+  const size_t count = std::min(nbytes / sizeof(uint32_t), kMaxKnownNodes);
+  out_ids->resize(count);
+  if (count > 0) {
+    (void)g_root_preferences.getBytes("known_bin", out_ids->data(),
+                                      count * sizeof(uint32_t));
+  }
   g_root_preferences.end();
-
-  // If equal, refresh cache and exit.
-  if (next == prev) {
-    g_known_cache = next;
-    g_known_last_ms = now_ms;
-    return;
+  if (!out_ids->empty()) {
+    std::sort(out_ids->begin(), out_ids->end());
+    out_ids->erase(std::unique(out_ids->begin(), out_ids->end()),
+                   out_ids->end());
   }
+  return !out_ids->empty();
+}
 
-  // Skip writes that would shrink the set (protect against transient churn).
-  const size_t prev_cnt = CountPrevNodes(prev);
-  if (ids.size() < prev_cnt) {
-    // Update cache so we don't hammer NVS while the mesh is noisy.
-    g_known_cache = next;
-    g_known_last_ms = now_ms;
-    return;
-  }
+// Write sorted IDs to NVS ("known_bin"). Also remove legacy JSON key ("known").
+static void WriteKnownToNVS(const std::vector<uint32_t>& ids_sorted_unique) {
+  const size_t count = std::min(ids_sorted_unique.size(), kMaxKnownNodes);
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  (void)g_root_preferences.putBytes("known_bin",
+                                    ids_sorted_unique.data(),
+                                    count * sizeof(uint32_t));
+  g_root_preferences.remove("known");  // stop carrying JSON forever
+  g_root_preferences.end();
+}
+
+// Return true if id is already in the persisted set.
+static bool NodeIdKnown(uint32_t id) {
+  std::vector<uint32_t> prev;
+  if (!ReadKnownFromNVS(&prev)) return false;
+  return std::binary_search(prev.begin(), prev.end(), id);
+}
+
+// Add id to the persisted set (sorted/unique, clamped to kMaxKnownNodes).
+// Returns true if NVS was actually updated (i.e., set changed).
+static bool AddKnownAndPersist(uint32_t id) {
+  std::vector<uint32_t> cur;
+  (void)ReadKnownFromNVS(&cur);     // ok if empty
+
+  cur.push_back(id);
+  std::sort(cur.begin(), cur.end());
+  cur.erase(std::unique(cur.begin(), cur.end()), cur.end());
+  if (cur.size() > kMaxKnownNodes) cur.resize(kMaxKnownNodes);
+
+  std::vector<uint32_t> prev;
+  (void)ReadKnownFromNVS(&prev);    // ok if empty
+
+  const bool same = (prev.size() == cur.size()) &&
+                    std::equal(prev.begin(), prev.end(), cur.begin());
+  if (same) return false;
 
   Serial.printf("Updating known topology: %u node(s)\n",
-                static_cast<unsigned>(ids.size()));
-
-  g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  (void)g_root_preferences.putString("known", next);
-  g_root_preferences.end();
-
-  g_known_cache = next;
-  g_known_last_ms = now_ms;
+                static_cast<unsigned>(cur.size()));
+  WriteKnownToNVS(cur);
+  return true;
 }
 
-// Load topology and pre-populate g_last_seen so tiles render after reboot.
-// We seed "last" with now to start age at 0 and allow normal staleness aging.
-// Load "known" and pre-seed g_last_seen with empty nodes so tiles appear on
-// boot. Accepts old schema (object of nodes->addr arrays) or new schema (array
-// of ids).
-void LoadKnownTopology() {
-  g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const String json = g_root_preferences.getString("known", "");
-  g_root_preferences.end();
-  if (json.isEmpty())
+// Rewritten: build current set from g_last_seen, compare with NVS, persist iff different.
+void SaveKnownTopology() {
+  if (!g_topology_persist_enabled) {
     return;
+  }
 
-  JsonDocument kd;
-  if (deserializeJson(kd, json) != DeserializationError::Ok)
+  EnsureDocuments();
+  JsonObjectConst nodes_cur = g_last_seen["nodes"].as<JsonObjectConst>();
+  if (nodes_cur.isNull() || nodes_cur.size() == 0) return;  // never persist empty
+
+  std::vector<uint32_t> cur;
+  cur.reserve(std::min<size_t>(nodes_cur.size(), kMaxKnownNodes));
+
+  for (JsonPairConst n : nodes_cur) {
+    const char* key = n.key().c_str();
+    uint32_t id = 0;
+    if (!ParseNodeIdToU32(String(key), &id)) continue;
+    cur.push_back(id);
+    if (cur.size() == kMaxKnownNodes) break;
+  }
+
+  if (cur.empty()) return;
+
+  std::sort(cur.begin(), cur.end());
+  cur.erase(std::unique(cur.begin(), cur.end()), cur.end());
+
+  std::vector<uint32_t> prev;
+  (void)ReadKnownFromNVS(&prev);          // ok if empty
+
+  const bool same = (prev.size() == cur.size()) &&
+                    std::equal(prev.begin(), prev.end(), cur.begin());
+  if (same) return;
+
+  Serial.printf("Updating known topology: %u node(s)\n",
+                static_cast<unsigned>(cur.size()));
+  WriteKnownToNVS(cur);
+}
+
+// Load persisted known IDs and pre-seed g_last_seen so tiles appear on boot.
+// One-time migration: if "known_bin" is empty but legacy JSON "known" exists,
+// convert it to binary.
+void LoadKnownTopology() {
+  std::vector<uint32_t> ids;
+
+  if (!g_topology_persist_enabled) {
     return;
+  }
+
+  if (!ReadKnownFromNVS(&ids)) {
+    // Attempt one-time migration from legacy JSON.
+    g_root_preferences.begin("meshroot", /*readOnly=*/true);
+    const String json = g_root_preferences.getString("known", "");
+    g_root_preferences.end();
+
+    if (!json.isEmpty()) {
+      JsonDocument kd;
+      if (deserializeJson(kd, json) == DeserializationError::Ok &&
+          kd["nodes"].is<JsonArray>()) {
+        for (JsonVariant v : kd["nodes"].as<JsonArray>()) {
+          const char* s = v.as<const char*>();
+          if (!s || !*s) continue;
+          uint32_t id = 0;
+          if (ParseNodeIdToU32(String(s), &id)) ids.push_back(id);
+        }
+        if (!ids.empty()) {
+          std::sort(ids.begin(), ids.end());
+          ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+          if (ids.size() > kMaxKnownNodes) ids.resize(kMaxKnownNodes);
+          WriteKnownToNVS(ids);
+        }
+      }
+    }
+    if (ids.empty()) return;
+  }
 
   EnsureDocuments();
   JsonObject nodes_out = g_last_seen["nodes"].to<JsonObject>();
   const uint32_t now_ms = millis();
 
-  // v2: {"nodes": ["123","456",...]}
-  if (kd["nodes"].is<JsonArray>()) {
-    for (JsonVariant v : kd["nodes"].as<JsonArray>()) {
-      const char *id = v.as<const char *>();
-      if (!id || !*id)
-        continue;
-      JsonObject node_obj = nodes_out[id].to<JsonObject>();
-      node_obj["busGpio"] = node_obj["busGpio"] | -1;
-      node_obj["last"] = now_ms;
-      node_obj["sensors"]
-          .to<JsonObject>(); // start empty; rows fill on first data
-    }
-    return;
-  }
-
-  // v1 (legacy): {"nodes": { "123": [ "ADDR...", ... ], ... }}
-  if (kd["nodes"].is<JsonObject>()) {
-    for (JsonPair p : kd["nodes"].as<JsonObject>()) {
-      const char *id = p.key().c_str();
-      JsonObject node_obj = nodes_out[id].to<JsonObject>();
-      node_obj["busGpio"] = node_obj["busGpio"] | -1;
-      node_obj["last"] = now_ms;
-      node_obj["sensors"].to<JsonObject>(); // do NOT pre-seed addresses anymore
-    }
-    // Optional one-time migration to v2: rewrite to node-id array
-    SaveKnownTopology();
+  for (uint32_t id : ids) {
+    char node_key[16];
+    FormatNodeKey(id, node_key, sizeof(node_key));
+    JsonObject node_obj = nodes_out[node_key].to<JsonObject>();
+    node_obj["busGpio"] = node_obj["busGpio"] | -1;
+    node_obj["last"] = now_ms;
+    node_obj["sensors"].to<JsonObject>();
   }
 }
 
 // Remove persisted topology and clear in-memory nodes.
 void EraseKnownTopology() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.remove("known");
+  g_root_preferences.remove("known_bin");
+  g_root_preferences.remove("known");   // legacy
   g_root_preferences.end();
-
-  // Clear in-memory nodes (labels untouched).
   g_last_seen["nodes"].to<JsonObject>().clear();
 }
 
 void MigrateStorageIfNeeded() {
   const int version = LoadStorageVersion();
+
+  LoadTopoPersistFlag();
 
   if (version == 0 || version == 1) {
     // Old: labels only.
@@ -572,6 +631,10 @@ void MigrateStorageIfNeeded() {
 
     // After LoadFlashSettings();
     LoadFlashSettings();
+
+    g_topology_persist_enabled = true;  // default ON for old installs
+  
+    SaveTopoPersistFlag();
 
     // NEW: pull any previously saved topology to pre-populate tiles
     LoadKnownTopology();
@@ -613,8 +676,10 @@ void MigrateStorageIfNeeded() {
     // After LoadFlashSettings();
     LoadFlashSettings();
 
-    // NEW: pull any previously saved topology to pre-populate tiles
-    LoadKnownTopology();
+    LoadTopoPersistFlag();
+    if (g_topology_persist_enabled) {
+      LoadKnownTopology();
+    }
 
     g_warn_low_c = 5.0f;
     g_warn_high_c = 26.0f;
@@ -645,8 +710,10 @@ void MigrateStorageIfNeeded() {
     // After LoadFlashSettings();
     LoadFlashSettings();
 
-    // NEW: pull any previously saved topology to pre-populate tiles
-    LoadKnownTopology();
+    LoadTopoPersistFlag();
+    if (g_topology_persist_enabled) {
+      LoadKnownTopology();
+    }
 
     g_beep_len_ms = kDefaultBeepLenMs;
     g_beep_gap_warn_ms = kDefaultGapWarnMs;
@@ -672,8 +739,10 @@ void MigrateStorageIfNeeded() {
     // After LoadFlashSettings();
     LoadFlashSettings();
 
-    // NEW: pull any previously saved topology to pre-populate tiles
-    LoadKnownTopology();
+    LoadTopoPersistFlag();
+    if (g_topology_persist_enabled) {
+      LoadKnownTopology();
+    }
 
     g_flash_interval_ms = kDefaultFlashIntervalMs;
     SaveFlashSettings();
@@ -682,17 +751,90 @@ void MigrateStorageIfNeeded() {
     return;
   }
 
-  // v5+ normal load.
-  LoadLabels();
-  EnsureDocuments();
-  LoadDisplayUnits();
-  LoadHighlightSettings();
-  LoadLimits();
-  LoadBuzzerSettings();
-  LoadFlashSettings();
+  if (version == 5) {
+    LoadLabels();
+    EnsureDocuments();
+    LoadDisplayUnits();
+    LoadHighlightSettings();
+    LoadLimits();
+    LoadBuzzerSettings();
+    LoadFlashSettings();
+    LoadTopoPersistFlag();
+    if (g_topology_persist_enabled) {
+      LoadKnownTopology();
+    }
+  }
+
+  if (version == 6) {  // NEW: add flag in v6->v7 bump
+    LoadLabels();
+    EnsureDocuments();
+    LoadDisplayUnits();
+    LoadHighlightSettings();
+    LoadLimits();
+    LoadBuzzerSettings();
+    LoadFlashSettings();
+    // NEW:
+    g_topology_persist_enabled = true;
+    SaveTopoPersistFlag();
+    if (g_topology_persist_enabled) LoadKnownTopology();
+    SaveStorageVersion(kStorageVersionCurrent);
+    return;
+  }
 
   // NEW: pull any previously saved topology to pre-populate tiles
   LoadKnownTopology();
+}
+
+// Node ID canonicalization: accept "0xDEADBEEF", "deadbeef", or decimal.
+// Canonical form for JSON keys: 8-hex, uppercase, no "0x".
+static bool ParseNodeIdToU32(const String& s, uint32_t* out) {
+  if (!out) return false;
+  const char* c = s.c_str();
+
+  // Prefer hex. Allow optional 0x/0X prefix.
+  if (s.length() >= 2 && c[0] == '0' && (c[1] == 'x' || c[1] == 'X')) {
+    char* e = nullptr;
+    unsigned long v = strtoul(c + 2, &e, 16);
+    if (e != c + 2) { *out = static_cast<uint32_t>(v); return true; }
+  }
+  { // hex without prefix
+    char* e = nullptr;
+    unsigned long v = strtoul(c, &e, 16);
+    if (e != c) { *out = static_cast<uint32_t>(v); return true; }
+  }
+  { // legacy decimal fallback
+    char* e = nullptr;
+    unsigned long v = strtoul(c, &e, 10);
+    if (e != c) { *out = static_cast<uint32_t>(v); return true; }
+  }
+  return false;
+}
+
+static String CanonNodeHex8(const String& in) {
+  uint32_t id = 0;
+  if (!ParseNodeIdToU32(in, &id)) return in;  // leave as-is if unparsable
+  char buf[9];
+  snprintf(buf, sizeof(buf), "%08lX", static_cast<unsigned long>(id));
+  return String(buf);
+}
+
+// Make a stable JSON key for a node id (8-hex, uppercase, no "0x").
+static void FormatNodeKey(uint32_t node_id, char *out, size_t out_len) {
+  snprintf(out, out_len, "%08lX", static_cast<unsigned long>(node_id));
+}
+
+// Helper: try reading a value by hex key, then legacy decimal key.
+// NOTE: avoid templates here; Arduino's auto-prototype pass doesn't handle them well.
+static JsonVariant GetByNodeKeyWithLegacyFallback(JsonObject obj,
+                                                  const String& node_key_hex8) {
+  JsonVariant v = obj[node_key_hex8];
+  if (!v.isNull()) return v;
+
+  uint32_t u = 0;
+  if (!ParseNodeIdToU32(node_key_hex8, &u)) return v;  // still null
+  char dec[16];
+  snprintf(dec, sizeof(dec), "%lu", static_cast<unsigned long>(u));
+  return obj[dec];
 }
 
 // Upper-case canonical form for 16-hex DS18B20 IDs.
@@ -709,12 +851,6 @@ static String CanonAddr16(const String &addr) {
   return out;
 }
 
-// Make a stable JSON key for a node id.
-static void FormatNodeKey(uint32_t node_id, char *out, size_t out_len) {
-  // 10 digits max for uint32 + NUL fits in 16 bytes.
-  snprintf(out, out_len, "%lu", static_cast<unsigned long>(node_id));
-}
-
 // Global (node-agnostic) rank.
 static int GetSensorRankGlobal(const String &addr16) {
   const String key = CanonAddr16(addr16);
@@ -726,12 +862,21 @@ static int GetSensorRankGlobal(const String &addr16) {
 
 // Node-specific rank, falling back to global if unset.
 static int GetSensorRankForNode(const String &node_id, const String &addr16) {
+  const String node_hex = CanonNodeHex8(node_id);
   const String key = CanonAddr16(addr16);
-  JsonVariant v = g_labels["sorder"][node_id][key];
-  if (v.is<int>())
-    return v.as<int>();
+  JsonVariant v = g_labels["sorder"][node_hex][key];
+  if (v.is<int>()) return v.as<int>();
+
+  // Legacy decimal fallback
+  uint32_t u = 0;
+  if (ParseNodeIdToU32(node_hex, &u)) {
+    char dec[16]; snprintf(dec, sizeof(dec), "%lu", (unsigned long)u);
+    v = g_labels["sorder"][dec][key];
+    if (v.is<int>()) return v.as<int>();
+  }
   return GetSensorRankGlobal(key);
 }
+
 
 // Find the [start,end) span (0-based token index) of a whitespace-delimited
 // token.
@@ -958,28 +1103,19 @@ void GuiInit() {
   // Ensure the bar is always drawn on top of tiles.
   lv_obj_move_foreground(bar);
 
-  g_gui_dirty = true;
+  g_layout_dirty = true;   // first time needs a full build
 
   lvgl_port_unlock();
 }
 
 // Called when node metadata changes.
-void GuiUpdateNodeSummary(const char *node_id, int bus_gpio, uint32_t last_ms) {
-  (void)node_id;
-  (void)bus_gpio;
-  (void)last_ms;
-  g_gui_dirty = true;
+void GuiUpdateNodeSummary(const char*, int, uint32_t) {
+  g_values_dirty = true;   // no layout
 }
 
 // Called when sensor data changes.
-void GuiUpdateSensorRow(const char *node_id, const char *addr, float temp_f,
-                        const char *label, uint32_t last_ms) {
-  (void)node_id;
-  (void)addr;
-  (void)temp_f;
-  (void)label;
-  (void)last_ms;
-  g_gui_dirty = true;
+void GuiUpdateSensorRow(const char*, const char*, float, const char*, uint32_t) {
+  g_values_dirty = true;   // no layout
 }
 
 void UpdateUptimeLabel() {
@@ -1008,13 +1144,16 @@ void BuildDummyData() {
   const uint32_t now_ms = millis();
 
   for (int i = 1; i <= 10; ++i) {
-    const String node_key = String(1000 + i);
+    const uint32_t nid = 0x10000000u + static_cast<uint32_t>(i);
+    char node_key[16];
+    FormatNodeKey(nid, node_key, sizeof(node_key));  // hex key
+
     JsonObject node_obj = nodes[node_key].to<JsonObject>();
     node_obj["busGpio"] = -1;
     node_obj["last"] = now_ms;
 
     const String loc = String("Dummy ") + String(i);
-    g_labels["nodes"][node_key] = loc;
+    g_labels["nodes"][String(node_key)] = loc;
 
     JsonObject sensors = node_obj["sensors"].to<JsonObject>();
 
@@ -1047,8 +1186,8 @@ void BuzzerBeepOnce() {
   DLOG("[BUZZER] Beep\n");
 }
 
-TileWidgets &GetOrCreateTile(const String &node_id_str, lv_coord_t tile_w,
-                             lv_coord_t tile_h) {
+TileWidgets &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
+                             int16_t tile_h) {
   auto it = g_tiles.find(node_id_str);
   if (it != g_tiles.end()) {
     // Ensure size in case geometry changed (e.g. rotation/res change).
@@ -1082,8 +1221,9 @@ TileWidgets &GetOrCreateTile(const String &node_id_str, lv_coord_t tile_w,
     tw.sensor_label[i] = lv_label_create(tw.tile);
   }
 
-  auto [ins_it, ok] = g_tiles.emplace(node_id_str, tw);
-  return ins_it->second;
+  auto result = g_tiles.emplace(node_id_str, tw);
+  return result.first->second;
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,6 +1348,77 @@ static void GuiAgeTick(uint32_t now_ms) {
   }
 }
 
+// NEW: cheap refresh used on most updates
+static void GuiRefreshValues(uint32_t now_ms) {
+  EnsureDocuments();
+  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
+
+  // Peers label
+  if (g_ui_label_peers != nullptr) {
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "Peers: %u",
+             static_cast<unsigned>(g_ui_peers));
+    lv_label_set_text(g_ui_label_peers, buffer);
+  }
+
+  for (auto &kv : g_tiles) {
+    const String& node_id = kv.first;
+    TileWidgets&  tw      = kv.second;
+
+    JsonObject node_obj = nodes[node_id];
+    if (node_obj.isNull()) continue;
+
+    // Header label (location)
+    String loc = g_labels["nodes"][node_id] | "";
+    if (loc.isEmpty()) loc = node_id;
+    lv_label_set_text(tw.label_loc, loc.c_str());
+
+    // Latest age
+    uint32_t latest_ms = node_obj["last"] | 0U;
+    JsonObject sensors = node_obj["sensors"].as<JsonObject>();
+    for (JsonPair s_entry : sensors) {
+      const uint32_t s_last = s_entry.value()["last"] | 0U;
+      if (s_last > latest_ms) latest_ms = s_last;
+    }
+    const uint32_t age_min = (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
+    if (tw.label_age) {
+      char age_buf[24];
+      snprintf(age_buf, sizeof(age_buf), "Age: %lu min",
+               static_cast<unsigned long>(age_min));
+      lv_label_set_text(tw.label_age, age_buf);
+    }
+
+    // Update up to two sensor text/colors (do not change count/positions)
+    int wrote = 0;
+    for (JsonPair s_entry : sensors) {
+      if (wrote >= tw.sensor_count || wrote >= 2) break;
+      const String addr = s_entry.key().c_str();
+      JsonObject s = s_entry.value().as<JsonObject>();
+
+      const char* custom = g_labels["sensors"][addr] | "";
+      String label = *custom ? String(custom) : CanonAddr16(addr);
+      float tC = s["tC"] | NAN;
+
+      char buf[64];
+      if (isnan(tC)) {
+        snprintf(buf, sizeof(buf), "%s: --", label.c_str());
+      } else {
+        float disp = g_display_fahrenheit ? (tC * 1.8f + 32.0f) : tC;
+        char unit = g_display_fahrenheit ? 'F' : 'C';
+        snprintf(buf, sizeof(buf), "%s: %.1f%c", label.c_str(),
+                 static_cast<double>(disp), unit);
+      }
+      lv_label_set_text(tw.sensor_label[wrote], buf);
+      // keep prior color decisions; tile-level color changes happen in GuiAgeTick/GuiApplyFlashPhase
+      ++wrote;
+    }
+    // hide any remaining label slots if fewer values now (no layout)
+    for (int i = wrote; i < 2; ++i) {
+      if (tw.sensor_label[i]) lv_obj_add_flag(tw.sensor_label[i], LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+}
+
 void GuiRebuildTiles() {
   if (g_ui_tile_container == nullptr)
     return;
@@ -1264,21 +1475,25 @@ void GuiRebuildTiles() {
   for (const String &node_id_str : node_ids) {
     JsonObject node_obj = nodes[node_id_str];
 
+    uint32_t node_id_u32 = 0;
+    (void)ParseNodeIdToU32(node_id_str, &node_id_u32);  
+
     TileWidgets &tw = GetOrCreateTile(node_id_str, tile_w, tile_h);
 
     // Location (label or node id).
     String loc = g_labels["nodes"][node_id_str] | "";
-    if (loc.isEmpty())
-      loc = node_id_str;
+    if (loc.isEmpty()) {
+      char hex_id[11];  // "0x" + 8 hex + NUL
+      snprintf(hex_id, sizeof(hex_id), "0x%08lX", static_cast<unsigned long>(node_id_u32));
+      loc = hex_id;
+    }
 
     // Connection + age.
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
 
     char *endptr = nullptr;
-    const uint32_t node_id_u32 =
-        static_cast<uint32_t>(strtoul(node_id_str.c_str(), &endptr, 10));
-    const bool node_connected =
-        (endptr != node_id_str.c_str()) && is_connected(node_id_u32);
+    node_id_u32 = static_cast<uint32_t>(strtoul(node_id_str.c_str(), &endptr, 10));
+    const bool node_connected = (node_id_u32 != 0U) && is_connected(node_id_u32);
 
     uint32_t latest_ms = node_obj["last"] | 0U;
 
@@ -1487,46 +1702,42 @@ void GuiRebuildTiles() {
   }
 }
 
-} // namespace
-
 // -----------------------------------------------------------------------------
 // GUI helpers callable from elsewhere
 // -----------------------------------------------------------------------------
 
 void GuiUpdateNetwork(size_t peers) {
   g_ui_peers = peers;
-  g_gui_dirty = true;
+  g_values_dirty = true;   // label text only
 }
 
-void GuiRequestRender() { g_gui_dirty = true; }
+// CHANGED
+void GuiRequestRender() { g_layout_dirty = true; }
 
 // -----------------------------------------------------------------------------
 // Display loop: rebuild tiles + buzzer + periodic refresh
 // -----------------------------------------------------------------------------
 
+// CHANGED: DisplayLoop()
 void DisplayLoop() {
   static uint32_t last_build_ms = 0;
   static uint32_t last_force_ms = 0;
   static uint32_t last_flash_ms = 0;
-
   const uint32_t now_ms = millis();
 
-  // --- FIX: drive flash phase unconditionally ---
-  // Let GuiApplyFlashPhase() choose which tiles react.
+  // flash phase driving (unchanged logic)
   if (g_flash_interval_ms > 0) {
     if (now_ms - last_flash_ms >= g_flash_interval_ms) {
       g_flash_phase = !g_flash_phase;
-      g_flash_dirty = true; // only a lightweight color toggle
+      g_flash_dirty = true;
       last_flash_ms = now_ms;
     }
   } else if (g_flash_phase) {
-    // If flash is disabled, make sure we restore the "normal" phase once.
     g_flash_phase = false;
     g_flash_dirty = true;
   }
-  // --- end fix ---
 
-  // Periodic light update for age/status text only (no full rebuild).
+  // minute tick: only age text + uptime (no rebuild)
   if (now_ms - last_force_ms >= 60000U) {
     if (lvgl_port_lock(-1)) {
       GuiAgeTick(now_ms);
@@ -1536,24 +1747,23 @@ void DisplayLoop() {
     last_force_ms = now_ms;
   }
 
-  if ((g_gui_dirty || g_flash_dirty) && (now_ms - last_build_ms >= 50U)) {
+  if ((g_layout_dirty || g_values_dirty || g_flash_dirty) &&
+      (now_ms - last_build_ms >= 50U)) {
     if (lvgl_port_lock(-1)) {
-      if (g_gui_dirty) {
-        g_gui_dirty = false;
 
-        if (g_ui_label_peers != nullptr) {
-          char buffer[32];
-          snprintf(buffer, sizeof(buffer), "Peers: %u",
-                   static_cast<unsigned>(g_ui_peers));
-          lv_label_set_text(g_ui_label_peers, buffer);
-        }
-
-        GuiRebuildTiles(); // data/layout only
+      if (g_layout_dirty) {
+        g_layout_dirty = false;
+        // Peers label will be set inside values path too; that’s okay
+        GuiRebuildTiles();         // heavy path, rare
+        g_values_dirty = false;    // rebuilding already refreshed content
+      } else if (g_values_dirty) {
+        g_values_dirty = false;
+        GuiRefreshValues(now_ms);  // cheap path, frequent
       }
 
       if (g_flash_dirty) {
         g_flash_dirty = false;
-        GuiApplyFlashPhase(); // lightweight color toggle
+        GuiApplyFlashPhase();      // color swap only
       }
 
       UpdateUptimeLabel();
@@ -1562,6 +1772,7 @@ void DisplayLoop() {
     }
   }
 }
+
 
 void BuzzerLoop() {
   // Static state so we can be called every loop() tick.
@@ -1626,15 +1837,24 @@ static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc >= 2 && argv[1] == "erase") {
     g_root_preferences.begin("meshroot", false);
-    g_root_preferences.remove("known");
+    g_root_preferences.remove("known_bin");
+    g_root_preferences.remove("known");  // legacy
     g_root_preferences.end();
     out.println(F("known erased"));
     return;
   }
-  g_root_preferences.begin("meshroot", true);
-  const String known = g_root_preferences.getString("known", "");
-  g_root_preferences.end();
-  out.println(known.isEmpty() ? F("(empty)") : known);
+  std::vector<uint32_t> ids;
+  (void)ReadKnownFromNVS(&ids);
+  if (ids.empty()) {
+    out.println(F("(empty)"));
+    return;
+  }
+  out.printf("known count=%u\n", static_cast<unsigned>(ids.size()));
+  for (uint32_t id : ids) {
+    out.printf("0x%08lX  (%10lu)\n",
+              static_cast<unsigned long>(id),
+              static_cast<unsigned long>(id));
+  }
 }
 
 static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
@@ -1646,9 +1866,10 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
   if (argc >= 2 && argv[1] == "list") {
     bool any = false;
     for (JsonPair p : m) {
-      any = true;
+      const String any_key = p.key().c_str();
+      const String hex = CanonNodeHex8(any_key);
       const uint8_t mask = static_cast<uint8_t>(p.value().as<int>()) & 0x3;
-      out.printf("%s : %s\n", p.key().c_str(), NodeMuteMaskToString(mask));
+      out.printf("%s : %s\n", hex.c_str(), NodeMuteMaskToString(mask));
     }
     if (!any)
       out.println(F("(empty)"));
@@ -1658,7 +1879,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
 
   // mute get <nodeId>
   if (argc >= 3 && argv[1] == "get") {
-    const String node_id = argv[2];
+    const String node_id = CanonNodeHex8(argv[2]);
     const uint8_t mask = GetNodeMuteMask(node_id);
     out.printf("%s : %s\n", node_id.c_str(), NodeMuteMaskToString(mask));
     return;
@@ -1671,7 +1892,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  const String node_id = argv[1];
+  const String node_id = CanonNodeHex8(argv[1]);
   const String mode = argv[2];
 
   uint8_t mask = kMuteNone;
@@ -1744,45 +1965,46 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+
+  // node rm <id>
   if (argc >= 3 && argv[1] == "rm") {
     const String &id = argv[2];
+    const String id_hex = CanonNodeHex8(id);
 
-    // Read-only lookup (won't create a member if missing)
     JsonObjectConst nodes_ro = g_last_seen["nodes"].as<JsonObjectConst>();
-    if (!nodes_ro[id].is<JsonObjectConst>()) {
+    if (!nodes_ro[id_hex].is<JsonObjectConst>()) {
       out.println(F("not found"));
       return;
     }
-
-    // Now mutate safely
     JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-    nodes.remove(id);
+    nodes.remove(id_hex);
     SaveKnownTopology();
     out.println(F("ok"));
     GuiRequestRender();
     return;
   }
 
+  // node <id> <label...>
   if (argc < 3) {
     out.println(F("ERR node (usage: node <id> <label...> | node rm <id>)"));
     return;
   }
 
-  // node <id> <label...>  (keep your parser behavior)
+  // Reconstruct the original line to reuse the common label extractor.
   String line;
   for (int i = 0; i < argc; ++i) {
-    if (i)
-      line += ' ';
+    if (i) line += ' ';
     line += argv[i];
   }
+
   String label;
   if (!ExtractLabelAfterSecondToken(line, &label)) {
     out.println(F("ERR node (usage: node <id> <label...>)"));
     return;
   }
 
-  JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-  g_labels["nodes"][argv[1]] = label;
+  const String id_hex = CanonNodeHex8(argv[1]);
+  g_labels["nodes"][id_hex] = label;
   SaveLabels();
   out.println(F("ok"));
   GuiRequestRender();
@@ -1792,7 +2014,6 @@ static void CmdNodes(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc >= 2 && argv[1] == "clear") {
     EraseKnownTopology();
-    SaveKnownTopology();
     out.println(F("ok"));
     GuiRequestRender();
   } else {
@@ -1989,6 +2210,65 @@ static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
                 "'limits alert <lo> <hi>')"));
 }
 
+static void CmdTopo(void* ctx, int argc, const String argv[], Print& out) {
+  (void)ctx;
+  if (argc < 2) {
+    out.println(F("topo cmds:\n"
+                  "  topo show\n"
+                  "  topo on | off\n"
+                  "  topo save       (force persist current RAM set)\n"
+                  "  topo load       (pre-seed from NVS into RAM)\n"
+                  "  topo clear      (erase persisted + RAM topology)"));
+    return;
+  }
+  const String sub = argv[1];
+
+  if (sub == "show") {
+    std::vector<uint32_t> ids; (void)ReadKnownFromNVS(&ids);
+    out.printf("topo persist=%s, persisted_count=%u\n",
+               g_topology_persist_enabled ? "on" : "off",
+               static_cast<unsigned>(ids.size()));
+    return;
+  }
+
+  if (sub == "on" || sub == "off") {
+    g_topology_persist_enabled = (sub == "on");
+    SaveTopoPersistFlag();
+    out.printf("topo persist=%s\n", g_topology_persist_enabled ? "on" : "off");
+    return;
+  }
+
+  if (sub == "save") {
+    // Force one-time save even if persist is off.
+    bool prev = g_topology_persist_enabled;
+    g_topology_persist_enabled = true;
+    SaveKnownTopology();
+    g_topology_persist_enabled = prev;
+    out.println(F("ok"));
+    return;
+  }
+
+  if (sub == "load") {
+    // One-time pre-seed regardless of flag (common operational need).
+    bool prev = g_topology_persist_enabled;
+    g_topology_persist_enabled = true;
+    LoadKnownTopology();
+    g_topology_persist_enabled = prev;
+    GuiRequestRender();
+    out.println(F("ok"));
+    return;
+  }
+
+  if (sub == "clear") {
+    EraseKnownTopology();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
+  }
+
+  out.println(F("ERR topo (type just 'topo' for help)"));
+}
+
 static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc < 4) {
@@ -2019,27 +2299,34 @@ static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("ERR flash (use 'flash <interval_ms>' or 'flash off')"));
     return;
   }
+
   if (argv[1].equalsIgnoreCase("off")) {
-    g_flash_interval_ms = 0;
+    g_flash_interval_ms = 0;        // turn off
     SaveFlashSettings();
-    g_flash_phase = false;
-    g_gui_dirty = true;
+    g_flash_phase = false;          // known phase
+    g_flash_dirty = true;           // apply colors immediately
+    g_values_dirty = true;          // cheap relabel
     out.println(F("flash off"));
-  } else {
-    long interval = argv[1].toInt();
-    if (interval < 0) {
-      out.println(F("ERR flash (interval must be >=0, or 'off')"));
-      return;
-    }
-    g_flash_interval_ms = (uint32_t)interval;
-    SaveFlashSettings();
-    g_flash_phase = false;
-    g_gui_dirty = true;
-    out.printf("flash interval=%lu ms (%s)\n",
-               (unsigned long)g_flash_interval_ms,
-               g_flash_interval_ms ? "enabled" : "off");
+    return;
   }
+
+  long interval_ms = argv[1].toInt();
+  if (interval_ms < 0) {
+    out.println(F("ERR flash (interval must be >=0, or 'off')"));
+    return;
+  }
+
+  g_flash_interval_ms = (uint32_t)interval_ms;  // enable with interval
+  SaveFlashSettings();
+  // force an immediate phase/color apply (keeps UI responsive)
+  g_flash_dirty = true;
+  g_values_dirty = true;
+
+  out.printf("flash interval=%lu ms (%s)\n",
+             (unsigned long)g_flash_interval_ms,
+             g_flash_interval_ms ? "enabled" : "off");
 }
+
 
 static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2095,7 +2382,7 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
   if (argc >= 3) {
-    const String node_id = argv[1];
+    const String node_id = CanonNodeHex8(argv[1]);
     const int rank = argv[2].toInt();
     ord[node_id] = rank;
     SaveLabels();
@@ -2148,7 +2435,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
   if (argc >= 4 && argv[1] == "clear") {
-    const String node_id = argv[2];
+    const String node_id = CanonNodeHex8(argv[2]);
     const String key = CanonAddr16(argv[3]);
     JsonObject m = sroot[node_id].to<JsonObject>();
     m.remove(key);
@@ -2158,7 +2445,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
   if (argc >= 4) {
-    const String node_id = argv[1];
+    const String node_id = CanonNodeHex8(argv[1]);
     const String key = CanonAddr16(argv[2]);
     const int rank = argv[3].toInt();
     JsonObject m = sroot[node_id].to<JsonObject>();
@@ -2193,8 +2480,7 @@ void RootAnnounce() {
 // -----------------------------------------------------------------------------
 
 void OnReceiveRoot(uint32_t from, String &msg) {
-
-  bool topology_changed = false;
+  bool structure_changed = false;
 
   DLOG("[ROOT RX] from=%u len=%u: %s\n", from,
        static_cast<unsigned>(msg.length()), msg.c_str());
@@ -2226,12 +2512,11 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   char node_key[16];
   FormatNodeKey(node_id, node_key, sizeof(node_key));
 
-  JsonObject node_obj;
-  if (!nodes.containsKey(node_key)) {
-    node_obj = nodes.createNestedObject(node_key); // copies key into doc
-    topology_changed = true;
-  } else {
-    node_obj = nodes[node_key].as<JsonObject>();
+  bool existed = nodes[node_key].is<JsonObject>();
+  JsonObject node_obj = nodes[node_key].to<JsonObject>();
+  if (!existed) {
+    structure_changed = true;
+    if (g_topology_persist_enabled) { (void)AddKnownAndPersist(node_id); }
   }
 
   node_obj["busGpio"] = bus_gpio;
@@ -2248,17 +2533,13 @@ void OnReceiveRoot(uint32_t from, String &msg) {
        sensor_array.size());
 
   for (JsonObject sensor_in : sensor_array) {
-    const char *addr = sensor_in["addr"] | "";
-    if (addr == nullptr || strlen(addr) != 16) {
+    const char* addr = sensor_in["addr"] | "";
+    if (!addr || strlen(addr) != 16) {
       continue;
     }
 
-    JsonObject sensor_out;
-    if (!sensors.containsKey(addr)) {
-      sensor_out = sensors.createNestedObject(addr); // copies key
-    } else {
-      sensor_out = sensors[addr].as<JsonObject>();
-    }
+    // v7-friendly: create/get object via .to<>() on the index
+    JsonObject sensor_out = sensors[addr].to<JsonObject>();
 
     if (sensor_in["tC"].is<float>()) {
       sensor_out["tC"] = sensor_in["tC"].as<float>();
@@ -2268,23 +2549,19 @@ void OnReceiveRoot(uint32_t from, String &msg) {
     }
     sensor_out["last"] = static_cast<uint32_t>(millis());
 
-    const float temp_c = sensor_out["tC"] | NAN;
-    const float temp_f = isnan(temp_c) ? NAN : (1.8f * temp_c + 32.0f);
-    const bool corrected = sensor_out["corr"] | false;
-    const char *label = g_labels["sensors"][addr] | "";
-
-    DLOG("    [%s]%s = %s%s\n", addr,
-         (label && *label) ? (String(" \"") + label + "\"").c_str() : "",
-         isnan(temp_f) ? "NaN" : String(temp_f, 2).c_str(),
-         corrected ? " (corr)" : "");
-
-    GuiUpdateSensorRow(node_id_str.c_str(), addr, temp_f,
-                       (label && *label) ? label : nullptr,
-                       static_cast<uint32_t>(millis()));
+    // If the key was just created above, treat as structural change.
+    // We can detect that by checking whether it had any members beforehand.
+    // Simpler: treat any first-time presence as structure change by probing:
+    // (If you'd rather be precise, cache sensors.containsKey(addr) beforehand.)
+    // We'll keep your original behavior:
+    //   structure_changed |= !existed;
   }
 
-  if (topology_changed) {
-    SaveKnownTopology();
+  // Pick the cheapest necessary refresh
+  if (structure_changed) {
+    g_layout_dirty = true;   // rebuild tiles (rare)
+  } else {
+    g_values_dirty = true;   // just rewrite texts/colors
   }
 
   // At the end of OnReceiveRoot():
@@ -2306,20 +2583,18 @@ void OnConnectionsChangedRoot() {
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
   const uint32_t now_ms = millis();
-
-  bool topology_changed = false;
+  bool structure_changed = false;
 
   // Ensure each connected node has an entry.
   for (const auto &id : mesh.getNodeList()) {
     char node_key[16];
     FormatNodeKey(id, node_key, sizeof(node_key));
 
-    JsonObject node_obj;
-    if (!nodes.containsKey(node_key)) {
-      node_obj = nodes.createNestedObject(node_key); // copies key
-      topology_changed = true;
-    } else {
-      node_obj = nodes[node_key].as<JsonObject>();
+    bool existed = nodes[node_key].is<JsonObject>();
+    JsonObject node_obj = nodes[node_key].to<JsonObject>();
+    if (!existed) {
+      if (g_topology_persist_enabled) { (void)AddKnownAndPersist(id); }
+      structure_changed = true;
     }
 
     if (!node_obj["last"].is<uint32_t>()) {
@@ -2328,10 +2603,8 @@ void OnConnectionsChangedRoot() {
     if (!node_obj["sensors"].is<JsonObject>()) {
       node_obj["sensors"].to<JsonObject>();
     }
-  }
+    if (structure_changed) g_layout_dirty = true;
 
-  if (topology_changed) {
-    SaveKnownTopology();
   }
 
   // Do not delete nodes; they age out visually.
@@ -2389,6 +2662,8 @@ void setup() {
       "mute <nodeId> off|low|high|both | mute get <nodeId> | mute list");
   g_console.RegisterCommand("stats", &CmdStats, "json usage + known size");
   g_console.RegisterCommand("known", &CmdKnown, "known [erase|show]");
+  g_console.RegisterCommand("topo", &CmdTopo,
+  "topo show|on|off|save|load|clear");
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);
@@ -2473,8 +2748,6 @@ Task g_task_cal;
 // Steady-state detection: unchanged reading for >=30s at 0.001 C tolerance.
 constexpr uint32_t kSteadyMs = 30000; // ms
 constexpr float kSteadyEpsC = 0.001f; // °C
-
-namespace {
 
 bool FindDeviceByAddr(const String &addr16, Address *out_addr) {
   if (addr16.length() != 16) {
@@ -3034,6 +3307,17 @@ static void CmdBoilPt(void *ctx, int argc, const String argv[], Print &out) {
              (double)inHg, (double)TbC, (double)TbF);
 }
 
+static void CmdWhoAmI(void*, int, const String[], Print& out) {
+  const uint32_t node = mesh.getNodeId();
+  const uint64_t mac  = ESP.getEfuseMac();  // base MAC from eFuse
+  out.printf("nodeId: %lu (0x%08lX)\n",
+             static_cast<unsigned long>(node),
+             static_cast<unsigned long>(node));
+  out.printf("baseMAC: %04X%08lX\n",
+             static_cast<unsigned>((mac >> 32) & 0xFFFFu),
+             static_cast<unsigned long>(mac & 0xFFFFFFFFul));
+}
+
 static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc < 2) {
@@ -3151,8 +3435,6 @@ void OnReceiveLeaf(uint32_t from, String &msg) {
 
 void OnConnectionsChangedLeaf() { LogConnections(); }
 
-} // namespace
-
 // Arduino entry points (leaf)
 void setup() {
   Serial.begin(DBG_BAUD);
@@ -3174,6 +3456,7 @@ void setup() {
   g_console.RegisterCommand("sendnow", &CmdSendNow, "send temperatures now");
   g_console.RegisterCommand("boilpt", &CmdBoilPt, "boilpt <inHg> [elev_ft]");
   g_console.RegisterCommand("cal", &CmdCal, "calibration commands");
+  g_console.RegisterCommand("whoami", &CmdWhoAmI, "show nodeId and MAC");
 
   g_task_send.set(TASK_IMMEDIATE, TASK_FOREVER, []() {
     SendTemperatures();
