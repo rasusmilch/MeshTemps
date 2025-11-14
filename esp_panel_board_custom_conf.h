@@ -16,7 +16,7 @@
 #pragma once
 
 // *INDENT-OFF*
-#define ESP_OPEN_TOUCH 1 // 1 initiates the touch, 0 closes the touch.
+#define ESP_OPEN_TOUCH 0 // 1 initiates the touch, 0 closes the touch.
 
 /**
  * @brief Flag to enable custom board configuration (0/1)

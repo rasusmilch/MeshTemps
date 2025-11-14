@@ -266,6 +266,7 @@ static const char *NodeMuteMaskToString(uint8_t m) {
 
 // NEW (helpers, near other Save*/Load* helpers)
 static void SaveTopoPersistFlag() {
+  Serial.println(F("Saving Topology Persist Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putInt("topo_persist", g_topology_persist_enabled ? 1 : 0);
   g_root_preferences.end();
@@ -284,6 +285,7 @@ int LoadStorageVersion() {
 }
 
 void SaveStorageVersion(int version) {
+  Serial.println(F("Saving Storage Version..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putInt("version", version);
   g_root_preferences.end();
@@ -306,6 +308,8 @@ void SaveLabels() {
   String json;
   serializeJson(g_labels, json);
 
+  Serial.println(F("Saving Labels..."));
+
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putString("labels", json);
   g_root_preferences.end();
@@ -320,6 +324,7 @@ void EraseLabels() {
 }
 
 void SaveLimits() {
+  Serial.println(F("Saving Limit Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putFloat("warn_low_c", g_warn_low_c);
   g_root_preferences.putFloat("warn_high_c", g_warn_high_c);
@@ -356,6 +361,7 @@ void LoadDisplayUnits() {
 }
 
 void SaveDisplayUnits() {
+  Serial.println(F("Saving Unit Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putInt("units", g_display_fahrenheit ? 1 : 0);
   g_root_preferences.end();
@@ -372,6 +378,7 @@ void LoadHighlightSettings() {
 }
 
 void SaveHighlightSettings() {
+  Serial.println(F("Saving Highlight Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putInt("hl_missing", g_highlight_missing_nodes ? 1 : 0);
   g_root_preferences.putInt("hl_stale_min",
@@ -380,6 +387,7 @@ void SaveHighlightSettings() {
 }
 
 void SaveBuzzerSettings() {
+  Serial.println(F("Saving Buzzer Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putULong("beep_len_ms", g_beep_len_ms);
   g_root_preferences.putULong("beep_gap_warn_ms", g_beep_gap_warn_ms);
@@ -403,6 +411,7 @@ void LoadBuzzerSettings() {
 }
 
 void SaveFlashSettings() {
+  Serial.println(F("Saving Flash Interval Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putULong("flash_interval_ms", g_flash_interval_ms);
   g_root_preferences.end();
@@ -481,6 +490,8 @@ static bool ReadKnownFromNVS(std::vector<uint32_t>* out_ids) {
 // Write sorted IDs to NVS ("known_bin"). Also remove legacy JSON key ("known").
 static void WriteKnownToNVS(const std::vector<uint32_t>& ids_sorted_unique) {
   const size_t count = std::min(ids_sorted_unique.size(), kMaxKnownNodes);
+
+  Serial.println(F("Saving Known IDs..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   (void)g_root_preferences.putBytes("known_bin",
                                     ids_sorted_unique.data(),
@@ -974,6 +985,30 @@ static bool ExtractLabelAfterSecondToken(const String &line,
 // ---------------------------------------------------------------------------
 // Display + GUI setup
 // ---------------------------------------------------------------------------
+
+// See if a double buffer and no bounce fix pixel ghosting
+// void DisplayInit() {
+//   g_board = new Board();
+//   g_board->init();
+
+//   LCD* lcd = g_board->getLCD();
+//   if (lcd != nullptr) {
+//     // Use 2 full frame buffers in PSRAM
+//     lcd->configFrameBufferNumber(2);
+
+// #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
+//     auto* bus = lcd->getBus();
+//     if (bus != nullptr &&
+//         bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
+//       // Disable bounce buffer for now
+//       // static_cast<BusRGB*>(bus)->configRGB_BounceBufferSize(0);
+//     }
+// #endif
+//   }
+
+//   assert(g_board->begin());
+//   lvgl_port_init(g_board->getLCD(), g_board->getTouch());
+// }
 
 void DisplayInit() {
   Serial.println(F("[Display] Init board"));

@@ -38,7 +38,8 @@
  */
 #define LVGL_PORT_BUFFER_MALLOC_CAPS            (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)       // Allocate LVGL buffer in SRAM
 // #define LVGL_PORT_BUFFER_MALLOC_CAPS            (MALLOC_CAP_SPIRAM)      // Allocate LVGL buffer in PSRAM
-#define LVGL_PORT_BUFFER_SIZE_HEIGHT            (40)
+#define LVGL_PORT_BUFFER_SIZE_HEIGHT            (20)
+// #define LVGL_PORT_BUFFER_SIZE_HEIGHT            (480)
 #define LVGL_PORT_BUFFER_NUM                    (2)
 
 /**
@@ -51,7 +52,7 @@
 #ifdef ARDUINO_RUNNING_CORE
 #define LVGL_PORT_TASK_CORE                     (ARDUINO_RUNNING_CORE)  // Valid if using Arduino
 #else
-#define LVGL_PORT_TASK_CORE                     (0)                     // Valid if using ESP-IDF
+#define LVGL_PORT_TASK_CORE                     (1)                     // Valid if using ESP-IDF
 #endif
                                                             // The core of the LVGL timer task, `-1` means the don't specify the core
                                                             // Default is the same as the main core
@@ -74,7 +75,7 @@
 #define LVGL_PORT_AVOID_TEARING_MODE            (CONFIG_LVGL_PORT_AVOID_TEARING_MODE)
                                                         // Valid if using ESP-IDF
 #else
-#define LVGL_PORT_AVOID_TEARING_MODE            (0)     // Valid if using Arduino
+#define LVGL_PORT_AVOID_TEARING_MODE            (3)     // Valid if using Arduino
 #endif
 
 #if LVGL_PORT_AVOID_TEARING_MODE != 0
@@ -102,7 +103,7 @@
  * Users should use `lcd_bus->configRgbFrameBufferNumber(LVGL_PORT_DISP_BUFFER_NUM);` to set the buffer number before. If screen drifting occurs, please refer to the Troubleshooting section in the README.
  * initializing the LCD bus
  */
-#define LVGL_PORT_AVOID_TEAR                    (0)
+#define LVGL_PORT_AVOID_TEAR                    (1)
 // Set the buffer number and refresh mode according to the different modes
 #if LVGL_PORT_AVOID_TEARING_MODE == 1
     #define LVGL_PORT_DISP_BUFFER_NUM           (2)
