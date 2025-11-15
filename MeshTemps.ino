@@ -56,12 +56,14 @@ bool g_debug_enabled = false;
     }                                                                          \
   } while (0)
 
-  // --- Forward decls to satisfy Arduino's auto-prototype pass ---
-struct TileWidgets;  // Incomplete type is enough for function prototypes
+// --- Forward decls to satisfy Arduino's auto-prototype pass ---
+class MeshTile;  // Defined in mesh_tile.h (used on ROOT builds)
 
 // Avoid Arduino auto-prototype depending on lvgl.h types.
-TileWidgets &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
-                             int16_t tile_h);
+MeshTile &GetOrCreateTile(const String &node_id_str,
+                          int16_t tile_w,
+                          int16_t tile_h);
+
 
 // Forward declarations used on ROOT builds from LogConnections().
 #if MESH_IS_ROOT
@@ -106,7 +108,6 @@ static void PrintJsonStats(Print &out, const char *name,
 #endif
 }
 
-
 // -----------------------------------------------------------------------------
 // ROOT BUILD
 // -----------------------------------------------------------------------------
@@ -125,6 +126,9 @@ using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
 using esp_panel::drivers::LCD;
 
+#include "mesh_node.h"
+#include "mesh_tile.h"
+
 constexpr int kStorageVersionCurrent = 7;
 
 bool g_topology_persist_enabled = true;
@@ -141,9 +145,9 @@ uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
 
 // Flashing (root)
 constexpr uint32_t kDefaultFlashIntervalMs =
-    1000; // ms between flash toggles; 0 = off
+    1000;  // ms between flash toggles; 0 = off
 uint32_t g_flash_interval_ms = kDefaultFlashIntervalMs;
-bool g_flash_phase = false; // toggled in DisplayLoop()
+
 
 // Persistent root prefs.
 Preferences g_root_preferences;
@@ -186,41 +190,25 @@ lv_obj_t *g_ui_tile_container = nullptr;
 
 volatile bool g_layout_dirty = false;   // expensive: create/reflow tiles
 volatile bool g_values_dirty = false;   // cheap: rewrite texts/colors only
-volatile bool g_flash_dirty  = false;   // cheap: flash-phase color swap (existing)
 
 volatile size_t g_ui_peers = 0;
 
 Board *g_board = nullptr;
 
-// Per-node persistent tile widgets.
-struct TileWidgets {
-  lv_obj_t *tile = nullptr;
-  lv_obj_t *label_loc = nullptr;
-  lv_obj_t *label_age = nullptr;
-  lv_obj_t *sensor_label[2] = {nullptr, nullptr};
-
-  // Base (non-flash) colors.
-  lv_color_t bg_normal;
-  lv_color_t fg_normal; // header + age
-
-  // Flash-phase colors (for warn/alert tiles).
-  lv_color_t bg_flash;
-  lv_color_t fg_flash;
-
-  lv_color_t sensor_color[2];
-  int sensor_count = 0;
-
-  bool node_has_alert = false;
-  bool node_has_warning = false;
-  bool is_missing = false;
-  bool is_stale = false;
-
-  bool last_flash_active = false;
+// Per-node persistent tile widgets (one MeshTile per node key).
+struct TileEntry {
+  MeshTile *tile = nullptr;
 };
 
-std::map<String, TileWidgets> g_tiles;
+std::map<String, TileEntry> g_tiles;
 
-void GuiRebuildTiles(); // forward
+void GuiRebuildTiles();  // forward
+
+// Build one tile's Content from g_last_seen + g_labels + thresholds.
+static bool BuildTileContentForNode(const String &node_key_hex,
+                                    uint32_t now_ms,
+                                    bool node_connected,
+                                    MeshTile::Content *out);
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -888,6 +876,150 @@ static int GetSensorRankForNode(const String &node_id, const String &addr16) {
   return GetSensorRankGlobal(key);
 }
 
+// Build a MeshTile::Content snapshot for the given node key.
+// Returns false if the node is not present in g_last_seen.
+static bool BuildTileContentForNode(const String &node_key_hex,
+                                    uint32_t now_ms,
+                                    bool node_connected,
+                                    MeshTile::Content *out) {
+  if (out == nullptr) {
+    return false;
+  }
+
+  EnsureDocuments();
+  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
+  JsonObject node_obj = nodes[node_key_hex];
+  if (node_obj.isNull()) {
+    return false;
+  }
+
+  MeshTile::Content c;
+
+  // Title: persisted label if present, otherwise formatted node id.
+  String title = g_labels["nodes"][node_key_hex] | "";
+  if (title.isEmpty()) {
+    uint32_t node_id_u32 = 0;
+    if (ParseNodeIdToU32(node_key_hex, &node_id_u32)) {
+      char hex_id[11];  // "0x" + 8-hex + NUL
+      snprintf(hex_id,
+               sizeof(hex_id),
+               "0x%08lX",
+               static_cast<unsigned long>(node_id_u32));
+      title = hex_id;
+    } else {
+      title = node_key_hex;
+    }
+  }
+  c.title = title;
+  c.display_fahrenheit = g_display_fahrenheit;
+
+  JsonObject sensors = node_obj["sensors"].as<JsonObject>();
+
+  // Collect and sort sensor addresses for this node.
+  uint32_t latest_ms = node_obj["last"] | 0U;
+  std::vector<String> addrs;
+  addrs.reserve(sensors.size());
+  for (JsonPair s_entry : sensors) {
+    addrs.emplace_back(s_entry.key().c_str());
+    const uint32_t s_last = s_entry.value()["last"] | 0U;
+    if (s_last > latest_ms) {
+      latest_ms = s_last;
+    }
+  }
+
+  c.age_minutes =
+      (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
+
+  c.is_missing = g_highlight_missing_nodes && !node_connected &&
+                 (g_stale_minutes_threshold > 0U) &&
+                 (c.age_minutes >= g_stale_minutes_threshold);
+
+  c.is_stale = node_connected &&
+               (g_stale_minutes_threshold > 0U) &&
+               (c.age_minutes >= g_stale_minutes_threshold);
+
+  // Sensor ordering: per-node rank, then address.
+  std::sort(addrs.begin(),
+            addrs.end(),
+            [&](const String &a, const String &b) {
+              const int ra = GetSensorRankForNode(node_key_hex, a);
+              const int rb = GetSensorRankForNode(node_key_hex, b);
+              if (ra != rb) {
+                return ra < rb;
+              }
+              return a < b;
+            });
+
+  const uint8_t node_mute = GetNodeMuteMask(node_key_hex);
+  int sv_count = 0;
+  bool node_has_alert = false;
+  bool node_has_warning = false;
+
+  for (const String &addr : addrs) {
+    if (sv_count >= 2) {
+      break;  // only two sensor rows per tile
+    }
+
+    JsonObject s = sensors[addr].as<JsonObject>();
+
+    MeshTile::SensorView &sv = c.sensors[sv_count++];
+    const char *custom_label = g_labels["sensors"][addr] | "";
+    if (custom_label != nullptr && *custom_label != '\0') {
+      sv.label = String(custom_label);
+    } else {
+      sv.label = CanonAddr16(addr);
+    }
+
+    if (s["tC"].is<float>()) {
+      sv.temp_c = s["tC"].as<float>();
+      sv.has_value = !isnan(sv.temp_c);
+    } else {
+      sv.temp_c = NAN;
+      sv.has_value = false;
+    }
+
+    if (sv.has_value) {
+      const float t = sv.temp_c;
+
+      // Alerts (respect node mute).
+      bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
+      bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
+      if (low_alert && (node_mute & kMuteLow)) {
+        low_alert = false;
+      }
+      if (high_alert && (node_mute & kMuteHigh)) {
+        high_alert = false;
+      }
+      sv.is_alert = (low_alert || high_alert);
+
+      // Warnings only if not already alert (respect mute).
+      if (!sv.is_alert) {
+        bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
+        bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
+        if (low_warn && (node_mute & kMuteLow)) {
+          low_warn = false;
+        }
+        if (high_warn && (node_mute & kMuteHigh)) {
+          high_warn = false;
+        }
+        sv.is_warning = (low_warn || high_warn);
+      }
+    }
+
+    if (sv.is_alert) {
+      node_has_alert = true;
+    } else if (sv.is_warning) {
+      node_has_warning = true;
+    }
+  }
+
+  c.sensor_count = sv_count;
+  c.node_has_alert = node_has_alert;
+  c.node_has_warning = node_has_warning;
+
+  *out = c;
+  return true;
+}
 
 // Find the [start,end) span (0-based token index) of a whitespace-delimited
 // token.
@@ -1170,49 +1302,80 @@ void UpdateUptimeLabel() {
   lv_label_set_text(g_ui_label_uptime, buffer);
 }
 
-// Dummy data injection (non-persistent).
-void BuildDummyData() {
+// Dummy data: 10 nodes, 2 sensors each, with simple ramping temps.
+// This feeds both the legacy g_last_seen/g_labels documents and the
+// MeshNode domain model so that CLI/GUI see the same synthetic topology.
+static void BuildDummyData() {
+  // Reset JSON docs.
   g_last_seen.clear();
+  g_labels.clear();
   EnsureDocuments();
 
+  // Reset node model store as well so dummy data is self-contained.
+  ClearAllMeshNodes();
+
+  const unsigned long now_ms = millis();
+  const float base_c = 21.0f;
+
   JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-  const uint32_t now_ms = millis();
+  JsonObject labels_nodes = g_labels["nodes"].to<JsonObject>();
 
   for (int i = 1; i <= 10; ++i) {
-    const uint32_t nid = 0x10000000u + static_cast<uint32_t>(i);
+    const uint32_t node_id = 0xAA000000u + static_cast<uint32_t>(i);
+
     char node_key[16];
-    FormatNodeKey(nid, node_key, sizeof(node_key));  // hex key
+    FormatNodeKey(node_id, node_key, sizeof(node_key));
 
-    JsonObject node_obj = nodes[node_key].to<JsonObject>();
-    node_obj["busGpio"] = -1;
-    node_obj["last"] = now_ms;
+    // Legacy JSON representation for the GUI.
+    JsonObject node = nodes[node_key].to<JsonObject>();
+    node["id"] = node_id;
+    node["busGpio"] = -1;
+    node["last"] = static_cast<uint32_t>(now_ms);
 
-    const String loc = String("Dummy ") + String(i);
-    g_labels["nodes"][String(node_key)] = loc;
+    JsonObject sensors = node["sensors"].to<JsonObject>();
 
-    JsonObject sensors = node_obj["sensors"].to<JsonObject>();
+    // Domain model node.
+    MeshNode* node_model = GetOrCreateMeshNode(node_id);
+    if (node_model != nullptr) {
+      node_model->SetBusGpioAndLastUpdate(-1,
+                                          static_cast<uint32_t>(now_ms));
+    }
 
-    char addr1[17];
-    char addr2[17];
-    snprintf(addr1, sizeof(addr1), "D%02d000000000001", i);
-    snprintf(addr2, sizeof(addr2), "D%02d000000000002", i);
+    for (int s = 1; s <= 2; ++s) {
+      char addr[17];
+      snprintf(addr, sizeof(addr), "D%02d000000000001", i * 2 + s - 2);
 
-    JsonObject s1 = sensors[addr1].to<JsonObject>();
-    JsonObject s2 = sensors[addr2].to<JsonObject>();
+      JsonObject sensor = sensors[addr].to<JsonObject>();
+      sensor["type"] = "ds18b20";
+      sensor["ageMin"] = 0;
+      sensor["corr"] = false;
 
-    g_labels["sensors"][addr1] = "Sensor 1";
-    g_labels["sensors"][addr2] = "Sensor 2";
+      const float temp_c =
+          base_c + static_cast<float>((i - 1) * 2 + s - 1);
+      sensor["tC"] = temp_c;
+      sensor["last"] = static_cast<uint32_t>(now_ms);
 
-    const float base = 20.0f + static_cast<float>(i);
+      // Mirror into MeshNode.
+      if (node_model != nullptr) {
+        MeshNode::Sensor* sensor_model =
+            node_model->GetOrCreateSensor(String(addr));
+        if (sensor_model != nullptr) {
+          sensor_model->temp_c = temp_c;
+          sensor_model->has_value = true;
+          sensor_model->corrected = false;
+          sensor_model->last_ms = static_cast<uint32_t>(now_ms);
+        }
+      }
+    }
 
-    s1["tC"] = base;
-    s1["corr"] = false;
-    s1["last"] = now_ms;
-
-    s2["tC"] = base + 5.0f;
-    s2["corr"] = false;
-    s2["last"] = now_ms;
+    // Simple node label: "Node 1", "Node 2", ...
+    JsonObject label_node = labels_nodes[node_key].to<JsonObject>();
+    char name_buf[16];
+    snprintf(name_buf, sizeof(name_buf), "Node %d", i);
+    label_node["node"] = name_buf;
   }
+
+  g_layout_dirty = true;
 }
 
 // Placeholder buzzer.
@@ -1221,92 +1384,28 @@ void BuzzerBeepOnce() {
   DLOG("[BUZZER] Beep\n");
 }
 
-TileWidgets &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
-                             int16_t tile_h) {
+MeshTile &GetOrCreateTile(const String &node_id_str,
+                          int16_t tile_w,
+                          int16_t tile_h) {
   auto it = g_tiles.find(node_id_str);
-  if (it != g_tiles.end()) {
-    // Ensure size in case geometry changed (e.g. rotation/res change).
-    lv_obj_set_size(it->second.tile, tile_w, tile_h);
-    return it->second;
+  if (it != g_tiles.end() && it->second.tile != nullptr) {
+    // Ensure size in case geometry changed (e.g., rotation/res change).
+    it->second.tile->SetSize(tile_w, tile_h);
+    return *(it->second.tile);
   }
 
-  TileWidgets tw;
+  // First time for this node: allocate a MeshTile rooted in the container.
+  MeshTile *tile = new MeshTile(g_ui_tile_container, tile_w, tile_h);
 
-  tw.tile = lv_obj_create(g_ui_tile_container);
-  lv_obj_set_size(tw.tile, tile_w, tile_h);
-  lv_obj_set_style_radius(tw.tile, 12, 0);
-  lv_obj_set_style_pad_all(tw.tile, 6, 0);
-  lv_obj_set_style_border_width(tw.tile, 0, 0);
-  lv_obj_clear_flag(tw.tile, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_scrollbar_mode(tw.tile, LV_SCROLLBAR_MODE_OFF);
-
-  // Location label.
-  tw.label_loc = lv_label_create(tw.tile);
-  lv_obj_set_width(tw.label_loc, lv_pct(100));
-  lv_obj_set_style_text_align(tw.label_loc, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_font(tw.label_loc, &lv_font_montserrat_16, 0);
-
-  // Age label.
-  tw.label_age = lv_label_create(tw.tile);
-  lv_obj_set_width(tw.label_age, lv_pct(100));
-  lv_obj_set_style_text_align(tw.label_age, LV_TEXT_ALIGN_CENTER, 0);
-
-  // Sensor labels (up to 2).
-  for (int i = 0; i < 2; ++i) {
-    tw.sensor_label[i] = lv_label_create(tw.tile);
-  }
-
-  auto result = g_tiles.emplace(node_id_str, tw);
-  return result.first->second;
-
+  TileEntry entry;
+  entry.tile = tile;
+  auto result = g_tiles.emplace(node_id_str, entry);
+  return *(result.first->second.tile);
 }
 
 // ---------------------------------------------------------------------------
 // Tile rebuild
 // ---------------------------------------------------------------------------
-void GuiApplyFlashPhase() {
-  for (auto &entry : g_tiles) {
-    TileWidgets &tw = entry.second;
-
-    const bool flashable = (tw.node_has_alert || tw.node_has_warning);
-    const bool flash_active =
-        flashable && (g_flash_interval_ms > 0) && g_flash_phase;
-
-    // If nothing changed for this tile, do nothing.
-    if (flash_active == tw.last_flash_active) {
-      continue;
-    }
-    tw.last_flash_active = flash_active;
-
-    if (flash_active) {
-      // FLASH: light gray bg, black text for entire tile.
-      lv_obj_set_style_bg_color(tw.tile, tw.bg_flash, 0);
-      lv_obj_set_style_bg_opa(tw.tile, LV_OPA_COVER, 0);
-
-      lv_obj_set_style_text_color(tw.label_loc, tw.fg_flash, 0);
-      lv_obj_set_style_text_color(tw.label_age, tw.fg_flash, 0);
-      for (int i = 0; i < tw.sensor_count; ++i) {
-        if (tw.sensor_label[i]) {
-          lv_obj_set_style_text_color(tw.sensor_label[i], tw.fg_flash, 0);
-        }
-      }
-    } else {
-      // NORMAL: restore per-tile and per-sensor colors.
-      lv_obj_set_style_bg_color(tw.tile, tw.bg_normal, 0);
-      lv_obj_set_style_bg_opa(tw.tile, LV_OPA_COVER, 0);
-
-      lv_obj_set_style_text_color(tw.label_loc, tw.fg_normal, 0);
-      lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
-      for (int i = 0; i < tw.sensor_count; ++i) {
-        if (tw.sensor_label[i]) {
-          lv_obj_set_style_text_color(tw.sensor_label[i], tw.sensor_color[i],
-                                      0);
-        }
-      }
-    }
-  }
-}
-
 // Update just the "Age: N min" labels and stale/missing state.
 // No layout work, no object (re)creation.
 static void GuiAgeTick(uint32_t now_ms) {
@@ -1314,149 +1413,112 @@ static void GuiAgeTick(uint32_t now_ms) {
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
 
   for (auto &kv : g_tiles) {
-    const String &node_id = kv.first;
-    TileWidgets &tw = kv.second;
-
-    JsonObject node_obj = nodes[node_id];
-    if (node_obj.isNull())
+    const String &node_key_hex = kv.first;
+    MeshTile *tile = kv.second.tile;
+    if (tile == nullptr) {
       continue;
+    }
+
+    JsonObject node_obj = nodes[node_key_hex];
+    if (node_obj.isNull()) {
+      continue;
+    }
 
     uint32_t latest_ms = node_obj["last"] | 0U;
     JsonObject sensors = node_obj["sensors"].as<JsonObject>();
     for (JsonPair s_entry : sensors) {
       const uint32_t s_last = s_entry.value()["last"] | 0U;
-      if (s_last > latest_ms)
+      if (s_last > latest_ms) {
         latest_ms = s_last;
+      }
     }
 
     const uint32_t age_min =
         (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
 
-    // Update Age label text only (no relayout).
-    if (tw.label_age) {
-      char age_buf[24];
-      snprintf(age_buf, sizeof(age_buf), "Age: %lu min",
-               (unsigned long)age_min);
-      lv_label_set_text(tw.label_age, age_buf);
-    }
-
-    // Re-evaluate stale/missing and only flip colors if state changed.
-    const bool was_missing = tw.is_missing;
-    const bool was_stale = tw.is_stale;
-
-    const bool node_connected =
-        false; // tiles here are "known topology", connectivity is handled in
-               // full rebuilds
+    // As before: treat tiles here as "known topology" and only mark missing.
+    const bool node_connected = false;
     const bool is_missing = g_highlight_missing_nodes && !node_connected &&
-                            (g_stale_minutes_threshold > 0) &&
+                            (g_stale_minutes_threshold > 0U) &&
                             (age_min >= g_stale_minutes_threshold);
-    const bool is_stale = node_connected && (g_stale_minutes_threshold > 0) &&
+    const bool is_stale = node_connected &&
+                          (g_stale_minutes_threshold > 0U) &&
                           (age_min >= g_stale_minutes_threshold);
 
-    if (is_missing != was_missing || is_stale != was_stale) {
-      tw.is_missing = is_missing;
-      tw.is_stale = is_stale;
-
-      // Minimal recolor only; do not touch layout.
-      lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24);
-      lv_color_t fg = lv_color_white();
-
-      if (tw.node_has_alert) {
-        bg = lv_color_make(0xB7, 0x1C, 0x1C);
-      } else if (is_stale || tw.node_has_warning) {
-        bg = lv_color_make(0x8A, 0x5A, 0x00);
-      } else if (is_missing) {
-        bg = lv_color_make(0x20, 0x40, 0x60);
-      }
-
-      tw.bg_normal = bg;
-      tw.fg_normal = fg;
-
-      // Apply new base colors immediately (non-flash phase).
-      lv_obj_set_style_bg_color(tw.tile, tw.bg_normal, 0);
-      lv_obj_set_style_text_color(tw.label_loc, tw.fg_normal, 0);
-      lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
-      for (int i = 0; i < tw.sensor_count && tw.sensor_label[i]; ++i) {
-        lv_obj_set_style_text_color(tw.sensor_label[i], tw.sensor_color[i], 0);
-      }
-    }
+    tile->SetAgeOnly(age_min, is_missing, is_stale);
   }
 }
 
-// NEW: cheap refresh used on most updates
+// NEW: cheap refresh used on most updates (no object creation)
 static void GuiRefreshValues(uint32_t now_ms) {
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
 
-  // Peers label
+  // Snapshot current connections.
+  auto node_list = mesh.getNodeList();
+  std::vector<uint32_t> connected_ids(node_list.begin(), node_list.end());
+  auto is_connected = [&](uint32_t node_id) -> bool {
+    for (uint32_t id : connected_ids) {
+      if (id == node_id) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Peers label.
   if (g_ui_label_peers != nullptr) {
     char buffer[32];
-    snprintf(buffer, sizeof(buffer), "Peers: %u",
+    snprintf(buffer,
+             sizeof(buffer),
+             "Peers: %u",
              static_cast<unsigned>(g_ui_peers));
     lv_label_set_text(g_ui_label_peers, buffer);
   }
 
+  g_any_warning = false;
+  g_any_alert = false;
+
   for (auto &kv : g_tiles) {
-    const String& node_id = kv.first;
-    TileWidgets&  tw      = kv.second;
-
-    JsonObject node_obj = nodes[node_id];
-    if (node_obj.isNull()) continue;
-
-    // Header label (location)
-    String loc = g_labels["nodes"][node_id] | "";
-    if (loc.isEmpty()) loc = node_id;
-    lv_label_set_text(tw.label_loc, loc.c_str());
-
-    // Latest age
-    uint32_t latest_ms = node_obj["last"] | 0U;
-    JsonObject sensors = node_obj["sensors"].as<JsonObject>();
-    for (JsonPair s_entry : sensors) {
-      const uint32_t s_last = s_entry.value()["last"] | 0U;
-      if (s_last > latest_ms) latest_ms = s_last;
-    }
-    const uint32_t age_min = (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
-    if (tw.label_age) {
-      char age_buf[24];
-      snprintf(age_buf, sizeof(age_buf), "Age: %lu min",
-               static_cast<unsigned long>(age_min));
-      lv_label_set_text(tw.label_age, age_buf);
+    const String &node_key_hex = kv.first;
+    MeshTile *tile = kv.second.tile;
+    if (tile == nullptr) {
+      continue;
     }
 
-    // Update up to two sensor text/colors (do not change count/positions)
-    int wrote = 0;
-    for (JsonPair s_entry : sensors) {
-      if (wrote >= tw.sensor_count || wrote >= 2) break;
-      const String addr = s_entry.key().c_str();
-      JsonObject s = s_entry.value().as<JsonObject>();
-
-      const char* custom = g_labels["sensors"][addr] | "";
-      String label = *custom ? String(custom) : CanonAddr16(addr);
-      float tC = s["tC"] | NAN;
-
-      char buf[64];
-      if (isnan(tC)) {
-        snprintf(buf, sizeof(buf), "%s: --", label.c_str());
-      } else {
-        float disp = g_display_fahrenheit ? (tC * 1.8f + 32.0f) : tC;
-        char unit = g_display_fahrenheit ? 'F' : 'C';
-        snprintf(buf, sizeof(buf), "%s: %.1f%c", label.c_str(),
-                 static_cast<double>(disp), unit);
-      }
-      lv_label_set_text(tw.sensor_label[wrote], buf);
-      // keep prior color decisions; tile-level color changes happen in GuiAgeTick/GuiApplyFlashPhase
-      ++wrote;
+    if (!nodes[node_key_hex].is<JsonObject>()) {
+      continue;
     }
-    // hide any remaining label slots if fewer values now (no layout)
-    for (int i = wrote; i < 2; ++i) {
-      if (tw.sensor_label[i]) lv_obj_add_flag(tw.sensor_label[i], LV_OBJ_FLAG_HIDDEN);
+
+    uint32_t node_id_u32 = 0;
+    bool node_connected = false;
+    if (ParseNodeIdToU32(node_key_hex, &node_id_u32)) {
+      node_connected = is_connected(node_id_u32);
+    }
+
+    MeshTile::Content content;
+    if (!BuildTileContentForNode(node_key_hex,
+                                 now_ms,
+                                 node_connected,
+                                 &content)) {
+      continue;
+    }
+
+    tile->SetContent(content);
+    tile->SetFlashIntervalMs(g_flash_interval_ms);
+
+    if (content.node_has_alert) {
+      g_any_alert = true;
+    } else if (content.is_stale || content.node_has_warning) {
+      g_any_warning = true;
     }
   }
 }
 
 void GuiRebuildTiles() {
-  if (g_ui_tile_container == nullptr)
+  if (g_ui_tile_container == nullptr) {
     return;
+  }
 
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
@@ -1465,9 +1527,11 @@ void GuiRebuildTiles() {
   auto node_list = mesh.getNodeList();
   std::vector<uint32_t> connected_ids(node_list.begin(), node_list.end());
   auto is_connected = [&](uint32_t node_id) -> bool {
-    for (uint32_t id : connected_ids)
-      if (id == node_id)
+    for (uint32_t id : connected_ids) {
+      if (id == node_id) {
         return true;
+      }
+    }
     return false;
   };
 
@@ -1477,265 +1541,79 @@ void GuiRebuildTiles() {
   const lv_coord_t screen_w = lv_obj_get_width(lv_scr_act());
   const int columns = (screen_w >= 640) ? 3 : 2;
   const lv_coord_t gap = 6;
-  const lv_coord_t tile_w = (screen_w - (columns + 1) * gap) / columns;
+  const lv_coord_t tile_w =
+      (screen_w - (columns + 1) * gap) / columns;
   const lv_coord_t tile_h = 100;
 
   g_any_warning = false;
   g_any_alert = false;
 
+  // Update peers label while we're here.
+  if (g_ui_label_peers != nullptr) {
+    char buffer[32];
+    snprintf(buffer,
+             sizeof(buffer),
+             "Peers: %u",
+             static_cast<unsigned>(g_ui_peers));
+    lv_label_set_text(g_ui_label_peers, buffer);
+  }
+
   // Sort nodes by explicit tile_order, then label, then id.
   std::vector<String> node_ids;
   node_ids.reserve(nodes.size());
-  for (JsonPair e : nodes)
+  for (JsonPair e : nodes) {
     node_ids.emplace_back(e.key().c_str());
+  }
 
-  std::sort(node_ids.begin(), node_ids.end(),
+  std::sort(node_ids.begin(),
+            node_ids.end(),
             [&](const String &a, const String &b) {
               const int ra = GetNodeRank(a);
               const int rb = GetNodeRank(b);
-              if (ra != rb)
+              if (ra != rb) {
                 return ra < rb;
+              }
 
               const String la = (g_labels["nodes"][a] | "");
               const String lb = (g_labels["nodes"][b] | "");
               if (la.length() && lb.length()) {
-                if (la != lb)
+                if (la != lb) {
                   return la < lb;
+                }
               } else if (la.length() || lb.length()) {
-                return la.length() > lb.length(); // labeled first
+                // Labeled nodes first.
+                return la.length() > lb.length();
               }
               return a < b;
             });
 
-  for (const String &node_id_str : node_ids) {
-    JsonObject node_obj = nodes[node_id_str];
-
+  for (const String &node_key_hex : node_ids) {
     uint32_t node_id_u32 = 0;
-    (void)ParseNodeIdToU32(node_id_str, &node_id_u32);  
-
-    TileWidgets &tw = GetOrCreateTile(node_id_str, tile_w, tile_h);
-
-    // Location (label or node id).
-    String loc = g_labels["nodes"][node_id_str] | "";
-    if (loc.isEmpty()) {
-      char hex_id[11];  // "0x" + 8 hex + NUL
-      snprintf(hex_id, sizeof(hex_id), "0x%08lX", static_cast<unsigned long>(node_id_u32));
-      loc = hex_id;
+    bool node_connected = false;
+    if (ParseNodeIdToU32(node_key_hex, &node_id_u32)) {
+      node_connected = is_connected(node_id_u32);
     }
 
-    // Connection + age.
-    JsonObject sensors = node_obj["sensors"].as<JsonObject>();
-
-    char *endptr = nullptr;
-    node_id_u32 = static_cast<uint32_t>(strtoul(node_id_str.c_str(), &endptr, 10));
-    const bool node_connected = (node_id_u32 != 0U) && is_connected(node_id_u32);
-
-    uint32_t latest_ms = node_obj["last"] | 0U;
-
-    // Collect and sort sensor addresses for THIS node only.
-    std::vector<String> addrs;
-    addrs.reserve(8);
-    for (JsonPair s_entry : sensors) {
-      addrs.emplace_back(s_entry.key().c_str());
-      const uint32_t s_last = s_entry.value()["last"] | 0U;
-      if (s_last > latest_ms)
-        latest_ms = s_last;
+    MeshTile::Content content;
+    if (!BuildTileContentForNode(node_key_hex,
+                                 now_ms,
+                                 node_connected,
+                                 &content)) {
+      continue;
     }
 
-    std::sort(addrs.begin(), addrs.end(),
-              [&](const String &a, const String &b) {
-                const int ra = GetSensorRankForNode(node_id_str, a);
-                const int rb = GetSensorRankForNode(node_id_str, b);
-                if (ra != rb)
-                  return ra < rb;
-                return a < b; // stable, readable fallback
-              });
+    MeshTile &tile = GetOrCreateTile(node_key_hex, tile_w, tile_h);
+    tile.SetContent(content);
+    tile.SetFlashIntervalMs(g_flash_interval_ms);
 
-    const uint32_t age_min =
-        (latest_ms <= now_ms) ? (now_ms - latest_ms) / 60000U : 0U;
-
-    const bool is_missing = g_highlight_missing_nodes && !node_connected &&
-                            (g_stale_minutes_threshold > 0) &&
-                            (age_min >= g_stale_minutes_threshold);
-
-    const bool is_stale = node_connected && (g_stale_minutes_threshold > 0) &&
-                          (age_min >= g_stale_minutes_threshold);
-
-    // Up to 2 sensor rows.
-    struct SensorView {
-      String label;
-      float temp_c = NAN;
-      bool has_value = false;
-      bool is_alert = false;
-      bool is_warning = false;
-    } sv[2];
-
-    int sv_count = 0;
-    bool node_has_alert = false;
-    bool node_has_warning = false;
-
-    for (const String &addr : addrs) {
-      if (sv_count >= 2)
-        break;
-
-      JsonObject s = sensors[addr].as<JsonObject>();
-
-      SensorView &v = sv[sv_count++];
-      v.label = (g_labels["sensors"][addr] | "");
-      if (v.label.isEmpty())
-        v.label = CanonAddr16(addr);
-
-      if (s["tC"].is<float>()) {
-        v.temp_c = s["tC"].as<float>();
-        v.has_value = !isnan(v.temp_c);
-      }
-
-      const uint8_t node_mute = GetNodeMuteMask(node_id_str);
-
-      if (v.has_value) {
-        const float t = v.temp_c;
-
-        // --- ALERTS (apply mute) ---
-        bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
-        bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
-        if (low_alert && (node_mute & kMuteLow))
-          low_alert = false;
-        if (high_alert && (node_mute & kMuteHigh))
-          high_alert = false;
-        v.is_alert = (low_alert || high_alert);
-
-        // --- WARNINGS (only if not already alert; apply mute) ---
-        if (!v.is_alert) {
-          bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
-          bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
-          if (low_warn && (node_mute & kMuteLow))
-            low_warn = false;
-          if (high_warn && (node_mute & kMuteHigh))
-            high_warn = false;
-          v.is_warning = (low_warn || high_warn);
-        }
-      }
-
-      if (v.is_alert)
-        node_has_alert = true;
-      else if (v.is_warning)
-        node_has_warning = true;
-    }
-
-    // Colors.
-    lv_color_t bg = lv_color_make(0x16, 0x3A, 0x24); // dark green
-    lv_color_t fg = lv_color_white();                // header/age
-    if (node_has_alert) {
-      bg = lv_color_make(0xB7, 0x1C, 0x1C);
-      fg = lv_color_white();
+    if (content.node_has_alert) {
       g_any_alert = true;
-    } else if (is_stale || node_has_warning) {
-      bg = lv_color_make(0x8A, 0x5A, 0x00);
-      fg = lv_color_white();
+    } else if (content.is_stale || content.node_has_warning) {
       g_any_warning = true;
-    } else if (is_missing) {
-      bg = lv_color_make(0x20, 0x40, 0x60);
-      fg = lv_color_white();
     }
-
-    tw.node_has_alert = node_has_alert;
-    tw.node_has_warning = node_has_warning;
-    tw.is_missing = is_missing;
-    tw.is_stale = is_stale;
-
-    tw.bg_normal = bg;
-    tw.fg_normal = fg;
-
-    if (node_has_alert || node_has_warning) {
-      tw.bg_flash = lv_color_make(0xCC, 0xCC, 0xCC);
-      tw.fg_flash = lv_color_black();
-    } else {
-      tw.bg_flash = bg;
-      tw.fg_flash = fg;
-    }
-
-    // Header + age.
-    lv_label_set_text(tw.label_loc, loc.c_str());
-    lv_obj_align(tw.label_loc, LV_ALIGN_TOP_MID, 0, 0);
-
-    char age_buf[24];
-    snprintf(age_buf, sizeof(age_buf), "Age: %lu min",
-             static_cast<unsigned long>(age_min));
-    lv_label_set_text(tw.label_age, age_buf);
-    lv_obj_align(tw.label_age, LV_ALIGN_TOP_MID, 0, 20);
-
-    // Sensor rows.
-    tw.sensor_count = sv_count;
-    for (int i = 0; i < 2; ++i) {
-      lv_obj_t *lbl = tw.sensor_label[i];
-      if (!lbl)
-        continue;
-
-      if (i >= sv_count) {
-        // If the tile truly has no sensors, show a faint placeholder.
-        if (sv_count == 0) {
-          lv_label_set_text(lbl, "(no sensors)");
-          lv_obj_clear_flag(lbl, LV_OBJ_FLAG_HIDDEN);
-          tw.sensor_color[i] = lv_color_make(0xAA, 0xAA, 0xAA);
-          lv_obj_align(lbl, LV_ALIGN_BOTTOM_LEFT, 0, -8);
-        } else {
-          lv_label_set_text(lbl, "");
-          lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
-        }
-        continue;
-      }
-
-      lv_obj_clear_flag(lbl, LV_OBJ_FLAG_HIDDEN);
-
-      const SensorView &v = sv[i];
-      char buf[64];
-      if (!v.has_value) {
-        snprintf(buf, sizeof(buf), "%s: --", v.label.c_str());
-      } else {
-        float temp_disp = v.temp_c;
-        if (g_display_fahrenheit)
-          temp_disp = temp_disp * 1.8f + 32.0f;
-        const char unit_ch = g_display_fahrenheit ? 'F' : 'C';
-        snprintf(buf, sizeof(buf), "%s: %.1f%c", v.label.c_str(),
-                 static_cast<double>(temp_disp), unit_ch);
-      }
-      lv_label_set_text(lbl, buf);
-
-      lv_color_t sensor_color;
-      if (!v.has_value)
-        sensor_color = lv_color_make(0xCC, 0xCC, 0xCC);
-      else if (v.is_alert)
-        sensor_color = lv_color_make(0xFF, 0xFF, 0x80);
-      else if (v.is_warning)
-        sensor_color = lv_color_make(0xFF, 0xD7, 0x00);
-      else if (node_has_alert)
-        sensor_color = lv_color_make(0xFF, 0xE0, 0xE0);
-      else if (is_stale || node_has_warning)
-        sensor_color = lv_color_make(0xFF, 0xF7, 0xE0);
-      else if (is_missing)
-        sensor_color = lv_color_make(0xB0, 0xBE, 0xC5);
-      else
-        sensor_color = lv_color_make(0xE0, 0xFF, 0xE0);
-
-      tw.sensor_color[i] = sensor_color;
-
-      const int y_offset = (sv_count == 1) ? -8 : (i == 0 ? -26 : -8);
-      lv_obj_align(lbl, LV_ALIGN_BOTTOM_LEFT, 0, y_offset);
-    }
-
-    // Apply NORMAL (non-flash).
-    lv_obj_set_style_bg_color(tw.tile, tw.bg_normal, 0);
-    lv_obj_set_style_bg_opa(tw.tile, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(tw.label_loc, tw.fg_normal, 0);
-    lv_obj_set_style_text_color(tw.label_age, tw.fg_normal, 0);
-    for (int i = 0; i < tw.sensor_count && i < 2; ++i) {
-      if (tw.sensor_label[i]) {
-        lv_obj_set_style_text_color(tw.sensor_label[i], tw.sensor_color[i], 0);
-      }
-    }
-    tw.last_flash_active = false;
   }
 }
+
 
 // -----------------------------------------------------------------------------
 // GUI helpers callable from elsewhere
@@ -1753,61 +1631,53 @@ void GuiRequestRender() { g_layout_dirty = true; }
 // Display loop: rebuild tiles + buzzer + periodic refresh
 // -----------------------------------------------------------------------------
 
-// CHANGED: DisplayLoop()
+// Display loop: rebuild tiles + buzzer + periodic refresh
+//
+// Tiles are now self-contained: each tile tracks its own flash timer and
+// decides when to repaint itself based on its Content and per-tile
+// flash interval.
 void DisplayLoop() {
   static uint32_t last_build_ms = 0;
-  static uint32_t last_force_ms = 0;
-  static uint32_t last_flash_ms = 0;
+  static uint32_t last_minute_ms = 0;
   const uint32_t now_ms = millis();
 
-  // flash phase driving (unchanged logic)
-  if (g_flash_interval_ms > 0) {
-    if (now_ms - last_flash_ms >= g_flash_interval_ms) {
-      g_flash_phase = !g_flash_phase;
-      g_flash_dirty = true;
-      last_flash_ms = now_ms;
-    }
-  } else if (g_flash_phase) {
-    g_flash_phase = false;
-    g_flash_dirty = true;
+  if (!lvgl_port_lock(-1)) {
+    return;
   }
 
-  // minute tick: only age text + uptime (no rebuild)
-  if (now_ms - last_force_ms >= 60000U) {
-    if (lvgl_port_lock(-1)) {
-      GuiAgeTick(now_ms);
-      UpdateUptimeLabel();
-      lvgl_port_unlock();
-    }
-    last_force_ms = now_ms;
+  // Minute tick: age text + uptime (no layout work).
+  if (now_ms - last_minute_ms >= 60000U) {
+    GuiAgeTick(now_ms);
+    last_minute_ms = now_ms;
   }
 
-  if ((g_layout_dirty || g_values_dirty || g_flash_dirty) &&
+  // Layout / content refresh throttled to avoid hammering LVGL.
+  if ((g_layout_dirty || g_values_dirty) &&
       (now_ms - last_build_ms >= 50U)) {
-    if (lvgl_port_lock(-1)) {
+    if (g_layout_dirty) {
+      g_layout_dirty = false;
+      GuiRebuildTiles();         // heavy path, rare
+      g_values_dirty = false;    // rebuilding already refreshed content
+    } else if (g_values_dirty) {
+      g_values_dirty = false;
+      GuiRefreshValues(now_ms);  // cheap path, frequent
+    }
+    last_build_ms = now_ms;
+  }
 
-      if (g_layout_dirty) {
-        g_layout_dirty = false;
-        // Peers label will be set inside values path too; that’s okay
-        GuiRebuildTiles();         // heavy path, rare
-        g_values_dirty = false;    // rebuilding already refreshed content
-      } else if (g_values_dirty) {
-        g_values_dirty = false;
-        GuiRefreshValues(now_ms);  // cheap path, frequent
-      }
-
-      if (g_flash_dirty) {
-        g_flash_dirty = false;
-        GuiApplyFlashPhase();      // color swap only
-      }
-
-      UpdateUptimeLabel();
-      lvgl_port_unlock();
-      last_build_ms = now_ms;
+  // Drive per-tile time-based behaviour (flashing) using the tile's own
+  // timers and internal state.
+  for (auto &kv : g_tiles) {
+    MeshTile *tile = kv.second.tile;
+    if (tile != nullptr) {
+      tile->Loop(now_ms);
     }
   }
-}
 
+  // Uptime label updated at least once per minute; harmless to refresh here.
+  UpdateUptimeLabel();
+  lvgl_port_unlock();
+}
 
 void BuzzerLoop() {
   // Static state so we can be called every loop() tick.
@@ -2197,11 +2067,14 @@ static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
     g_use_dummy_data = false;
     g_last_seen.clear();
     EnsureDocuments();
+    ClearAllMeshNodes();
     out.println(F("dummy=off"));
     GuiRequestRender();
-  } else
+  } else {
     out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
+  }
 }
+
 
 static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2338,9 +2211,7 @@ static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
   if (argv[1].equalsIgnoreCase("off")) {
     g_flash_interval_ms = 0;        // turn off
     SaveFlashSettings();
-    g_flash_phase = false;          // known phase
-    g_flash_dirty = true;           // apply colors immediately
-    g_values_dirty = true;          // cheap relabel
+    g_values_dirty = true;          // propagate to tiles
     out.println(F("flash off"));
     return;
   }
@@ -2351,17 +2222,14 @@ static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  g_flash_interval_ms = (uint32_t)interval_ms;  // enable with interval
+  g_flash_interval_ms = static_cast<uint32_t>(interval_ms);  // enable with interval
   SaveFlashSettings();
-  // force an immediate phase/color apply (keeps UI responsive)
-  g_flash_dirty = true;
-  g_values_dirty = true;
+  g_values_dirty = true;  // next refresh will update all tiles' per-tile interval
 
   out.printf("flash interval=%lu ms (%s)\n",
-             (unsigned long)g_flash_interval_ms,
+             static_cast<unsigned long>(g_flash_interval_ms),
              g_flash_interval_ms ? "enabled" : "off");
 }
-
 
 static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2566,6 +2434,14 @@ void OnReceiveRoot(uint32_t from, String &msg) {
 
   DLOG("  nodeId=%u bus_gpio=%d sensors=%d\n", node_id, bus_gpio,
        sensor_array.size());
+
+  // Update strongly-typed node model (stage 1: runtime view of this node).
+  MeshNode* node_model = GetOrCreateMeshNode(node_id);
+  if (node_model != nullptr) {
+    node_model->UpdateFromTemps(bus_gpio, sensor_array,
+                                static_cast<uint32_t>(millis()));
+  }
+
 
   for (JsonObject sensor_in : sensor_array) {
     const char* addr = sensor_in["addr"] | "";
