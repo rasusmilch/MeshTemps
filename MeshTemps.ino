@@ -2511,7 +2511,7 @@ void setup() {
   g_console.RegisterCommand("save", &CmdSave, "save labels");
   g_console.RegisterCommand("load", &CmdLoad, "load labels");
   g_console.RegisterCommand("erase", &CmdErase, "erase labels");
-  g_console.RegisterCommand("debug", &CmdDebug, "debug on|off");
+  g_console.RegisterCommand("debug", &CmdDebug, "debug on|off|nodes");
   g_console.RegisterCommand("units", &CmdUnits, "units c|f");
   g_console.RegisterCommand("highlight", &CmdHighlight,
                             "highlight missing on|off | highlight stale <min>");
@@ -3121,6 +3121,77 @@ static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+
+  // Extended debug: "debug nodes" prints per-node age and sequence health.
+  if (argc >= 2 && argv[1] == "nodes") {
+    const uint32_t now_ms = millis();
+
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    if (ids.empty()) {
+      out.println(F("(no nodes)"));
+      return;
+    }
+
+    out.printf("nodes=%u\n",
+               static_cast<unsigned>(ids.size()));
+
+    for (uint32_t id : ids) {
+      MeshNode *node = FindMeshNode(id);
+      if (node == nullptr) {
+        continue;
+      }
+
+      const uint32_t last_update_ms = node->last_update_ms();
+      uint32_t since_update_ms = 0U;
+      if (last_update_ms != 0U && now_ms >= last_update_ms) {
+        since_update_ms = now_ms - last_update_ms;
+      }
+
+      const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
+
+      out.printf("node 0x%08lX : age=%lu min (~%lu s since update) "
+                 "gpio=%d sensors=%u\n",
+                 static_cast<unsigned long>(id),
+                 static_cast<unsigned long>(age_min),
+                 static_cast<unsigned long>(since_update_ms / 1000U),
+                 node->bus_gpio(),
+                 static_cast<unsigned>(node->sensors().size()));
+
+      // Sequence diagnostics.
+      if (!node->has_sequence()) {
+        out.println(F("  seq=(none)"));
+        continue;
+      }
+
+      const uint32_t seq = node->last_sequence();
+      const uint32_t last_adv_ms = node->last_sequence_advance_ms();
+      const uint32_t last_rx_ms = node->last_sequence_rx_ms();
+
+      uint32_t since_adv_ms = 0U;
+      uint32_t since_rx_ms = 0U;
+
+      if (last_adv_ms != 0U && now_ms >= last_adv_ms) {
+        since_adv_ms = now_ms - last_adv_ms;
+      }
+      if (last_rx_ms != 0U && now_ms >= last_rx_ms) {
+        since_rx_ms = now_ms - last_rx_ms;
+      }
+
+      const uint32_t dup_count = node->duplicate_sequence_rx_count();
+      const bool stuck = node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
+
+      out.printf("  seq=%lu last_adv=%lus ago last_rx=%lus ago "
+                 "dup_rx=%lu stuck=%s\n",
+                 static_cast<unsigned long>(seq),
+                 static_cast<unsigned long>(since_adv_ms / 1000U),
+                 static_cast<unsigned long>(since_rx_ms / 1000U),
+                 static_cast<unsigned long>(dup_count),
+                 stuck ? "YES" : "no");
+    }
+    return;
+  }
+
+  // Original behavior: show or toggle global debug flag.
   if (argc < 2) {
     out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
     return;
@@ -3128,6 +3199,7 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
   g_debug_enabled = (argv[1] == "on");
   out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
 }
+
 
 static void CmdScan(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;

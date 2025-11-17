@@ -202,6 +202,15 @@ std::map<uint32_t, MeshNode> g_mesh_nodes;
 
 }  // namespace
 
+std::vector<uint32_t> GetAllMeshNodeIds() {
+  std::vector<uint32_t> ids;
+  ids.reserve(g_mesh_nodes.size());
+  for (const auto& kv : g_mesh_nodes) {
+    ids.push_back(kv.first);
+  }
+  return ids;
+}
+
 MeshNode* GetOrCreateMeshNode(uint32_t node_id) {
   auto it = g_mesh_nodes.find(node_id);
   if (it != g_mesh_nodes.end()) {

@@ -126,6 +126,9 @@ MeshNode* UpdateMeshNodeFromTempsJson(const JsonDocument& doc,
                                       uint32_t default_node_id,
                                       uint32_t now_ms);
 
+// Get a snapshot of all known node IDs in the global store.
+std::vector<uint32_t> GetAllMeshNodeIds();
+
 // Clear all known nodes from the global store (used by dummy mode).
 void ClearAllMeshNodes();
 
