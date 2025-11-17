@@ -30,6 +30,10 @@ class MeshTile {
     bool is_missing = false;
     bool is_stale = false;
 
+    // True if the node's sequence number has not advanced for an
+    // extended period while messages are still being received.
+    bool seq_stuck = false;
+
     bool display_fahrenheit = true;  // true = °F, false = °C
 
     SensorView sensors[2];

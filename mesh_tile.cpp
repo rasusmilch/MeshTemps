@@ -121,8 +121,9 @@ void MeshTile::UpdateBaseColors() {
     // Red for active alerts.
     bg_normal_ = lv_color_make(0xB7, 0x1C, 0x1C);
     fg_normal_ = lv_color_white();
-  } else if (content_.is_stale || content_.node_has_warning) {
-    // Amber/brown for stale or warning.
+  } else if (content_.is_stale || content_.node_has_warning ||
+             content_.seq_stuck) {
+    // Amber/brown for stale, warning, or sequence-stuck.
     bg_normal_ = lv_color_make(0x8A, 0x5A, 0x00);
     fg_normal_ = lv_color_white();
   } else if (content_.is_missing) {
@@ -133,7 +134,8 @@ void MeshTile::UpdateBaseColors() {
 
   // Flash palette: tiles with any warning/alert flash between bg_normal_/fg
   // and a light gray/black.
-  if (content_.node_has_alert || content_.node_has_warning) {
+  if (content_.node_has_alert || content_.node_has_warning ||
+      content_.seq_stuck) {
     bg_flash_ = lv_color_make(0xCC, 0xCC, 0xCC);
     fg_flash_ = lv_color_black();
   } else {
@@ -141,6 +143,7 @@ void MeshTile::UpdateBaseColors() {
     fg_flash_ = fg_normal_;
   }
 }
+
 
 void MeshTile::UpdateTextsAndLayout() {
   if (root_ == nullptr) {
@@ -232,7 +235,8 @@ void MeshTile::UpdateTextsAndLayout() {
       sensor_color = lv_color_make(0xFF, 0xD7, 0x00);
     } else if (content_.node_has_alert) {
       sensor_color = lv_color_make(0xFF, 0xE0, 0xE0);
-    } else if (content_.is_stale || content_.node_has_warning) {
+    } else if (content_.is_stale || content_.node_has_warning ||
+               content_.seq_stuck) {
       sensor_color = lv_color_make(0xFF, 0xF7, 0xE0);
     } else if (content_.is_missing) {
       sensor_color = lv_color_make(0xB0, 0xBE, 0xC5);

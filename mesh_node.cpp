@@ -5,7 +5,7 @@
 
 MeshNode::MeshNode(uint32_t node_id)
     : node_id_(node_id),
-      node_id_str_(String(node_id)),
+      node_id_str_(FormatNodeKeyHex(node_id)),   // hex for any user-facing use
       node_key_hex_(FormatNodeKeyHex(node_id)) {}
 
 String MeshNode::FormatNodeKeyHex(uint32_t node_id) {
@@ -50,12 +50,12 @@ MeshNode::Sensor* MeshNode::GetOrCreateSensor(const String& address) {
 }
 
 void MeshNode::UpdateFromTemps(int bus_gpio,
-                               const JsonArray& sensor_array,
+                               const JsonArrayConst& sensor_array,
                                uint32_t now_ms) {
   SetBusGpioAndLastUpdate(bus_gpio, now_ms);
 
   // Update / insert each sensor reported in this payload.
-  for (JsonObject sensor_in : sensor_array) {
+  for (JsonObjectConst sensor_in : sensor_array) {
     const char* addr = sensor_in["addr"] | "";
     if (!addr || strlen(addr) != 16) {
       // Ignore malformed addresses (must be 16 hex chars).
@@ -82,6 +82,7 @@ void MeshNode::UpdateFromTemps(int bus_gpio,
   }
 }
 
+
 uint32_t MeshNode::ComputeAgeMinutes(uint32_t now_ms) const {
   uint32_t latest_ms = last_update_ms_;
 
@@ -98,6 +99,98 @@ uint32_t MeshNode::ComputeAgeMinutes(uint32_t now_ms) const {
   const uint32_t delta_ms = now_ms - latest_ms;
   return delta_ms / 60000U;
 }
+
+void MeshNode::UpdateSequence(uint32_t seq, uint32_t now_ms) {
+  // Backwards compatibility: if the payload has no seq field,
+  // callers pass seq==0 and we ignore it.
+  if (seq == 0U) {
+    return;
+  }
+
+  if (!has_sequence_) {
+    has_sequence_ = true;
+    last_seq_ = seq;
+    last_seq_advance_ms_ = now_ms;
+    last_seq_rx_ms_ = now_ms;
+    duplicate_sequence_rx_count_ = 0;
+    return;
+  }
+
+  // We have seen a sequence before; record this receive time.
+  last_seq_rx_ms_ = now_ms;
+
+  if (seq > last_seq_) {
+    // Normal forward progress (we do not require +1, only monotonic).
+    last_seq_ = seq;
+    last_seq_advance_ms_ = now_ms;
+    duplicate_sequence_rx_count_ = 0;
+  } else if (seq == last_seq_) {
+    // Duplicate; be lenient, but track how many such repeats we have seen.
+    if (duplicate_sequence_rx_count_ != 0xFFFFFFFFu) {
+      ++duplicate_sequence_rx_count_;
+    }
+  } else {
+    // Sequence wrapped or node rebooted. Treat this as a fresh starting
+    // point rather than an error.
+    last_seq_ = seq;
+    last_seq_advance_ms_ = now_ms;
+    duplicate_sequence_rx_count_ = 0;
+  }
+}
+
+bool MeshNode::SequenceStuck(uint32_t now_ms,
+                             uint32_t stuck_ms_threshold) const {
+  if (!has_sequence_) {
+    return false;
+  }
+  if (last_seq_advance_ms_ == 0U || now_ms <= last_seq_advance_ms_) {
+    return false;
+  }
+
+  const uint32_t since_advance_ms = now_ms - last_seq_advance_ms_;
+
+  // Only call it "stuck" if:
+  //  - the sequence has not advanced for at least stuck_ms_threshold, AND
+  //  - we have actually received one or more duplicate seq values
+  //    after the last advance.
+  //
+  // Nodes that simply go silent are handled by the existing age/stale/missing
+  // logic instead.
+  if (since_advance_ms >= stuck_ms_threshold &&
+      last_seq_rx_ms_ > last_seq_advance_ms_ &&
+      duplicate_sequence_rx_count_ > 0U) {
+    return true;
+  }
+
+  return false;
+}
+
+MeshNode* UpdateMeshNodeFromTempsJson(const JsonDocument& doc,
+                                      uint32_t default_node_id,
+                                      uint32_t now_ms) {
+  const uint32_t node_id = doc["nodeId"] | default_node_id;
+  const int bus_gpio = doc["busGpio"] | -1;
+
+  // With a const JsonDocument, doc["sensors"] is a JsonVariantConst,
+  // so we must convert to JsonArrayConst in ArduinoJson v7.
+  JsonArrayConst sensor_array = doc["sensors"].as<JsonArrayConst>();
+
+  // NEW: optional sequence number (0 if absent / unsupported).
+  const uint32_t seq = doc["seq"] | 0U;
+
+  MeshNode* node = GetOrCreateMeshNode(node_id);
+  if (node == nullptr) {
+    return nullptr;
+  }
+
+  // NEW: track sequence health independently of sensor contents.
+  node->UpdateSequence(seq, now_ms);
+
+  node->UpdateFromTemps(bus_gpio, sensor_array, now_ms);
+  return node;
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Global node store

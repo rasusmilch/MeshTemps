@@ -19,7 +19,7 @@ class MeshNode {
   explicit MeshNode(uint32_t node_id);
 
   uint32_t node_id() const { return node_id_; }
-  const String& node_id_str() const { return node_id_str_; }        // decimal
+  const String& node_id_str() const { return node_id_str_; }        // canonical 8-hex
   const String& node_key_hex() const { return node_key_hex_; }      // 8-hex
   int bus_gpio() const { return bus_gpio_; }
   uint32_t last_update_ms() const { return last_update_ms_; }
@@ -54,20 +54,50 @@ class MeshNode {
   // The caller should pass the already-extracted sensor array and bus_gpio to
   // avoid re-parsing.
   void UpdateFromTemps(int bus_gpio,
-                       const JsonArray& sensor_array,
+                       const JsonArrayConst& sensor_array,
                        uint32_t now_ms);
+
 
   // Compute the node "age" in minutes based on the latest of node and sensor
   // timestamps. If the node has never been updated, returns 0.
   uint32_t ComputeAgeMinutes(uint32_t now_ms) const;
+
+    // Sequence tracking for "temps" messages.
+  //
+  // Call UpdateSequence() for every "temps" message (even if the payload
+  // is otherwise unchanged). seq==0 is treated as "no sequence" for
+  // backwards compatibility with older leaf firmware.
+  void UpdateSequence(uint32_t seq, uint32_t now_ms);
+
+  bool has_sequence() const { return has_sequence_; }
+  uint32_t last_sequence() const { return last_seq_; }
+  uint32_t last_sequence_advance_ms() const { return last_seq_advance_ms_; }
+  uint32_t last_sequence_rx_ms() const { return last_seq_rx_ms_; }
+  uint32_t duplicate_sequence_rx_count() const {
+    return duplicate_sequence_rx_count_;
+  }
+
+  // Return true if the sequence appears "stuck": the sequence has not
+  // advanced for at least stuck_ms_threshold while we continue to receive
+  // messages with exactly the same sequence value.
+  bool SequenceStuck(uint32_t now_ms,
+                     uint32_t stuck_ms_threshold) const;
 
  private:
   // Helper used in constructor.
   static String FormatNodeKeyHex(uint32_t node_id);
 
   uint32_t node_id_ = 0;
-  String node_id_str_;   // decimal string form, e.g. "268435457"
+  String node_id_str_;   // canonical 8-hex string form, e.g. "10000001"
   String node_key_hex_;  // canonical 8-hex form, e.g. "10000001"
+
+    // Sequence tracking (root-only).
+  bool has_sequence_ = false;
+  uint32_t last_seq_ = 0;
+  uint32_t last_seq_advance_ms_ = 0;
+  uint32_t last_seq_rx_ms_ = 0;
+  uint32_t duplicate_sequence_rx_count_ = 0;
+
 
   int bus_gpio_ = -1;
   uint32_t last_update_ms_ = 0;
@@ -84,6 +114,17 @@ MeshNode* GetOrCreateMeshNode(uint32_t node_id);
 
 // Return a pointer to an existing node, or nullptr if not present.
 MeshNode* FindMeshNode(uint32_t node_id);
+
+// Parse a leaf "temps" JSON payload and update the corresponding MeshNode.
+//
+// |doc| must already be a successfully-deserialized ArduinoJson document
+// matching the "temps" schema. |default_node_id| is used if the document does
+// not contain an explicit "nodeId" field (backwards compatibility).
+//
+// Returns the updated MeshNode*, or nullptr on error.
+MeshNode* UpdateMeshNodeFromTempsJson(const JsonDocument& doc,
+                                      uint32_t default_node_id,
+                                      uint32_t now_ms);
 
 // Clear all known nodes from the global store (used by dummy mode).
 void ClearAllMeshNodes();
