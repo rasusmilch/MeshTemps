@@ -32,17 +32,29 @@ void MeshTile::InitWidgets(lv_obj_t* parent,
   label_loc_ = lv_label_create(root_);
   lv_obj_set_width(label_loc_, lv_pct(100));
   lv_obj_set_style_text_align(label_loc_, LV_TEXT_ALIGN_CENTER, 0);
-  // Match existing UI font choice.
-  lv_obj_set_style_text_font(label_loc_, &lv_font_montserrat_16, 0);
+  // Larger font choice.
+  lv_obj_set_style_text_font(label_loc_, &lv_font_montserrat_28, 0);
 
   // Age label (below title).
   label_age_ = lv_label_create(root_);
   lv_obj_set_width(label_age_, lv_pct(100));
   lv_obj_set_style_text_align(label_age_, LV_TEXT_ALIGN_CENTER, 0);
 
-  // Up to two sensor rows (bottom).
+  // Up to two sensor "slots" at the bottom: name (small) above temperature.
   for (int i = 0; i < 2; ++i) {
-    sensor_label_[i] = lv_label_create(root_);
+    sensor_name_label_[i] = lv_label_create(root_);
+    sensor_temp_label_[i] = lv_label_create(root_);
+
+    lv_obj_set_style_text_align(sensor_name_label_[i],
+                                LV_TEXT_ALIGN_CENTER,
+                                0);
+    lv_obj_set_style_text_align(sensor_temp_label_[i],
+                                LV_TEXT_ALIGN_CENTER,
+                                0);
+
+    lv_obj_set_style_text_font(sensor_temp_label_[i], 
+                                &lv_font_montserrat_26, 
+                                0);
   }
 }
 
@@ -70,16 +82,10 @@ void MeshTile::SetContent(const Content& content) {
   UpdateTextsAndLayout();
 
   // Only repaint base colors if we are currently in the "base" phase.
-  // If we are in the flashing phase, keep the flash colors; the new
-  // base palette will be used the next time the phase is off.
   if (!last_flash_active_) {
     ApplyBaseColors();
   }
-
-  // IMPORTANT: do not reset last_flash_active_ here.
-  // We want the tile to stay in whatever phase it was already in.
 }
-
 
 void MeshTile::SetAgeOnly(uint32_t age_minutes,
                           bool is_missing,
@@ -89,28 +95,30 @@ void MeshTile::SetAgeOnly(uint32_t age_minutes,
   content_.is_stale = is_stale;
 
   if (label_age_ != nullptr) {
-    char age_buf[24];
-    snprintf(age_buf,
-             sizeof(age_buf),
-             "Age: %lu min",
-             static_cast<unsigned long>(content_.age_minutes));
-    lv_label_set_text(label_age_, age_buf);
-    lv_obj_align(label_age_, LV_ALIGN_TOP_MID, 0, 20);
+    if (content_.show_age) {
+      char age_buf[24];
+      snprintf(age_buf,
+               sizeof(age_buf),
+               "Age: %lu min",
+               static_cast<unsigned long>(content_.age_minutes));
+      lv_label_set_text(label_age_, age_buf);
+      lv_obj_clear_flag(label_age_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(label_age_, LV_ALIGN_TOP_MID, 0, 20);
+    } else {
+      lv_label_set_text(label_age_, "");
+      lv_obj_add_flag(label_age_, LV_OBJ_FLAG_HIDDEN);
+    }
   }
 
   // Age / missing / stale affect the *base* palette, but we do not
-  // forcibly leave the current flash phase. The new base colors will
-  // be visible the next time the tile is in the non-flashing phase.
+  // forcibly leave the current flash phase.
   UpdateBaseColors();
   UpdateTextsAndLayout();
 
   if (!last_flash_active_) {
     ApplyBaseColors();
   }
-
-  // Do not touch last_flash_active_ here.
 }
-
 
 void MeshTile::UpdateBaseColors() {
   // Base colors are derived from node-level flags.
@@ -144,7 +152,6 @@ void MeshTile::UpdateBaseColors() {
   }
 }
 
-
 void MeshTile::UpdateTextsAndLayout() {
   if (root_ == nullptr) {
     return;
@@ -158,56 +165,92 @@ void MeshTile::UpdateTextsAndLayout() {
     lv_obj_align(label_loc_, LV_ALIGN_TOP_MID, 0, 0);
   }
 
-  // Age label.
+  // Age label (optional).
   if (label_age_ != nullptr) {
-    char age_buf[24];
-    snprintf(age_buf,
-             sizeof(age_buf),
-             "Age: %lu min",
-             static_cast<unsigned long>(content_.age_minutes));
-    lv_label_set_text(label_age_, age_buf);
-    lv_obj_align(label_age_, LV_ALIGN_TOP_MID, 0, 20);
+    if (content_.show_age) {
+      char age_buf[24];
+      snprintf(age_buf,
+               sizeof(age_buf),
+               "Age: %lu min",
+               static_cast<unsigned long>(content_.age_minutes));
+      lv_label_set_text(label_age_, age_buf);
+      lv_obj_clear_flag(label_age_, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_align(label_age_, LV_ALIGN_TOP_MID, 0, 20);
+    } else {
+      lv_label_set_text(label_age_, "");
+      lv_obj_add_flag(label_age_, LV_OBJ_FLAG_HIDDEN);
+    }
   }
 
-  // Sensor rows.
+  // Sensor sections.
   const int count =
       (content_.sensor_count < 0)
           ? 0
           : (content_.sensor_count > 2 ? 2 : content_.sensor_count);
 
+  // No sensors: show a faint placeholder in the first temp slot.
   if (count == 0) {
-    // No sensors: show a faint placeholder in the first slot.
-    if (sensor_label_[0] != nullptr) {
-      lv_label_set_text(sensor_label_[0], "(no sensors)");
-      lv_obj_clear_flag(sensor_label_[0], LV_OBJ_FLAG_HIDDEN);
+    if (sensor_temp_label_[0] != nullptr) {
+      lv_label_set_text(sensor_temp_label_[0], "(no sensors)");
+      lv_obj_clear_flag(sensor_temp_label_[0], LV_OBJ_FLAG_HIDDEN);
       sensor_color_[0] = lv_color_make(0xAA, 0xAA, 0xAA);
-      lv_obj_align(sensor_label_[0], LV_ALIGN_BOTTOM_LEFT, 0, -8);
+      lv_obj_set_width(sensor_temp_label_[0], lv_obj_get_width(root_) - 8);
+      lv_obj_align(sensor_temp_label_[0], LV_ALIGN_BOTTOM_MID, 0, -8);
     }
-    if (sensor_label_[1] != nullptr) {
-      lv_label_set_text(sensor_label_[1], "");
-      lv_obj_add_flag(sensor_label_[1], LV_OBJ_FLAG_HIDDEN);
+    if (sensor_temp_label_[1] != nullptr) {
+      lv_label_set_text(sensor_temp_label_[1], "");
+      lv_obj_add_flag(sensor_temp_label_[1], LV_OBJ_FLAG_HIDDEN);
+    }
+    for (int i = 0; i < 2; ++i) {
+      if (sensor_name_label_[i] != nullptr) {
+        lv_label_set_text(sensor_name_label_[i], "");
+        lv_obj_add_flag(sensor_name_label_[i], LV_OBJ_FLAG_HIDDEN);
+      }
     }
     return;
   }
 
+  // Layout parameters for left/right positioning at the bottom.
+  lv_coord_t root_w = lv_obj_get_width(root_);
+  if (root_w <= 0) {
+    root_w = 200;  // fallback
+  }
+  const lv_coord_t margin = 4;
+  lv_coord_t section_w;
+  const bool two_sensors = (count == 2);
+  if (two_sensors) {
+    section_w = root_w / 2 - 2 * margin;
+    if (section_w < 20) {
+      section_w = root_w / 2;
+    }
+  } else {
+    section_w = root_w - 2 * margin;
+  }
+
   for (int i = 0; i < 2; ++i) {
-    lv_obj_t* lbl = sensor_label_[i];
-    if (lbl == nullptr) {
+    lv_obj_t* name_lbl = sensor_name_label_[i];
+    lv_obj_t* temp_lbl = sensor_temp_label_[i];
+
+    if (temp_lbl == nullptr || name_lbl == nullptr) {
       continue;
     }
 
     if (i >= count) {
-      lv_label_set_text(lbl, "");
-      lv_obj_add_flag(lbl, LV_OBJ_FLAG_HIDDEN);
+      // Hide unused slots.
+      lv_label_set_text(temp_lbl, "");
+      lv_obj_add_flag(temp_lbl, LV_OBJ_FLAG_HIDDEN);
+
+      lv_label_set_text(name_lbl, "");
+      lv_obj_add_flag(name_lbl, LV_OBJ_FLAG_HIDDEN);
       continue;
     }
 
     const SensorView& sv = content_.sensors[i];
 
-    // Build label text "<name>: 12.3F" or "<name>: --".
-    char buf[64];
+    // Temperature text (always shown for active sensors).
+    char temp_buf[32];
     if (!sv.has_value || isnan(sv.temp_c)) {
-      snprintf(buf, sizeof(buf), "%s: --", sv.label.c_str());
+      snprintf(temp_buf, sizeof(temp_buf), "--");
     } else {
       float temp_disp = sv.temp_c;
       char unit_ch = 'C';
@@ -215,17 +258,27 @@ void MeshTile::UpdateTextsAndLayout() {
         temp_disp = temp_disp * 1.8f + 32.0f;
         unit_ch = 'F';
       }
-      snprintf(buf,
-               sizeof(buf),
-               "%s: %.1f%c",
-               sv.label.c_str(),
+      snprintf(temp_buf,
+               sizeof(temp_buf),
+               "%.1f%c",
                static_cast<double>(temp_disp),
                unit_ch);
     }
-    lv_label_set_text(lbl, buf);
-    lv_obj_clear_flag(lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_label_set_text(temp_lbl, temp_buf);
+    lv_obj_clear_flag(temp_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_width(temp_lbl, section_w);
 
-    // Per-sensor color rules.
+    // Optional sensor name above the temperature.
+    if (content_.show_sensor_labels && sv.label.length() > 0) {
+      lv_label_set_text(name_lbl, sv.label.c_str());
+      lv_obj_clear_flag(name_lbl, LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_width(name_lbl, section_w);
+    } else {
+      lv_label_set_text(name_lbl, "");
+      lv_obj_add_flag(name_lbl, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Per-sensor color rules (applied to the temperature text).
     lv_color_t sensor_color;
     if (!sv.has_value || isnan(sv.temp_c)) {
       sensor_color = lv_color_make(0xCC, 0xCC, 0xCC);
@@ -243,15 +296,22 @@ void MeshTile::UpdateTextsAndLayout() {
     } else {
       sensor_color = lv_color_make(0xE0, 0xFF, 0xE0);
     }
-
     sensor_color_[i] = sensor_color;
 
-    // Align sensors near the bottom. Match current UI:
-    //   - One sensor: bottom, slight offset.
-    //   - Two sensors: stacked.
-    const int y_offset =
-        (count == 1) ? -8 : (i == 0 ? -26 : -8);
-    lv_obj_align(lbl, LV_ALIGN_BOTTOM_LEFT, 0, y_offset);
+    // Align near the bottom, one slot in the lower left and one in the
+    // lower right. With a single sensor, center it.
+    const lv_align_t align_base =
+        two_sensors ? (i == 0 ? LV_ALIGN_BOTTOM_LEFT : LV_ALIGN_BOTTOM_RIGHT)
+                    : LV_ALIGN_BOTTOM_MID;
+
+    const lv_coord_t temp_y_offset = -8;
+    const lv_coord_t name_y_offset = -28;
+
+    lv_obj_align(temp_lbl, align_base, 0, temp_y_offset);
+
+    if (!lv_obj_has_flag(name_lbl, LV_OBJ_FLAG_HIDDEN)) {
+      lv_obj_align(name_lbl, align_base, 0, name_y_offset);
+    }
   }
 }
 
@@ -270,14 +330,12 @@ void MeshTile::ApplyBaseColors() {
     lv_obj_set_style_text_color(label_age_, fg_normal_, 0);
   }
 
-  const int count =
-      (content_.sensor_count < 0)
-          ? 0
-          : (content_.sensor_count > 2 ? 2 : content_.sensor_count);
-
-  for (int i = 0; i < count; ++i) {
-    if (sensor_label_[i] != nullptr) {
-      lv_obj_set_style_text_color(sensor_label_[i], sensor_color_[i], 0);
+  for (int i = 0; i < 2; ++i) {
+    if (sensor_temp_label_[i] != nullptr) {
+      lv_obj_set_style_text_color(sensor_temp_label_[i], sensor_color_[i], 0);
+    }
+    if (sensor_name_label_[i] != nullptr) {
+      lv_obj_set_style_text_color(sensor_name_label_[i], fg_normal_, 0);
     }
   }
 }
@@ -308,13 +366,12 @@ void MeshTile::ApplyFlashPhase(bool flash_on) {
     if (label_age_ != nullptr) {
       lv_obj_set_style_text_color(label_age_, fg_flash_, 0);
     }
-    const int count =
-        (content_.sensor_count < 0)
-            ? 0
-            : (content_.sensor_count > 2 ? 2 : content_.sensor_count);
-    for (int i = 0; i < count; ++i) {
-      if (sensor_label_[i] != nullptr) {
-        lv_obj_set_style_text_color(sensor_label_[i], fg_flash_, 0);
+    for (int i = 0; i < 2; ++i) {
+      if (sensor_temp_label_[i] != nullptr) {
+        lv_obj_set_style_text_color(sensor_temp_label_[i], fg_flash_, 0);
+      }
+      if (sensor_name_label_[i] != nullptr) {
+        lv_obj_set_style_text_color(sensor_name_label_[i], fg_flash_, 0);
       }
     }
   } else {

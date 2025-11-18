@@ -176,6 +176,10 @@ constexpr uint32_t kSeqStuckMsThreshold = SEND_PERIOD_MS * 10UL;
 // Dummy data mode (non-persistent).
 bool g_use_dummy_data = false;
 
+// Tile display toggles (root).
+bool g_show_sensor_labels = true;  // show sensor names in tiles
+bool g_show_age_label = true;      // show "Age: N min" in tiles
+
 // Temperature limits (in °C, NaN = disabled).
 float g_warn_low_c = 5.0;
 float g_warn_high_c = 26.0;
@@ -354,6 +358,24 @@ void SaveHighlightSettings() {
   g_root_preferences.putInt("hl_missing", g_highlight_missing_nodes ? 1 : 0);
   g_root_preferences.putInt("hl_stale_min",
                             static_cast<int>(g_stale_minutes_threshold));
+  g_root_preferences.end();
+}
+
+void LoadTileDisplaySettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const int show_labels = g_root_preferences.getInt("show_labels", 1);
+  const int show_age = g_root_preferences.getInt("show_age", 1);
+  g_root_preferences.end();
+
+  g_show_sensor_labels = (show_labels != 0);
+  g_show_age_label = (show_age != 0);
+}
+
+void SaveTileDisplaySettings() {
+  Serial.println(F("Saving Tile Display Settings..."));
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.putInt("show_labels", g_show_sensor_labels ? 1 : 0);
+  g_root_preferences.putInt("show_age", g_show_age_label ? 1 : 0);
   g_root_preferences.end();
 }
 
@@ -603,6 +625,7 @@ static void RootInitStorage() {
   LoadLimits();
   LoadBuzzerSettings();
   LoadFlashSettings();
+  LoadTileDisplaySettings();
 
   // Topology persistence.
   LoadTopoPersistFlag();
@@ -714,6 +737,8 @@ static bool BuildTileContentForNode(const String &node_key_hex,
 
   MeshTile::Content c;
   c.display_fahrenheit = g_display_fahrenheit;
+  c.show_sensor_labels = g_show_sensor_labels;  
+  c.show_age = g_show_age_label;                
 
   // Title: persisted label if present, otherwise formatted node id.
   String title = g_labels["nodes"][node_hex] | "";
@@ -1718,48 +1743,129 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   (void)argc;
   (void)argv;
+
   EnsureDocuments();
-  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
-  for (JsonPair node_entry : nodes) {
-    const String node_id = node_entry.key().c_str();
-    JsonObject node_obj = node_entry.value();
-    const String node_label = g_labels["nodes"][node_id] | "";
-    if (node_label.length() > 0)
-      out.printf("node %s \"%s\":\n", node_id.c_str(), node_label.c_str());
-    else
-      out.printf("node %s:\n", node_id.c_str());
-    JsonObject sensors = node_obj["sensors"].as<JsonObject>();
-    bool any_sensor = false;
-    for (JsonPair sensor_entry : sensors) {
-      any_sensor = true;
-      const String addr = sensor_entry.key().c_str();
-      JsonObject sensor_obj = sensor_entry.value();
-      const float temp_c =
-          sensor_obj["tC"] | std::numeric_limits<float>::quiet_NaN();
-      const bool corrected = sensor_obj["corr"] | false;
-      const String sensor_label = g_labels["sensors"][addr] | "";
-      const String addr_canon = CanonAddr16(addr);
-      String temp_s = isnan(temp_c) ? String("NaN") : String(temp_c, 2);
-      if (sensor_label.length() > 0) {
-        out.printf("  %s \"%s\" : %s%s\n", addr_canon.c_str(),
-                   sensor_label.c_str(), temp_s.c_str(),
-                   corrected ? " (corr)" : "");
-      } else {
-        out.printf("  %s : %s%s\n", addr_canon.c_str(), temp_s.c_str(),
-                   corrected ? " (corr)" : "");
-      }
-    }
-    if (!any_sensor)
-      out.println(F("  (no sensors)"));
+
+  const uint32_t now_ms = millis();
+
+  // Snapshot all MeshNode IDs so we see every node the root knows about.
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  if (ids.empty()) {
+    out.println(F("(no nodes)"));
   }
 
-  // At the end of OnReceiveRoot():
+  for (uint32_t id : ids) {
+    MeshNode *node = FindMeshNode(id);
+    if (node == nullptr) {
+      continue;
+    }
+
+    const String node_hex = node->node_key_hex();  // 8-hex canonical id
+
+    // Node label can be either a plain string or an object (e.g. { "node": "..." }).
+    String node_label;
+    {
+      JsonVariant v = g_labels["nodes"][node_hex];
+      if (v.is<const char *>()) {
+        node_label = String(v.as<const char *>());
+      } else if (v.is<JsonObject>()) {
+        JsonObject obj = v.as<JsonObject>();
+        const char *s = obj["node"] | "";
+        node_label = String(s);
+      }
+    }
+
+    const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
+    const int bus_gpio = node->bus_gpio();
+
+    if (node_label.length() > 0) {
+      out.printf("node %s \"%s\" gpio=%d age=%lu min:\n",
+                 node_hex.c_str(),
+                 node_label.c_str(),
+                 bus_gpio,
+                 static_cast<unsigned long>(age_min));
+    } else {
+      out.printf("node %s gpio=%d age=%lu min:\n",
+                 node_hex.c_str(),
+                 bus_gpio,
+                 static_cast<unsigned long>(age_min));
+    }
+
+    // Sequence / health line (same data as `debug nodes`, but shorter).
+    if (node->has_sequence()) {
+      const uint32_t seq = node->last_sequence();
+      const uint32_t last_adv_ms = node->last_sequence_advance_ms();
+      const uint32_t last_rx_ms = node->last_sequence_rx_ms();
+
+      uint32_t since_adv_s = 0U;
+      uint32_t since_rx_s = 0U;
+
+      if (last_adv_ms != 0U && now_ms >= last_adv_ms) {
+        since_adv_s = (now_ms - last_adv_ms) / 1000U;
+      }
+      if (last_rx_ms != 0U && now_ms >= last_rx_ms) {
+        since_rx_s = (now_ms - last_rx_ms) / 1000U;
+      }
+
+      const bool stuck =
+          node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
+
+      out.printf("  seq=%lu last_adv=%lus last_rx=%lus dup_rx=%lu stuck=%s\n",
+                 static_cast<unsigned long>(seq),
+                 static_cast<unsigned long>(since_adv_s),
+                 static_cast<unsigned long>(since_rx_s),
+                 static_cast<unsigned long>(node->duplicate_sequence_rx_count()),
+                 stuck ? "YES" : "no");
+    }
+
+    // Sensors for this node.
+    const auto &sensors = node->sensors();
+    if (sensors.empty()) {
+      out.println(F("  (no sensors)"));
+      continue;
+    }
+
+    for (const auto &sensor : sensors) {
+      const String addr16 = sensor.address;
+      const String sensor_label = g_labels["sensors"][addr16] | "";
+
+      String temp_s;
+      if (!sensor.has_value || isnan(sensor.temp_c)) {
+        temp_s = String("NaN");
+      } else {
+        temp_s = String(sensor.temp_c, 2);
+      }
+
+      uint32_t age_sensor_min = 0U;
+      if (sensor.last_ms != 0U && now_ms >= sensor.last_ms) {
+        age_sensor_min = (now_ms - sensor.last_ms) / 60000U;
+      }
+
+      if (sensor_label.length() > 0) {
+        out.printf("  %s \"%s\" : %s%s (age=%lu min)\n",
+                   addr16.c_str(),
+                   sensor_label.c_str(),
+                   temp_s.c_str(),
+                   sensor.corrected ? " (corr)" : "",
+                   static_cast<unsigned long>(age_sensor_min));
+      } else {
+        out.printf("  %s : %s%s (age=%lu min)\n",
+                   addr16.c_str(),
+                   temp_s.c_str(),
+                   sensor.corrected ? " (corr)" : "",
+                   static_cast<unsigned long>(age_sensor_min));
+      }
+    }
+  }
+
+  // Still keep an eye on JSON doc capacity, since we use it for persistence.
   if (g_last_seen.overflowed()) {
     Serial.println(F("[WARN] g_last_seen overflow; increase capacity"));
   }
 
   GuiRequestRender();
 }
+
 
 static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2031,6 +2137,47 @@ static void CmdHighlight(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("ERR highlight (use 'highlight missing on|off' or 'highlight "
                   "stale <min>')"));
   }
+}
+
+static void CmdLabels(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+
+  if (argc < 3) {
+    out.printf("labels sensor=%s age=%s\n",
+               g_show_sensor_labels ? "on" : "off",
+               g_show_age_label ? "on" : "off");
+    out.println(F("usage: labels sensor on|off | labels age on|off"));
+    return;
+  }
+
+  const String target = argv[1];
+  const String mode = argv[2];
+
+  bool enable = false;
+  if (mode.equalsIgnoreCase("on")) {
+    enable = true;
+  } else if (mode.equalsIgnoreCase("off")) {
+    enable = false;
+  } else {
+    out.println(F("ERR labels (use on|off)"));
+    return;
+  }
+
+  if (target.equalsIgnoreCase("sensor") ||
+      target.equalsIgnoreCase("sensors")) {
+    g_show_sensor_labels = enable;
+  } else if (target.equalsIgnoreCase("age")) {
+    g_show_age_label = enable;
+  } else {
+    out.println(F("ERR labels (use 'labels sensor on|off' or 'labels age on|off')"));
+    return;
+  }
+
+  SaveTileDisplaySettings();
+  out.printf("labels %s=%s\n",
+             target.c_str(),
+             enable ? "on" : "off");
+  GuiRequestRender();
 }
 
 static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
@@ -2602,6 +2749,8 @@ void setup() {
   g_console.RegisterCommand("known", &CmdKnown, "known [erase|show]");
   g_console.RegisterCommand("topo", &CmdTopo,
   "topo show|on|off|save|load|clear");
+  g_console.RegisterCommand("labels", &CmdLabels,
+                            "labels sensor on|off | labels age on|off");
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);

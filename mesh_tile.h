@@ -34,94 +34,68 @@ class MeshTile {
     // extended period while messages are still being received.
     bool seq_stuck = false;
 
-    bool display_fahrenheit = true;  // true = °F, false = °C
+    // Display units.
+    bool display_fahrenheit = true;
 
+    // Up to two sensors per tile.
+    int sensor_count = 0;
     SensorView sensors[2];
-    int sensor_count = 0;  // used entries in sensors[]
+
+    // UI toggles from root.
+    bool show_sensor_labels = true;  // show/hide sensor name text
+    bool show_age = true;            // show/hide "Age: N min"
   };
 
-  // Create a tile rooted under |parent| with a fixed size.
-  //
-  // Caller must ensure LVGL is initialized and any locking is handled before
-  // constructing or calling methods on this object.
-  MeshTile(lv_obj_t* parent, lv_coord_t width, lv_coord_t height);
+  MeshTile(lv_obj_t* parent,
+           lv_coord_t width,
+           lv_coord_t height);
 
-  // Non-copyable (lv_obj_t owns resources).
-  MeshTile(const MeshTile&) = delete;
-  MeshTile& operator=(const MeshTile&) = delete;
-
-  // Root LVGL object for this tile.
-  lv_obj_t* root() const { return root_; }
-
-  // Resize tile (e.g. after display rotation or resolution change).
-  // Layout is recomputed using the current Content.
+  // Resize tile when layout changes.
   void SetSize(lv_coord_t width, lv_coord_t height);
 
-  // Provide a new content snapshot. The tile stores this and re-renders itself.
-  //
-  // This rewrites header, age, sensor lines, colors, and layout. It does not
-  // perform any LVGL locking.
+  // Full content update (title, age, sensors, colors/highlights).
   void SetContent(const Content& content);
 
-  // Cheap age-only update (avoid rebuilding sensor text elsewhere).
-  //
-  // This updates:
-  //   - stored age minutes
-  //   - missing/stale flags
-  //   - age label text
-  //   - base colors (bg/fg + sensor colors)
-  //
-  // It does *not* change sensor labels or severity flags; those remain from
-  // the last SetContent() call.
+  // Cheap "age only" update used on minute ticks.
   void SetAgeOnly(uint32_t age_minutes,
                   bool is_missing,
                   bool is_stale);
 
-  // Apply the current global flash phase. |flash_on| should toggle at the
-  // desired rate; the tile will only actually flash if it has alerts or
-  // warnings.
-  //
-  // This does *not* manage timers; historically the caller drove it with a
-  // global phase. In the new design, prefer calling Loop() with per-tile
-  // timers instead.
-  void ApplyFlashPhase(bool flash_on);
-
-  // Set per-tile flash cadence (milliseconds). 0 disables flashing for this
-  // tile even if it has alerts or warnings.
+  // Set flashing interval for warning/alert tiles (0 = off).
   void SetFlashIntervalMs(uint32_t interval_ms);
-  uint32_t flash_interval_ms() const { return flash_interval_ms_; }
 
-  // Call this once per main loop with millis(). The tile uses its own
-  // flash interval and internal state to decide if it needs to repaint
-  // itself (flash vs base colors).
+  // Per-tile time-based update. Call once per loop() with millis().
   void Loop(uint32_t now_ms);
 
  private:
-  void InitWidgets(lv_obj_t* parent, lv_coord_t width, lv_coord_t height);
+  void InitWidgets(lv_obj_t* parent,
+                   lv_coord_t width,
+                   lv_coord_t height);
   void UpdateBaseColors();
   void UpdateTextsAndLayout();
   void ApplyBaseColors();
+  void ApplyFlashPhase(bool flash_on);
 
   lv_obj_t* root_ = nullptr;
   lv_obj_t* label_loc_ = nullptr;
   lv_obj_t* label_age_ = nullptr;
-  lv_obj_t* sensor_label_[2] = {nullptr, nullptr};
 
-  Content content_{};
+  // Per-sensor name + temperature labels (two "slots" per tile).
+  lv_obj_t* sensor_name_label_[2] = {nullptr, nullptr};
+  lv_obj_t* sensor_temp_label_[2] = {nullptr, nullptr};
 
+  // Cached colors for current content.
   lv_color_t bg_normal_;
   lv_color_t fg_normal_;
   lv_color_t bg_flash_;
   lv_color_t fg_flash_;
   lv_color_t sensor_color_[2];
 
-  // True if the tile is currently using the "flash" palette; false means
-  // it is using the base palette.
-  bool last_flash_active_ = false;
+  Content content_;
 
-  // Per-tile timing state for flashing.
-  uint32_t flash_interval_ms_ = 0;       // 0 = no flashing
-  uint32_t last_flash_toggle_ms_ = 0;    // millis() when phase last toggled
+  bool last_flash_active_ = false;
+  uint32_t flash_interval_ms_ = 0;
+  uint32_t last_flash_toggle_ms_ = 0;
 };
 
 #endif  // MESH_TILE_H_
