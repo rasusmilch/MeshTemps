@@ -64,6 +64,8 @@ class MeshTile {
   // Set flashing interval for warning/alert tiles (0 = off).
   void SetFlashIntervalMs(uint32_t interval_ms);
 
+  lv_obj_t* root() const { return root_; }
+
   // Per-tile time-based update. Call once per loop() with millis().
   void Loop(uint32_t now_ms);
 

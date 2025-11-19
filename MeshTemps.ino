@@ -1509,6 +1509,24 @@ void GuiRebuildTiles() {
       g_any_warning = true;
     }
   }
+
+  // After updating content, reorder the LVGL tile objects inside the
+  // container to match the sorted node_ids order. Otherwise the visual
+  // layout stays in original creation order and norder appears ineffective.
+  for (size_t i = 0; i < node_ids.size(); ++i) {
+    const String& node_key_hex = node_ids[i];
+    auto it = g_tiles.find(node_key_hex);
+    if (it == g_tiles.end() || it->second.tile == nullptr) {
+      continue;
+    }
+    MeshTile* tile = it->second.tile;
+    lv_obj_t* root = tile->root();
+    if (root != nullptr) {
+      lv_obj_move_to_index(root,
+                           static_cast<uint32_t>(i));  // 0-based index
+    }
+  }
+
 }
 
 
