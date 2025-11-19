@@ -1289,6 +1289,7 @@ MeshTile &GetOrCreateTile(const String &node_id_str,
 // ---------------------------------------------------------------------------
 // Update just the "Age: N min" labels and stale/missing state.
 // No layout work, no object (re)creation.
+
 static void GuiAgeTick(uint32_t now_ms) {
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
