@@ -4,27 +4,58 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <vector>
+#include <limits>
+
+// Small POD used by the root to persist node metadata in NVS.
+struct NodeMetaRecord {
+  uint32_t node_id;
+  int32_t tile_rank;
+  uint8_t mute_mask;
+  uint8_t reserved[3];  // future use / alignment
+};
 
 // Represents one sensor attached to a mesh node.
 class MeshNode {
  public:
   struct Sensor {
-    String address;      // 16-char DS18B20 ROM code (as sent by leaf)
-    float temp_c = NAN;  // Raw temperature in °C
+    String address;  // 16-char DS18B20 ROM code (as sent by leaf)
+
+    // Metadata owned by MeshNode.
+    String label;  // Optional human-friendly label
+
+    // Ordering metadata:
+    //   - global_rank: from "order <addr> <rank>"
+    //   - node_rank  : from "sorder <node> <addr> <rank>"
+    int32_t global_rank = std::numeric_limits<int32_t>::max();
+    int32_t node_rank = std::numeric_limits<int32_t>::max();
+
+    // Live measurement data.
+    float temp_c = NAN;   // Raw temperature in °C
     bool has_value = false;
     bool corrected = false;
     uint32_t last_ms = 0;  // millis() timestamp of last update
   };
 
+
   explicit MeshNode(uint32_t node_id);
 
   uint32_t node_id() const { return node_id_; }
-  const String& node_id_str() const { return node_id_str_; }        // canonical 8-hex
-  const String& node_key_hex() const { return node_key_hex_; }      // 8-hex
+  const String& node_id_str() const { return node_id_str_; }   // canonical 8-hex
+  const String& node_key_hex() const { return node_key_hex_; } // 8-hex
   int bus_gpio() const { return bus_gpio_; }
   uint32_t last_update_ms() const { return last_update_ms_; }
 
+  // Access to sensor list.
+  std::vector<Sensor>& sensors() { return sensors_; }
   const std::vector<Sensor>& sensors() const { return sensors_; }
+
+  // Metadata for sensors (labels + ordering).
+  bool SetSensorLabel(const String& address, const String& label);
+  String GetSensorLabel(const String& address) const;
+
+  bool SetSensorGlobalRank(const String& address, int32_t rank);
+  bool SetSensorNodeRank(const String& address, int32_t rank);
+  int32_t GetSensorEffectiveRank(const String& address) const;
 
   // Returns pointer to sensor with matching 16-char address, or nullptr.
   Sensor* FindSensor(const String& address);
@@ -57,12 +88,11 @@ class MeshNode {
                        const JsonArrayConst& sensor_array,
                        uint32_t now_ms);
 
-
   // Compute the node "age" in minutes based on the latest of node and sensor
   // timestamps. If the node has never been updated, returns 0.
   uint32_t ComputeAgeMinutes(uint32_t now_ms) const;
 
-    // Sequence tracking for "temps" messages.
+  // Sequence tracking for "temps" messages.
   //
   // Call UpdateSequence() for every "temps" message (even if the payload
   // is otherwise unchanged). seq==0 is treated as "no sequence" for
@@ -83,6 +113,16 @@ class MeshNode {
   bool SequenceStuck(uint32_t now_ms,
                      uint32_t stuck_ms_threshold) const;
 
+  // ---- NEW: per-node UI metadata accessors ----
+  int32_t tile_rank() const { return tile_rank_; }
+  void set_tile_rank(int32_t rank) { tile_rank_ = rank; }
+
+  const String& label() const { return label_; }
+  void set_label(const String& label) { label_ = label; }
+
+  uint8_t mute_mask() const { return mute_mask_; }
+  void set_mute_mask(uint8_t mask) { mute_mask_ = mask; }
+
  private:
   // Helper used in constructor.
   static String FormatNodeKeyHex(uint32_t node_id);
@@ -91,18 +131,23 @@ class MeshNode {
   String node_id_str_;   // canonical 8-hex string form, e.g. "10000001"
   String node_key_hex_;  // canonical 8-hex form, e.g. "10000001"
 
-    // Sequence tracking (root-only).
+  // Sequence tracking (root-only).
   bool has_sequence_ = false;
   uint32_t last_seq_ = 0;
   uint32_t last_seq_advance_ms_ = 0;
   uint32_t last_seq_rx_ms_ = 0;
   uint32_t duplicate_sequence_rx_count_ = 0;
 
-
   int bus_gpio_ = -1;
   uint32_t last_update_ms_ = 0;
 
   std::vector<Sensor> sensors_;
+
+  // Per-node UI metadata.
+  // Large default rank means "unspecified / after ranked ones".
+  int32_t tile_rank_ = std::numeric_limits<int32_t>::max();
+  String label_;
+  uint8_t mute_mask_ = 0;  // NodeMuteMask bits
 };
 
 // ---------------------------------------------------------------------------

@@ -66,6 +66,8 @@ class MeshTile {
 
   lv_obj_t* root() const { return root_; }
 
+  void MoveToForeground();
+  
   // Per-tile time-based update. Call once per loop() with millis().
   void Loop(uint32_t now_ms);
 

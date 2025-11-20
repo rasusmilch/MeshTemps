@@ -340,6 +340,14 @@ void MeshTile::ApplyBaseColors() {
   }
 }
 
+void MeshTile::MoveToForeground() {
+  if (root_ != nullptr) {
+    // Reorder within the parent container so flex layout matches
+    // our sorted node order.
+    lv_obj_move_foreground(root_);
+  }
+}
+
 void MeshTile::ApplyFlashPhase(bool flash_on) {
   if (root_ == nullptr) {
     return;

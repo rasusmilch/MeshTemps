@@ -32,6 +32,52 @@ const MeshNode::Sensor* MeshNode::FindSensor(const String& address) const {
   return nullptr;
 }
 
+bool MeshNode::SetSensorLabel(const String& address, const String& label) {
+  Sensor* sensor = FindSensor(address);
+  if (sensor == nullptr) {
+    return false;
+  }
+  sensor->label = label;
+  return true;
+}
+
+String MeshNode::GetSensorLabel(const String& address) const {
+  const Sensor* sensor = FindSensor(address);
+  if (sensor == nullptr) {
+    return String();
+  }
+  return sensor->label;
+}
+
+bool MeshNode::SetSensorGlobalRank(const String& address, int32_t rank) {
+  Sensor* sensor = FindSensor(address);
+  if (sensor == nullptr) {
+    return false;
+  }
+  sensor->global_rank = rank;
+  return true;
+}
+
+bool MeshNode::SetSensorNodeRank(const String& address, int32_t rank) {
+  Sensor* sensor = FindSensor(address);
+  if (sensor == nullptr) {
+    return false;
+  }
+  sensor->node_rank = rank;
+  return true;
+}
+
+int32_t MeshNode::GetSensorEffectiveRank(const String& address) const {
+  const Sensor* sensor = FindSensor(address);
+  if (sensor == nullptr) {
+    return std::numeric_limits<int32_t>::max();
+  }
+  if (sensor->node_rank != std::numeric_limits<int32_t>::max()) {
+    return sensor->node_rank;
+  }
+  return sensor->global_rank;
+}
+
 void MeshNode::SetBusGpioAndLastUpdate(int bus_gpio, uint32_t now_ms) {
   bus_gpio_ = bus_gpio;
   last_update_ms_ = now_ms;
