@@ -1,0 +1,27 @@
+node 16125DD4 "Outdoors" gpio=4 age=0 min:
+  28175E57000000A9 "Crawlspace" : 5.87 (age=0 min)
+  288FE55700000086 "Outside" : 3.81 (age=0 min)
+node 161263D4 "Kitchen" gpio=4 age=0 min:
+  2850DF5500000058 "Room" : 22.50 (age=0 min)
+  288C4F58000000CB "Underbelly" : 14.56 (age=0 min)
+node 16126944 "Nathans Room" gpio=4 age=0 min:
+  28C3D8580000007C "Underbelly" : 16.00 (age=0 min)
+  28A3A8590000005D "Room" : 21.12 (age=0 min)
+node DA762644 "Front Room" gpio=4 age=0 min:
+  28707E5A0000008A "Underbelly" : 12.94 (age=0 min)
+  28788158000000E5 "Room" : 21.75 (age=0 min)
+node DA76268C "Master Bedroom" gpio=4 age=0 min:
+  seq=8132 last_adv=7s last_rx=7s dup_rx=0 stuck=no
+  28AEDC5900000065 "Room" : 21.19 (age=0 min)
+  2861B5590000003C "Underbelly" : 14.25 (age=0 min)
+node DA783168 "Corner Bedroom" gpio=4 age=0 min:
+  28C8B255000000B5 "Underbelly" : 12.37 (age=0 min)
+  28F777570000008B "Room" : 17.00 (age=0 min)
+node E090D8A8 "Kids Room" gpio=4 age=0 min:
+  28C860590000007A "Room" : 21.94 (age=0 min)
+  287F5856000000D8 "Underbelly" : 15.56 (age=0 min)
+Set tile_order[16125DD4] = 1
+DEBUG tile_order now: {"16125DD4":1}
+Saving Labels...
+ok
+ok

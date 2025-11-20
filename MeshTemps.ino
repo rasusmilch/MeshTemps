@@ -57,13 +57,11 @@ bool g_debug_enabled = false;
   } while (0)
 
 // --- Forward decls to satisfy Arduino's auto-prototype pass ---
-class MeshTile;  // Defined in mesh_tile.h (used on ROOT builds)
+class MeshTile; // Defined in mesh_tile.h (used on ROOT builds)
 
 // Avoid Arduino auto-prototype depending on lvgl.h types.
-MeshTile &GetOrCreateTile(const String &node_id_str,
-                          int16_t tile_w,
+MeshTile &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
                           int16_t tile_h);
-
 
 // Forward declarations used on ROOT builds from LogConnections().
 #if MESH_IS_ROOT
@@ -96,7 +94,7 @@ static String JoinTokens(int argc, const String argv[], int start) {
 static void PrintJsonStats(Print &out, const char *name,
                            const JsonDocument &doc) {
 #if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
-  const unsigned usage = 0u;  // v7: memoryUsage() deprecated, returns 0
+  const unsigned usage = 0u; // v7: memoryUsage() deprecated, returns 0
   const bool over = doc.overflowed();
   out.printf("%s: usage=%uB%s\n", name, usage, over ? " (OVERFLOW)" : "");
 #else
@@ -143,9 +141,8 @@ uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
 
 // Flashing (root)
 constexpr uint32_t kDefaultFlashIntervalMs =
-    1000;  // ms between flash toggles; 0 = off
+    1000; // ms between flash toggles; 0 = off
 uint32_t g_flash_interval_ms = kDefaultFlashIntervalMs;
-
 
 // Persistent root prefs.
 Preferences g_root_preferences;
@@ -155,8 +152,8 @@ Preferences g_root_preferences;
 static JsonDocument g_last_seen;
 static JsonDocument g_labels;
 #else
-static StaticJsonDocument<65536> g_last_seen;  // was 32768
-static StaticJsonDocument<8192>  g_labels;
+static StaticJsonDocument<65536> g_last_seen; // was 32768
+static StaticJsonDocument<8192> g_labels;
 #endif
 
 // Mesh tasks.
@@ -177,8 +174,8 @@ constexpr uint32_t kSeqStuckMsThreshold = SEND_PERIOD_MS * 10UL;
 bool g_use_dummy_data = false;
 
 // Tile display toggles (root).
-bool g_show_sensor_labels = true;  // show sensor names in tiles
-bool g_show_age_label = true;      // show "Age: N min" in tiles
+bool g_show_sensor_labels = true; // show sensor names in tiles
+bool g_show_age_label = true;     // show "Age: N min" in tiles
 
 // Temperature limits (in °C, NaN = disabled).
 float g_warn_low_c = 5.0;
@@ -196,8 +193,8 @@ lv_obj_t *g_ui_label_peers = nullptr;
 lv_obj_t *g_ui_label_uptime = nullptr;
 lv_obj_t *g_ui_tile_container = nullptr;
 
-volatile bool g_layout_dirty = false;   // expensive: create/reflow tiles
-volatile bool g_values_dirty = false;   // cheap: rewrite texts/colors only
+volatile bool g_layout_dirty = false; // expensive: create/reflow tiles
+volatile bool g_values_dirty = false; // cheap: rewrite texts/colors only
 
 volatile size_t g_ui_peers = 0;
 
@@ -210,11 +207,10 @@ struct TileEntry {
 
 std::map<String, TileEntry> g_tiles;
 
-void GuiRebuildTiles();  // forward
+void GuiRebuildTiles(); // forward
 
 // Build one tile's Content from g_last_seen + g_labels + thresholds.
-static bool BuildTileContentForNode(const String &node_key_hex,
-                                    uint32_t now_ms,
+static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
                                     bool node_connected,
                                     MeshTile::Content *out);
 
@@ -262,7 +258,8 @@ static void SaveTopoPersistFlag() {
 }
 static void LoadTopoPersistFlag() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  g_topology_persist_enabled = (g_root_preferences.getInt("topo_persist", 1) != 0);
+  g_topology_persist_enabled =
+      (g_root_preferences.getInt("topo_persist", 1) != 0);
   g_root_preferences.end();
 }
 
@@ -449,8 +446,9 @@ static int GetNodeRank(const String &node_id) {
 // --- Topology persistence: fixed-size binary array of node IDs -------------
 constexpr size_t kMaxKnownNodes = 20;
 
-// Read sorted known IDs from NVS ("known_bin") into a vector (<= kMaxKnownNodes).
-static bool ReadKnownFromNVS(std::vector<uint32_t>* out_ids) {
+// Read sorted known IDs from NVS ("known_bin") into a vector (<=
+// kMaxKnownNodes).
+static bool ReadKnownFromNVS(std::vector<uint32_t> *out_ids) {
   out_ids->clear();
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const size_t nbytes = g_root_preferences.getBytesLength("known_bin");
@@ -474,23 +472,22 @@ static bool ReadKnownFromNVS(std::vector<uint32_t>* out_ids) {
 }
 
 // Write sorted IDs to NVS ("known_bin"). Also remove legacy JSON key ("known").
-static void WriteKnownToNVS(const std::vector<uint32_t>& ids_sorted_unique) {
+static void WriteKnownToNVS(const std::vector<uint32_t> &ids_sorted_unique) {
   const size_t count = std::min(ids_sorted_unique.size(), kMaxKnownNodes);
 
   Serial.println(F("[NVS] Saving Known IDs to meshroot/known_bin"));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  (void)g_root_preferences.putBytes("known_bin",
-                                    ids_sorted_unique.data(),
+  (void)g_root_preferences.putBytes("known_bin", ids_sorted_unique.data(),
                                     count * sizeof(uint32_t));
-  g_root_preferences.remove("known");  // stop carrying JSON forever
+  g_root_preferences.remove("known"); // stop carrying JSON forever
   g_root_preferences.end();
 }
-
 
 // Return true if id is already in the persisted set.
 static bool NodeIdKnown(uint32_t id) {
   std::vector<uint32_t> prev;
-  if (!ReadKnownFromNVS(&prev)) return false;
+  if (!ReadKnownFromNVS(&prev))
+    return false;
   return std::binary_search(prev.begin(), prev.end(), id);
 }
 
@@ -500,7 +497,7 @@ static bool NodeIdKnown(uint32_t id) {
 // Returns true if NVS was actually updated (i.e., set changed).
 static bool AddKnownAndPersist(uint32_t id) {
   std::vector<uint32_t> cur;
-  (void)ReadKnownFromNVS(&cur);  // ok if empty
+  (void)ReadKnownFromNVS(&cur); // ok if empty
 
   cur.push_back(id);
   std::sort(cur.begin(), cur.end());
@@ -510,12 +507,12 @@ static bool AddKnownAndPersist(uint32_t id) {
   }
 
   std::vector<uint32_t> prev;
-  (void)ReadKnownFromNVS(&prev);  // ok if empty
+  (void)ReadKnownFromNVS(&prev); // ok if empty
 
   const bool same = (prev.size() == cur.size()) &&
                     std::equal(prev.begin(), prev.end(), cur.begin());
   if (same) {
-    return false;  // no NVS activity
+    return false; // no NVS activity
   }
 
   Serial.printf("[NVS] known topology updated: %u node(s); latest=0x%08lX\n",
@@ -525,8 +522,8 @@ static bool AddKnownAndPersist(uint32_t id) {
   return true;
 }
 
-
-// Rewritten: build current set from g_last_seen, compare with NVS, persist iff different.
+// Rewritten: build current set from g_last_seen, compare with NVS, persist iff
+// different.
 void SaveKnownTopology() {
   if (!g_topology_persist_enabled) {
     return;
@@ -534,30 +531,35 @@ void SaveKnownTopology() {
 
   EnsureDocuments();
   JsonObjectConst nodes_cur = g_last_seen["nodes"].as<JsonObjectConst>();
-  if (nodes_cur.isNull() || nodes_cur.size() == 0) return;  // never persist empty
+  if (nodes_cur.isNull() || nodes_cur.size() == 0)
+    return; // never persist empty
 
   std::vector<uint32_t> cur;
   cur.reserve(std::min<size_t>(nodes_cur.size(), kMaxKnownNodes));
 
   for (JsonPairConst n : nodes_cur) {
-    const char* key = n.key().c_str();
+    const char *key = n.key().c_str();
     uint32_t id = 0;
-    if (!ParseNodeIdToU32(String(key), &id)) continue;
+    if (!ParseNodeIdToU32(String(key), &id))
+      continue;
     cur.push_back(id);
-    if (cur.size() == kMaxKnownNodes) break;
+    if (cur.size() == kMaxKnownNodes)
+      break;
   }
 
-  if (cur.empty()) return;
+  if (cur.empty())
+    return;
 
   std::sort(cur.begin(), cur.end());
   cur.erase(std::unique(cur.begin(), cur.end()), cur.end());
 
   std::vector<uint32_t> prev;
-  (void)ReadKnownFromNVS(&prev);          // ok if empty
+  (void)ReadKnownFromNVS(&prev); // ok if empty
 
   const bool same = (prev.size() == cur.size()) &&
                     std::equal(prev.begin(), prev.end(), cur.begin());
-  if (same) return;
+  if (same)
+    return;
 
   Serial.printf("Updating known topology: %u node(s)\n",
                 static_cast<unsigned>(cur.size()));
@@ -591,19 +593,18 @@ void LoadKnownTopology() {
 
     // Keep the MeshNode model in sync with preseeded topology so that
     // tiles and buzzer logic can rely on MeshNode state.
-    MeshNode* node_model = GetOrCreateMeshNode(id);
+    MeshNode *node_model = GetOrCreateMeshNode(id);
     if (node_model != nullptr) {
       node_model->SetBusGpioAndLastUpdate(-1, now_ms);
     }
   }
 }
 
-
 // Remove persisted topology and clear in-memory nodes.
 void EraseKnownTopology() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.remove("known_bin");
-  g_root_preferences.remove("known");   // legacy
+  g_root_preferences.remove("known"); // legacy
   g_root_preferences.end();
   g_last_seen["nodes"].to<JsonObject>().clear();
 }
@@ -634,19 +635,19 @@ static void RootInitStorage() {
 
 // Node ID canonicalization: accept only hex, with optional "0x"/"0X" prefix.
 // Canonical form for JSON keys: 8-hex, uppercase, no "0x".
-static bool ParseNodeIdToU32(const String& s, uint32_t* out) {
+static bool ParseNodeIdToU32(const String &s, uint32_t *out) {
   if (out == nullptr) {
     return false;
   }
 
-  const char* c = s.c_str();
+  const char *c = s.c_str();
 
   // Skip optional 0x/0X prefix.
   if (s.length() >= 2 && c[0] == '0' && (c[1] == 'x' || c[1] == 'X')) {
     c += 2;
   }
 
-  char* end = nullptr;
+  char *end = nullptr;
   unsigned long value = strtoul(c, &end, 16);
   if (end == c) {
     // No hex digits consumed.
@@ -658,10 +659,10 @@ static bool ParseNodeIdToU32(const String& s, uint32_t* out) {
 }
 
 // Make a stable JSON key for a node id (8-hex, uppercase, no "0x").
-static String CanonNodeHex8(const String& in) {
+static String CanonNodeHex8(const String &in) {
   uint32_t id = 0;
   if (!ParseNodeIdToU32(in, &id)) {
-    return in;  // should not happen for internal keys
+    return in; // should not happen for internal keys
   }
   char buf[9];
   snprintf(buf, sizeof(buf), "%08lX", static_cast<unsigned long>(id));
@@ -674,13 +675,13 @@ static void FormatNodeKey(uint32_t node_id, char *out, size_t out_len) {
 }
 
 // Helper: try reading a value by hex key, then legacy decimal key.
-// NOTE: avoid templates here; Arduino's auto-prototype pass doesn't handle them well.
+// NOTE: avoid templates here; Arduino's auto-prototype pass doesn't handle them
+// well.
 static JsonVariant GetByNodeKeyWithLegacyFallback(JsonObject obj,
-                                                  const String& node_key_hex8) {
+                                                  const String &node_key_hex8) {
   // New behaviour: hex only, no decimal fallbacks.
   return obj[node_key_hex8];
 }
-
 
 // Upper-case canonical form for 16-hex DS18B20 IDs.
 // Keeps only the first 16 chars; caller should validate length elsewhere.
@@ -718,8 +719,7 @@ static int GetSensorRankForNode(const String &node_id, const String &addr16) {
 // Build one tile's Content from MeshNode state + labels + thresholds.
 // Falls back to legacy JSON only if no MeshNode exists (persisted topology
 // that has not yet reported).
-static bool BuildTileContentForNode(const String &node_key_hex,
-                                    uint32_t now_ms,
+static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
                                     bool node_connected,
                                     MeshTile::Content *out) {
   if (out == nullptr) {
@@ -737,16 +737,14 @@ static bool BuildTileContentForNode(const String &node_key_hex,
 
   MeshTile::Content c;
   c.display_fahrenheit = g_display_fahrenheit;
-  c.show_sensor_labels = g_show_sensor_labels;  
-  c.show_age = g_show_age_label;                
+  c.show_sensor_labels = g_show_sensor_labels;
+  c.show_age = g_show_age_label;
 
   // Title: persisted label if present, otherwise formatted node id.
   String title = g_labels["nodes"][node_hex] | "";
   if (title.isEmpty()) {
-    char hex_id[11];  // "0x" + 8-hex + NUL
-    snprintf(hex_id,
-             sizeof(hex_id),
-             "0x%08lX",
+    char hex_id[11]; // "0x" + 8-hex + NUL
+    snprintf(hex_id, sizeof(hex_id), "0x%08lX",
              static_cast<unsigned long>(node_id_u32));
     title = hex_id;
   }
@@ -779,8 +777,7 @@ static bool BuildTileContentForNode(const String &node_key_hex,
   c.is_missing = g_highlight_missing_nodes && !node_connected &&
                  (g_stale_minutes_threshold > 0U) &&
                  (age_min >= g_stale_minutes_threshold);
-  c.is_stale = node_connected &&
-               (g_stale_minutes_threshold > 0U) &&
+  c.is_stale = node_connected && (g_stale_minutes_threshold > 0U) &&
                (age_min >= g_stale_minutes_threshold);
 
   // Sequence health – only meaningful if we have a MeshNode model.
@@ -806,22 +803,20 @@ static bool BuildTileContentForNode(const String &node_key_hex,
         indices.push_back(i);
       }
 
-      std::sort(indices.begin(),
-                indices.end(),
-                [&](size_t ia, size_t ib) {
-                  const String &addr_a = sensors[ia].address;
-                  const String &addr_b = sensors[ib].address;
-                  const int ra = GetSensorRankForNode(node_hex, addr_a);
-                  const int rb = GetSensorRankForNode(node_hex, addr_b);
-                  if (ra != rb) {
-                    return ra < rb;
-                  }
-                  return addr_a < addr_b;
-                });
+      std::sort(indices.begin(), indices.end(), [&](size_t ia, size_t ib) {
+        const String &addr_a = sensors[ia].address;
+        const String &addr_b = sensors[ib].address;
+        const int ra = GetSensorRankForNode(node_hex, addr_a);
+        const int rb = GetSensorRankForNode(node_hex, addr_b);
+        if (ra != rb) {
+          return ra < rb;
+        }
+        return addr_a < addr_b;
+      });
 
       for (size_t idx : indices) {
         if (sv_count >= 2) {
-          break;  // only two sensor rows per tile
+          break; // only two sensor rows per tile
         }
 
         const MeshNode::Sensor &sensor = sensors[idx];
@@ -842,10 +837,8 @@ static bool BuildTileContentForNode(const String &node_key_hex,
           const float t = sv.temp_c;
 
           // Alerts (respect node mute).
-          bool low_alert =
-              (!isnan(g_alert_low_c) && t < g_alert_low_c);
-          bool high_alert =
-              (!isnan(g_alert_high_c) && t > g_alert_high_c);
+          bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
+          bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
           if (low_alert && (node_mute & kMuteLow)) {
             low_alert = false;
           }
@@ -856,10 +849,8 @@ static bool BuildTileContentForNode(const String &node_key_hex,
 
           // Warnings only if not already alert (respect mute).
           if (!sv.is_alert) {
-            bool low_warn =
-                (!isnan(g_warn_low_c) && t < g_warn_low_c);
-            bool high_warn =
-                (!isnan(g_warn_high_c) && t > g_warn_high_c);
+            bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
+            bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
             if (low_warn && (node_mute & kMuteLow)) {
               low_warn = false;
             }
@@ -900,7 +891,6 @@ static bool BuildTileContentForNode(const String &node_key_hex,
   *out = c;
   return true;
 }
-
 
 // Find the [start,end) span (0-based token index) of a whitespace-delimited
 // token.
@@ -1047,14 +1037,14 @@ void DisplayInit() {
     if (lcd != nullptr) {
       lcd->configFrameBufferNumber(LVGL_PORT_DISP_BUFFER_NUM);
 
-#if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
-      auto *bus = lcd->getBus();
-      if (bus != nullptr &&
-          bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
-        static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(
-            lcd->getFrameWidth() * 10);
-      }
-#endif
+      // #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
+      //       auto *bus = lcd->getBus();
+      //       if (bus != nullptr &&
+      //           bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
+      //         static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(
+      //             lcd->getFrameWidth() * 20);
+      //       }
+      // #endif
     }
   }
 #endif // LVGL_PORT_AVOID_TEARING_MODE
@@ -1151,19 +1141,20 @@ void GuiInit() {
   // Ensure the bar is always drawn on top of tiles.
   lv_obj_move_foreground(bar);
 
-  g_layout_dirty = true;   // first time needs a full build
+  g_layout_dirty = true; // first time needs a full build
 
   lvgl_port_unlock();
 }
 
 // Called when node metadata changes.
-void GuiUpdateNodeSummary(const char*, int, uint32_t) {
-  g_values_dirty = true;   // no layout
+void GuiUpdateNodeSummary(const char *, int, uint32_t) {
+  g_values_dirty = true; // no layout
 }
 
 // Called when sensor data changes.
-void GuiUpdateSensorRow(const char*, const char*, float, const char*, uint32_t) {
-  g_values_dirty = true;   // no layout
+void GuiUpdateSensorRow(const char *, const char *, float, const char *,
+                        uint32_t) {
+  g_values_dirty = true; // no layout
 }
 
 void UpdateUptimeLabel() {
@@ -1216,10 +1207,9 @@ static void BuildDummyData() {
     JsonObject sensors = node["sensors"].to<JsonObject>();
 
     // Domain model node.
-    MeshNode* node_model = GetOrCreateMeshNode(node_id);
+    MeshNode *node_model = GetOrCreateMeshNode(node_id);
     if (node_model != nullptr) {
-      node_model->SetBusGpioAndLastUpdate(-1,
-                                          static_cast<uint32_t>(now_ms));
+      node_model->SetBusGpioAndLastUpdate(-1, static_cast<uint32_t>(now_ms));
     }
 
     for (int s = 1; s <= 2; ++s) {
@@ -1231,14 +1221,13 @@ static void BuildDummyData() {
       sensor["ageMin"] = 0;
       sensor["corr"] = false;
 
-      const float temp_c =
-          base_c + static_cast<float>((i - 1) * 2 + s - 1);
+      const float temp_c = base_c + static_cast<float>((i - 1) * 2 + s - 1);
       sensor["tC"] = temp_c;
       sensor["last"] = static_cast<uint32_t>(now_ms);
 
       // Mirror into MeshNode.
       if (node_model != nullptr) {
-        MeshNode::Sensor* sensor_model =
+        MeshNode::Sensor *sensor_model =
             node_model->GetOrCreateSensor(String(addr));
         if (sensor_model != nullptr) {
           sensor_model->temp_c = temp_c;
@@ -1265,8 +1254,7 @@ void BuzzerBeepOnce() {
   DLOG("[BUZZER] Beep\n");
 }
 
-MeshTile &GetOrCreateTile(const String &node_id_str,
-                          int16_t tile_w,
+MeshTile &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
                           int16_t tile_h) {
   auto it = g_tiles.find(node_id_str);
   if (it != g_tiles.end() && it->second.tile != nullptr) {
@@ -1289,7 +1277,6 @@ MeshTile &GetOrCreateTile(const String &node_id_str,
 // ---------------------------------------------------------------------------
 // Update just the "Age: N min" labels and stale/missing state.
 // No layout work, no object (re)creation.
-
 static void GuiAgeTick(uint32_t now_ms) {
   EnsureDocuments();
   JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
@@ -1338,14 +1325,12 @@ static void GuiAgeTick(uint32_t now_ms) {
     const bool is_missing = g_highlight_missing_nodes && !node_connected &&
                             (g_stale_minutes_threshold > 0U) &&
                             (age_min >= g_stale_minutes_threshold);
-    const bool is_stale = node_connected &&
-                          (g_stale_minutes_threshold > 0U) &&
+    const bool is_stale = node_connected && (g_stale_minutes_threshold > 0U) &&
                           (age_min >= g_stale_minutes_threshold);
 
     tile->SetAgeOnly(age_min, is_missing, is_stale);
   }
 }
-
 
 // NEW: cheap refresh used on most updates (no object creation)
 static void GuiRefreshValues(uint32_t now_ms) {
@@ -1367,9 +1352,7 @@ static void GuiRefreshValues(uint32_t now_ms) {
   // Peers label.
   if (g_ui_label_peers != nullptr) {
     char buffer[32];
-    snprintf(buffer,
-             sizeof(buffer),
-             "Peers: %u",
+    snprintf(buffer, sizeof(buffer), "Peers: %u",
              static_cast<unsigned>(g_ui_peers));
     lv_label_set_text(g_ui_label_peers, buffer);
   }
@@ -1395,9 +1378,7 @@ static void GuiRefreshValues(uint32_t now_ms) {
     }
 
     MeshTile::Content content;
-    if (!BuildTileContentForNode(node_key_hex,
-                                 now_ms,
-                                 node_connected,
+    if (!BuildTileContentForNode(node_key_hex, now_ms, node_connected,
                                  &content)) {
       continue;
     }
@@ -1439,8 +1420,7 @@ void GuiRebuildTiles() {
   const lv_coord_t screen_w = lv_obj_get_width(lv_scr_act());
   const int columns = (screen_w >= 640) ? 3 : 2;
   const lv_coord_t gap = 6;
-  const lv_coord_t tile_w =
-      (screen_w - (columns + 1) * gap) / columns;
+  const lv_coord_t tile_w = (screen_w - (columns + 1) * gap) / columns;
   const lv_coord_t tile_h = 100;
 
   g_any_warning = false;
@@ -1449,9 +1429,7 @@ void GuiRebuildTiles() {
   // Update peers label while we're here.
   if (g_ui_label_peers != nullptr) {
     char buffer[32];
-    snprintf(buffer,
-             sizeof(buffer),
-             "Peers: %u",
+    snprintf(buffer, sizeof(buffer), "Peers: %u",
              static_cast<unsigned>(g_ui_peers));
     lv_label_set_text(g_ui_label_peers, buffer);
   }
@@ -1463,8 +1441,7 @@ void GuiRebuildTiles() {
     node_ids.emplace_back(e.key().c_str());
   }
 
-  std::sort(node_ids.begin(),
-            node_ids.end(),
+  std::sort(node_ids.begin(), node_ids.end(),
             [&](const String &a, const String &b) {
               const int ra = GetNodeRank(a);
               const int rb = GetNodeRank(b);
@@ -1493,9 +1470,7 @@ void GuiRebuildTiles() {
     }
 
     MeshTile::Content content;
-    if (!BuildTileContentForNode(node_key_hex,
-                                 now_ms,
-                                 node_connected,
+    if (!BuildTileContentForNode(node_key_hex, now_ms, node_connected,
                                  &content)) {
       continue;
     }
@@ -1510,26 +1485,7 @@ void GuiRebuildTiles() {
       g_any_warning = true;
     }
   }
-
-  // After updating content, reorder the LVGL tile objects inside the
-  // container to match the sorted node_ids order. Otherwise the visual
-  // layout stays in original creation order and norder appears ineffective.
-  for (size_t i = 0; i < node_ids.size(); ++i) {
-    const String& node_key_hex = node_ids[i];
-    auto it = g_tiles.find(node_key_hex);
-    if (it == g_tiles.end() || it->second.tile == nullptr) {
-      continue;
-    }
-    MeshTile* tile = it->second.tile;
-    lv_obj_t* root = tile->root();
-    if (root != nullptr) {
-      lv_obj_move_to_index(root,
-                           static_cast<uint32_t>(i));  // 0-based index
-    }
-  }
-
 }
-
 
 // -----------------------------------------------------------------------------
 // GUI helpers callable from elsewhere
@@ -1537,7 +1493,7 @@ void GuiRebuildTiles() {
 
 void GuiUpdateNetwork(size_t peers) {
   g_ui_peers = peers;
-  g_values_dirty = true;   // label text only
+  g_values_dirty = true; // label text only
 }
 
 // CHANGED
@@ -1568,15 +1524,14 @@ void DisplayLoop() {
   }
 
   // Layout / content refresh throttled to avoid hammering LVGL.
-  if ((g_layout_dirty || g_values_dirty) &&
-      (now_ms - last_build_ms >= 50U)) {
+  if ((g_layout_dirty || g_values_dirty) && (now_ms - last_build_ms >= 50U)) {
     if (g_layout_dirty) {
       g_layout_dirty = false;
-      GuiRebuildTiles();         // heavy path, rare
-      g_values_dirty = false;    // rebuilding already refreshed content
+      GuiRebuildTiles();      // heavy path, rare
+      g_values_dirty = false; // rebuilding already refreshed content
     } else if (g_values_dirty) {
       g_values_dirty = false;
-      GuiRefreshValues(now_ms);  // cheap path, frequent
+      GuiRefreshValues(now_ms); // cheap path, frequent
     }
     last_build_ms = now_ms;
   }
@@ -1659,7 +1614,7 @@ static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
   if (argc >= 2 && argv[1] == "erase") {
     g_root_preferences.begin("meshroot", false);
     g_root_preferences.remove("known_bin");
-    g_root_preferences.remove("known");  // legacy
+    g_root_preferences.remove("known"); // legacy
     g_root_preferences.end();
     out.println(F("known erased"));
     return;
@@ -1688,9 +1643,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
       any = true;
       const String key_hex = CanonNodeHex8(p.key().c_str());
       const uint8_t mask = static_cast<uint8_t>(p.value().as<int>()) & 0x3;
-      out.printf("%s : %s\n",
-                 key_hex.c_str(),
-                 NodeMuteMaskToString(mask));
+      out.printf("%s : %s\n", key_hex.c_str(), NodeMuteMaskToString(mask));
     }
     if (!any) {
       out.println(F("(empty)"));
@@ -1710,16 +1663,16 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
     FormatNodeKey(id_u32, key, sizeof(key));
     const String node_hex(key);
     const uint8_t mask = GetNodeMuteMask(node_hex);
-    out.printf("0x%08lX : %s\n",
-               static_cast<unsigned long>(id_u32),
+    out.printf("0x%08lX : %s\n", static_cast<unsigned long>(id_u32),
                NodeMuteMaskToString(mask));
     return;
   }
 
   // mute <nodeIdHex> off|low|high|both
   if (argc < 3) {
-    out.println(F("ERR mute (use: mute <nodeIdHex> off|low|high|both | mute get "
-                  "<nodeIdHex> | mute list)"));
+    out.println(
+        F("ERR mute (use: mute <nodeIdHex> off|low|high|both | mute get "
+          "<nodeIdHex> | mute list)"));
     return;
   }
 
@@ -1751,12 +1704,10 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
 
   m[node_hex] = static_cast<int>(mask);
   SaveLabels();
-  out.printf("mute 0x%08lX=%s\n",
-             static_cast<unsigned long>(id_u32),
+  out.printf("mute 0x%08lX=%s\n", static_cast<unsigned long>(id_u32),
              NodeMuteMaskToString(mask));
   GuiRequestRender();
 }
-
 
 static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -1779,9 +1730,10 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
       continue;
     }
 
-    const String node_hex = node->node_key_hex();  // 8-hex canonical id
+    const String node_hex = node->node_key_hex(); // 8-hex canonical id
 
-    // Node label can be either a plain string or an object (e.g. { "node": "..." }).
+    // Node label can be either a plain string or an object (e.g. { "node":
+    // "..." }).
     String node_label;
     {
       JsonVariant v = g_labels["nodes"][node_hex];
@@ -1798,15 +1750,11 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
     const int bus_gpio = node->bus_gpio();
 
     if (node_label.length() > 0) {
-      out.printf("node %s \"%s\" gpio=%d age=%lu min:\n",
-                 node_hex.c_str(),
-                 node_label.c_str(),
-                 bus_gpio,
+      out.printf("node %s \"%s\" gpio=%d age=%lu min:\n", node_hex.c_str(),
+                 node_label.c_str(), bus_gpio,
                  static_cast<unsigned long>(age_min));
     } else {
-      out.printf("node %s gpio=%d age=%lu min:\n",
-                 node_hex.c_str(),
-                 bus_gpio,
+      out.printf("node %s gpio=%d age=%lu min:\n", node_hex.c_str(), bus_gpio,
                  static_cast<unsigned long>(age_min));
     }
 
@@ -1826,15 +1774,15 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
         since_rx_s = (now_ms - last_rx_ms) / 1000U;
       }
 
-      const bool stuck =
-          node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
+      const bool stuck = node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
 
-      out.printf("  seq=%lu last_adv=%lus last_rx=%lus dup_rx=%lu stuck=%s\n",
-                 static_cast<unsigned long>(seq),
-                 static_cast<unsigned long>(since_adv_s),
-                 static_cast<unsigned long>(since_rx_s),
-                 static_cast<unsigned long>(node->duplicate_sequence_rx_count()),
-                 stuck ? "YES" : "no");
+      out.printf(
+          "  seq=%lu last_adv=%lus last_rx=%lus dup_rx=%lu stuck=%s\n",
+          static_cast<unsigned long>(seq),
+          static_cast<unsigned long>(since_adv_s),
+          static_cast<unsigned long>(since_rx_s),
+          static_cast<unsigned long>(node->duplicate_sequence_rx_count()),
+          stuck ? "YES" : "no");
     }
 
     // Sensors for this node.
@@ -1861,17 +1809,13 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
       }
 
       if (sensor_label.length() > 0) {
-        out.printf("  %s \"%s\" : %s%s (age=%lu min)\n",
-                   addr16.c_str(),
-                   sensor_label.c_str(),
-                   temp_s.c_str(),
+        out.printf("  %s \"%s\" : %s%s (age=%lu min)\n", addr16.c_str(),
+                   sensor_label.c_str(), temp_s.c_str(),
                    sensor.corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       } else {
-        out.printf("  %s : %s%s (age=%lu min)\n",
-                   addr16.c_str(),
-                   temp_s.c_str(),
-                   sensor.corrected ? " (corr)" : "",
+        out.printf("  %s : %s%s (age=%lu min)\n", addr16.c_str(),
+                   temp_s.c_str(), sensor.corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       }
     }
@@ -1884,7 +1828,6 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
 
   GuiRequestRender();
 }
-
 
 static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -1915,14 +1858,16 @@ static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
 
   // node <idHex> <label...>
   if (argc < 3) {
-    out.println(F("ERR node (usage: node <idHex> <label...> | node rm <idHex>)"));
+    out.println(
+        F("ERR node (usage: node <idHex> <label...> | node rm <idHex>)"));
     return;
   }
 
   // Reconstruct the original line to reuse the common label extractor.
   String line;
   for (int i = 0; i < argc; ++i) {
-    if (i) line += ' ';
+    if (i)
+      line += ' ';
     line += argv[i];
   }
 
@@ -1946,7 +1891,6 @@ static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ok"));
   GuiRequestRender();
 }
-
 
 static void CmdNodes(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2018,7 +1962,6 @@ static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
   g_root_preferences.end();
   out.printf("known_bin NVS size=%u bytes\n",
              static_cast<unsigned>(known_bytes));
-
 }
 
 static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
@@ -2034,8 +1977,7 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
       return;
     }
 
-    out.printf("nodes=%u\n",
-               static_cast<unsigned>(ids.size()));
+    out.printf("nodes=%u\n", static_cast<unsigned>(ids.size()));
 
     for (uint32_t id : ids) {
       MeshNode *node = FindMeshNode(id);
@@ -2051,13 +1993,12 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
 
       const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
 
-      out.printf("node 0x%08lX : age=%lu min (~%lu s since update) "
-                 "gpio=%d sensors=%u\n",
-                 static_cast<unsigned long>(id),
-                 static_cast<unsigned long>(age_min),
-                 static_cast<unsigned long>(since_update_ms / 1000U),
-                 node->bus_gpio(),
-                 static_cast<unsigned>(node->sensors().size()));
+      out.printf(
+          "node 0x%08lX : age=%lu min (~%lu s since update) "
+          "gpio=%d sensors=%u\n",
+          static_cast<unsigned long>(id), static_cast<unsigned long>(age_min),
+          static_cast<unsigned long>(since_update_ms / 1000U), node->bus_gpio(),
+          static_cast<unsigned>(node->sensors().size()));
 
       // Sequence diagnostics.
       if (!node->has_sequence()) {
@@ -2087,8 +2028,7 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
                  static_cast<unsigned long>(seq),
                  static_cast<unsigned long>(since_adv_ms / 1000U),
                  static_cast<unsigned long>(since_rx_ms / 1000U),
-                 static_cast<unsigned long>(dup_count),
-                 stuck ? "YES" : "no");
+                 static_cast<unsigned long>(dup_count), stuck ? "YES" : "no");
     }
     return;
   }
@@ -2162,8 +2102,7 @@ static void CmdLabels(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
 
   if (argc < 3) {
-    out.printf("labels sensor=%s age=%s\n",
-               g_show_sensor_labels ? "on" : "off",
+    out.printf("labels sensor=%s age=%s\n", g_show_sensor_labels ? "on" : "off",
                g_show_age_label ? "on" : "off");
     out.println(F("usage: labels sensor on|off | labels age on|off"));
     return;
@@ -2182,20 +2121,18 @@ static void CmdLabels(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  if (target.equalsIgnoreCase("sensor") ||
-      target.equalsIgnoreCase("sensors")) {
+  if (target.equalsIgnoreCase("sensor") || target.equalsIgnoreCase("sensors")) {
     g_show_sensor_labels = enable;
   } else if (target.equalsIgnoreCase("age")) {
     g_show_age_label = enable;
   } else {
-    out.println(F("ERR labels (use 'labels sensor on|off' or 'labels age on|off')"));
+    out.println(
+        F("ERR labels (use 'labels sensor on|off' or 'labels age on|off')"));
     return;
   }
 
   SaveTileDisplaySettings();
-  out.printf("labels %s=%s\n",
-             target.c_str(),
-             enable ? "on" : "off");
+  out.printf("labels %s=%s\n", target.c_str(), enable ? "on" : "off");
   GuiRequestRender();
 }
 
@@ -2221,7 +2158,6 @@ static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
   }
 }
-
 
 static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2265,7 +2201,7 @@ static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
                 "'limits alert <lo> <hi>')"));
 }
 
-static void CmdTopo(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc < 2) {
     out.println(F("topo cmds:\n"
@@ -2279,7 +2215,8 @@ static void CmdTopo(void* ctx, int argc, const String argv[], Print& out) {
   const String sub = argv[1];
 
   if (sub == "show") {
-    std::vector<uint32_t> ids; (void)ReadKnownFromNVS(&ids);
+    std::vector<uint32_t> ids;
+    (void)ReadKnownFromNVS(&ids);
     out.printf("topo persist=%s, persisted_count=%u\n",
                g_topology_persist_enabled ? "on" : "off",
                static_cast<unsigned>(ids.size()));
@@ -2356,9 +2293,9 @@ static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   if (argv[1].equalsIgnoreCase("off")) {
-    g_flash_interval_ms = 0;        // turn off
+    g_flash_interval_ms = 0; // turn off
     SaveFlashSettings();
-    g_values_dirty = true;          // propagate to tiles
+    g_values_dirty = true; // propagate to tiles
     out.println(F("flash off"));
     return;
   }
@@ -2369,9 +2306,11 @@ static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  g_flash_interval_ms = static_cast<uint32_t>(interval_ms);  // enable with interval
+  g_flash_interval_ms =
+      static_cast<uint32_t>(interval_ms); // enable with interval
   SaveFlashSettings();
-  g_values_dirty = true;  // next refresh will update all tiles' per-tile interval
+  g_values_dirty =
+      true; // next refresh will update all tiles' per-tile interval
 
   out.printf("flash interval=%lu ms (%s)\n",
              static_cast<unsigned long>(g_flash_interval_ms),
@@ -2421,9 +2360,7 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
 
   if (argc >= 2 && argv[1] == "list") {
     for (JsonPair p : ord) {
-      out.printf("%s : %d\n",
-                 p.key().c_str(),
-                 p.value().as<int>());
+      out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
     }
     out.println(F("ok"));
     return;
@@ -2454,8 +2391,17 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
     FormatNodeKey(id_u32, key, sizeof(key));
     const int rank = argv[2].toInt();
     ord[String(key)] = rank;
+    out.printf("Set tile_order[%s] = %d\n", key, rank);
+
+    // DEBUG: dump tile_order immediately
+    {
+      String dbg;
+      serializeJson(g_labels["tile_order"], dbg);
+      out.printf("DEBUG tile_order now: %s\n", dbg.c_str());
+    }
     SaveLabels();
     out.println(F("ok"));
+    g_layout_dirty = true;
     GuiRequestRender();
     return;
   }
@@ -2463,7 +2409,6 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ERR norder (use 'norder <nodeIdHex> <rank>' | 'norder clear "
                 "<nodeIdHex>' | 'norder list')"));
 }
-
 
 static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2480,9 +2425,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
         bool any = false;
         for (JsonPair p : m) {
           any = true;
-          out.printf("%s : %d\n",
-                     p.key().c_str(),
-                     p.value().as<int>());
+          out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
         }
         if (!any)
           out.println(F("(empty)"));
@@ -2498,9 +2441,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
       bool any = false;
       for (JsonPair p : m) {
         any = true;
-        out.printf("  %s : %d\n",
-                   p.key().c_str(),
-                   p.value().as<int>());
+        out.printf("  %s : %d\n", p.key().c_str(), p.value().as<int>());
       }
       if (!any)
         out.println(F("  (empty)"));
@@ -2546,10 +2487,10 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  out.println(F("ERR sorder (use 'sorder <nodeIdHex> <addr16> <rank>' | 'sorder "
-                "clear <nodeIdHex> <addr16>' | 'sorder list [nodeIdHex]')"));
+  out.println(
+      F("ERR sorder (use 'sorder <nodeIdHex> <addr16> <rank>' | 'sorder "
+        "clear <nodeIdHex> <addr16>' | 'sorder list [nodeIdHex]')"));
 }
-
 
 // -----------------------------------------------------------------------------
 // Root announce and console
@@ -2574,11 +2515,8 @@ void RootAnnounce() {
 void OnReceiveRoot(uint32_t from, String &msg) {
   bool structure_changed = false;
 
-  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n",
-       static_cast<unsigned long>(from),
-       static_cast<unsigned>(msg.length()),
-       msg.c_str());
-
+  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
+       static_cast<unsigned>(msg.length()), msg.c_str());
 
   if (g_use_dummy_data) {
     // In dummy mode, ignore real traffic to keep UI deterministic.
@@ -2610,8 +2548,7 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   const int bus_gpio = node_model->bus_gpio();
 
   DLOG("  nodeId=0x%08lX busGpio=%d sensors=%u\n",
-       static_cast<unsigned long>(node_id),
-       bus_gpio,
+       static_cast<unsigned long>(node_id), bus_gpio,
        static_cast<unsigned>(node_model->sensors().size()));
 
   // 2) Topology persistence: add/update known IDs based on the MeshNode id.
@@ -2649,22 +2586,18 @@ void OnReceiveRoot(uint32_t from, String &msg) {
     sensor_out["last"] = sensor.last_ms;
   }
 
-  GuiUpdateNodeSummary(node_model->node_id_str().c_str(),
-                       bus_gpio,
-                       now_ms);
+  GuiUpdateNodeSummary(node_model->node_id_str().c_str(), bus_gpio, now_ms);
 
   // 4) Choose cheapest refresh path.
   if (structure_changed) {
-    g_layout_dirty = true;   // rebuild tiles (rare)
+    g_layout_dirty = true; // rebuild tiles (rare)
   } else {
-    g_values_dirty = true;   // just rewrite texts/colors
+    g_values_dirty = true; // just rewrite texts/colors
   }
 
   if (g_last_seen.overflowed()) {
     Serial.println(F("[WARN] g_last_seen overflow; increase capacity"));
   }
-
-  GuiRequestRender();
 }
 
 void OnConnectionsChangedRoot() {
@@ -2707,8 +2640,11 @@ void OnConnectionsChangedRoot() {
       node_model->SetBusGpioAndLastUpdate(-1, now_ms);
     }
 
+    // Do not delete nodes; they age out visually.
     if (structure_changed) {
-      g_layout_dirty = true;
+      g_layout_dirty = true; // new node(s) appeared → layout rebuild
+    } else {
+      g_values_dirty = true; // pure connection changes → value refresh only
     }
   }
 
@@ -2767,7 +2703,7 @@ void setup() {
   g_console.RegisterCommand("stats", &CmdStats, "json usage + known size");
   g_console.RegisterCommand("known", &CmdKnown, "known [erase|show]");
   g_console.RegisterCommand("topo", &CmdTopo,
-  "topo show|on|off|save|load|clear");
+                            "topo show|on|off|save|load|clear");
   g_console.RegisterCommand("labels", &CmdLabels,
                             "labels sensor on|off | labels age on|off");
 
@@ -3421,15 +3357,14 @@ static void CmdBoilPt(void *ctx, int argc, const String argv[], Print &out) {
              (double)inHg, (double)TbC, (double)TbF);
 }
 
-static void CmdWhoAmI(void*, int, const String[], Print& out) {
+static void CmdWhoAmI(void *, int, const String[], Print &out) {
   const uint32_t node = mesh.getNodeId();
-  const uint64_t mac  = ESP.getEfuseMac();  // base MAC from eFuse
+  const uint64_t mac = ESP.getEfuseMac(); // base MAC from eFuse
   out.printf("nodeId: 0x%08lX\n", static_cast<unsigned long>(node));
   out.printf("baseMAC: %04X%08lX\n",
              static_cast<unsigned>((mac >> 32) & 0xFFFFu),
              static_cast<unsigned long>(mac & 0xFFFFFFFFul));
 }
-
 
 static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -3526,11 +3461,8 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
 
 // painlessMesh callbacks (leaf).
 void OnReceiveLeaf(uint32_t from, String &msg) {
-  DLOG("[LEAF RX] from=0x%08lX len=%u: %s\n",
-       static_cast<unsigned long>(from),
-       static_cast<unsigned>(msg.length()),
-       msg.c_str());
-
+  DLOG("[LEAF RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
+       static_cast<unsigned>(msg.length()), msg.c_str());
 
   JsonDocument doc;
   if (deserializeJson(doc, msg) != DeserializationError::Ok) {
@@ -3546,7 +3478,6 @@ void OnReceiveLeaf(uint32_t from, String &msg) {
       g_root_last_seen_ms = millis();
       DLOG("  root_announce: rootId=0x%08lX\n",
            static_cast<unsigned long>(g_root_id));
-
     }
   }
 }
