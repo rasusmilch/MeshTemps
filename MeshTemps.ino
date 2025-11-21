@@ -1645,7 +1645,20 @@ void GuiRequestRender() { g_layout_dirty = true; }
 void DisplayLoop() {
   static uint32_t last_build_ms = 0;
   static uint32_t last_minute_ms = 0;
+
+  // NEW: debug – detect long gaps between DisplayLoop calls.
+  static uint32_t last_loop_ms = 0;
   const uint32_t now_ms = millis();
+
+  if (g_debug_enabled && last_loop_ms != 0) {
+    const uint32_t delta = now_ms - last_loop_ms;
+    // Tweak threshold as desired; 300 ms will catch obvious hiccups.
+    if (delta > 300U) {
+      Serial.printf("[DisplayLoop] gap=%lu ms\n",
+                    static_cast<unsigned long>(delta));
+    }
+  }
+  last_loop_ms = now_ms;
 
   if (!lvgl_port_lock(-1)) {
     return;
@@ -1670,14 +1683,12 @@ void DisplayLoop() {
     last_build_ms = now_ms;
   }
 
-  // Drive per-tile time-based behaviour (flashing) using each tile's own
-  // timers and internal state.
   MeshTile::LoopAll(now_ms);
 
-  // Uptime label updated at least once per minute; harmless to refresh here.
   UpdateUptimeLabel();
   lvgl_port_unlock();
 }
+
 
 
 void BuzzerLoop() {
@@ -3688,11 +3699,10 @@ static void CmdWhoAmI(void *ctx, int argc, const String argv[], Print &out) {
              static_cast<unsigned long>(mac & 0xFFFFFFFFul));
 }
 
-
 static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
-  
+
   if (argc < 2) {
     out.println(F("cal cmds:\n"
                   "  cal ice [addr16]\n"

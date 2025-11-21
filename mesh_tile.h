@@ -107,9 +107,13 @@ class MeshTile {
   void UpdateBaseColors();
   void UpdateTextsAndLayout();
   void ApplyBaseColors();
-  void ApplyFlashColors(bool flash_active);
   void MoveToForeground();
+
+  // Legacy global flash hook (if something still calls ApplyFlashPhase).
   void ApplyFlashPhase(bool flash_on);
+
+  // New per-tile flashing implementation.
+  void UpdateFlashAppearance();
 
   String node_key_hex_;  // 8-hex node id this tile is tied to.
 
@@ -127,9 +131,12 @@ class MeshTile {
   lv_color_t fg_flash_;
   lv_color_t sensor_color_[2];
 
+  // State for content + flashing.
+  bool has_content_ = false;
   bool last_flash_active_ = false;
   uint32_t flash_interval_ms_ = 0;
   uint32_t last_flash_toggle_ms_ = 0;
+  bool flash_on_ = false;
 };
 
 #endif  // MESH_TILE_H_

@@ -1,9 +1,17 @@
 #include "mesh_tile.h"
-
 #include <map>
+#include <Arduino.h>   // NEW
+
+extern bool g_debug_enabled;  // defined in MeshTemps.ino
+
 
 // Anonymous namespace for the registry backing store.
 namespace {
+
+static lv_color_t MakeColor(uint8_t r, uint8_t g, uint8_t b) {
+  // For LVGL this is just a thin wrapper; adjust if you ever change color depth.
+  return lv_color_make(r, g, b);
+}
 
 std::map<String, MeshTile*>& TileRegistry() {
   // Lazy init to avoid static initialization order issues.
@@ -182,6 +190,9 @@ void MeshTile::SetContent(const Content& content) {
     content_.sensor_count = 2;
   }
 
+  // We've now got valid content for this tile.
+  has_content_ = true;
+
   // Recompute base palette + texts/layout from the new content.
   UpdateBaseColors();
   UpdateTextsAndLayout();
@@ -191,6 +202,7 @@ void MeshTile::SetContent(const Content& content) {
     ApplyBaseColors();
   }
 }
+
 
 void MeshTile::SetAgeOnly(uint32_t age_minutes,
                           bool is_missing,
@@ -495,15 +507,11 @@ void MeshTile::ApplyFlashPhase(bool flash_on) {
 
 void MeshTile::SetFlashIntervalMs(uint32_t interval_ms) {
   flash_interval_ms_ = interval_ms;
-
-  if (flash_interval_ms_ == 0U) {
-    // Flashing disabled: reset phase and ensure base colors are visible.
-    last_flash_toggle_ms_ = 0U;
-    if (last_flash_active_) {
-      ApplyFlashPhase(false);
-    }
-  }
+  last_flash_toggle_ms_ = 0;
+  flash_on_ = false;
+  UpdateFlashAppearance();
 }
+
 
 void MeshTile::EnsureChildIndex(uint32_t desired_index) {
   if (root_ == nullptr) {
@@ -524,36 +532,97 @@ void MeshTile::EnsureChildIndex(uint32_t desired_index) {
   lv_obj_move_to_index(root_, static_cast<lv_coord_t>(desired_index));
 }
 
+void MeshTile::UpdateFlashAppearance() {
+  if (root_ == nullptr) {
+    return;
+  }
 
-// Per-tile time-based update. Call this once per main loop with millis().
-void MeshTile::Loop(uint32_t now_ms) {
-  const bool flashable =
-      content_.node_has_alert || content_.node_has_warning;
+  // Base background color.
+  lv_color_t bg = MakeColor(0x30, 0x30, 0x30);
 
-  // If this tile should not flash, or flashing is disabled, stay in base
-  // colors and clear timing state.
-  if (!flashable || flash_interval_ms_ == 0U) {
-    if (last_flash_active_) {
-      ApplyFlashPhase(false);
+  if (content_.is_missing) {
+    bg = MakeColor(0x20, 0x20, 0x20);
+  } else if (content_.is_stale) {
+    bg = MakeColor(0x30, 0x28, 0x20);
+  }
+
+  const bool has_severity =
+      content_.node_has_alert ||
+      content_.node_has_warning ||
+      content_.seq_stuck;
+
+  // If flashing is disabled or no severity, just set a steady color.
+  if (!has_severity || flash_interval_ms_ == 0U) {
+    if (content_.node_has_alert) {
+      bg = MakeColor(0x60, 0x10, 0x10);
+    } else if (content_.node_has_warning || content_.seq_stuck) {
+      bg = MakeColor(0x40, 0x30, 0x10);
     }
-    last_flash_toggle_ms_ = 0U;
+    lv_obj_set_style_bg_color(root_, bg, 0);
+    return;
+  }
+
+  // Flashing enabled: alternate between bright and base severity color.
+  if (flash_on_) {
+    if (content_.node_has_alert) {
+      lv_obj_set_style_bg_color(root_, MakeColor(0xFF, 0x40, 0x40), 0);
+    } else {
+      // Warning / seq_stuck.
+      lv_obj_set_style_bg_color(root_, MakeColor(0xFF, 0xA0, 0x40), 0);
+    }
+  } else {
+    if (content_.node_has_alert) {
+      bg = MakeColor(0x60, 0x10, 0x10);
+    } else if (content_.node_has_warning || content_.seq_stuck) {
+      bg = MakeColor(0x40, 0x30, 0x10);
+    }
+    lv_obj_set_style_bg_color(root_, bg, 0);
+  }
+}
+
+
+void MeshTile::Loop(uint32_t now_ms) {
+  if (!has_content_ || root_ == nullptr) {
+    return;
+  }
+
+  const bool has_severity =
+      content_.node_has_alert ||
+      content_.node_has_warning ||
+      content_.seq_stuck;
+
+  // If there is nothing to flash, make sure we are in steady appearance.
+  if (!has_severity || flash_interval_ms_ == 0U) {
+    if (flash_on_) {
+      flash_on_ = false;
+      UpdateFlashAppearance();
+    }
     return;
   }
 
   if (last_flash_toggle_ms_ == 0U) {
-    // First time we notice this tile is flashable; start the timer but do not
-    // immediately flip phase.
+    // First time: arm the timer but do not toggle yet.
     last_flash_toggle_ms_ = now_ms;
     return;
   }
 
-  const uint32_t elapsed_ms = now_ms - last_flash_toggle_ms_;
-  if (elapsed_ms < flash_interval_ms_) {
+  const uint32_t delta = now_ms - last_flash_toggle_ms_;
+  if (delta < flash_interval_ms_) {
     return;
   }
 
-  // Time to toggle phase.
+  // Toggle flash state and repaint.
+  flash_on_ = !flash_on_;
   last_flash_toggle_ms_ = now_ms;
-  const bool next_phase = !last_flash_active_;
-  ApplyFlashPhase(next_phase);
+
+  if (g_debug_enabled) {
+    Serial.printf(
+        "[FLASH] now=%lu ms interval=%lu ms delta=%lu ms state=%s\n",
+        static_cast<unsigned long>(now_ms),
+        static_cast<unsigned long>(flash_interval_ms_),
+        static_cast<unsigned long>(delta),
+        flash_on_ ? "ON" : "OFF");
+  }
+
+  UpdateFlashAppearance();
 }
