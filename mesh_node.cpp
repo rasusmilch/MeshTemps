@@ -275,6 +275,15 @@ MeshNode* FindMeshNode(uint32_t node_id) {
   return &it->second;
 }
 
+bool RemoveMeshNode(uint32_t node_id) {
+  auto it = g_mesh_nodes.find(node_id);
+  if (it == g_mesh_nodes.end()) {
+    return false;
+  }
+  g_mesh_nodes.erase(it);
+  return true;
+}
+
 void ClearAllMeshNodes() {
   g_mesh_nodes.clear();
 }

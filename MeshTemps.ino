@@ -57,13 +57,6 @@ bool g_debug_enabled = false;
     }                                                                          \
   } while (0)
 
-// --- Forward decls to satisfy Arduino's auto-prototype pass ---
-class MeshTile; // Defined in mesh_tile.h (used on ROOT builds)
-
-// Avoid Arduino auto-prototype depending on lvgl.h types.
-MeshTile &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
-                          int16_t tile_h);
-
 // Forward declarations used on ROOT builds from LogConnections().
 #if MESH_IS_ROOT
 void GuiUpdateNetwork(size_t peers);
@@ -147,15 +140,6 @@ uint32_t g_flash_interval_ms = kDefaultFlashIntervalMs;
 // Persistent root prefs.
 Preferences g_root_preferences;
 
-// Last-seen data and labels (persisted labels, volatile last_seen).
-#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
-static JsonDocument g_last_seen;
-static JsonDocument g_labels;
-#else
-static StaticJsonDocument<65536> g_last_seen; // was 32768
-static StaticJsonDocument<8192> g_labels;
-#endif
-
 // Mesh tasks.
 Task g_task_announce;
 
@@ -200,19 +184,10 @@ volatile size_t g_ui_peers = 0;
 
 Board *g_board = nullptr;
 
-// Per-node persistent tile widgets (one MeshTile per node key).
-struct TileEntry {
-  MeshTile *tile = nullptr;
-};
+void GuiRebuildTiles();  // forward
+// BuildTileContentForNode is defined later, after mesh_tile.h is included.
+// No extra prototype needed here.
 
-std::map<String, TileEntry> g_tiles;
-
-void GuiRebuildTiles(); // forward
-
-// Build one tile's Content from g_last_seen + g_labels + thresholds.
-static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
-                                    bool node_connected,
-                                    MeshTile::Content *out);
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -273,14 +248,18 @@ static void LoadNodeMetaFromNVS() {
 
   for (size_t i = 0; i < records.size(); ++i) {
     const NodeMetaRecord& rec = records[i];
-    MeshNode* node = GetOrCreateMeshNode(rec.node_id);
+
+    // Only apply metadata to nodes that already exist (from known topology
+    // or live traffic). Do NOT create nodes here.
+    MeshNode* node = FindMeshNode(rec.node_id);
     if (node == nullptr) {
       continue;
     }
+
     node->set_tile_rank(rec.tile_rank);
     node->set_mute_mask(rec.mute_mask);
-    // Label is handled separately later if you choose to persist it here.
   }
+
 }
 
 // Build a sorted vector of current node metadata.
@@ -307,6 +286,12 @@ static void BuildCurrentNodeMeta(std::vector<NodeMetaRecord>* out) {
 }
 
 static void SaveNodeMetaToNVSIfChanged() {
+
+  if (g_use_dummy_data) {
+    // Never persist dummy tiles.
+    return;
+  }
+
   std::vector<NodeMetaRecord> cur;
   BuildCurrentNodeMeta(&cur);
 
@@ -371,36 +356,165 @@ void LoadLabels() {
   const String json = g_root_preferences.getString("labels", "");
   g_root_preferences.end();
 
-  g_labels.clear();
-  if (!json.isEmpty()) {
-    if (deserializeJson(g_labels, json) != DeserializationError::Ok) {
-      g_labels.clear();
+  if (json.isEmpty()) {
+    return;
+  }
+
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+  JsonDocument labels;
+#else
+  StaticJsonDocument<8192> labels;
+#endif
+
+  if (deserializeJson(labels, json) != DeserializationError::Ok) {
+    Serial.println(F("LoadLabels: JSON parse error"));
+    return;
+  }
+
+  // Node labels.
+  JsonObject nodes_obj = labels["nodes"].as<JsonObject>();
+  for (JsonPair p : nodes_obj) {
+    const String node_key_hex = p.key().c_str();
+    uint32_t id_u32 = 0;
+    if (!ParseNodeIdToU32(node_key_hex, &id_u32)) {
+      continue;
+    }
+    MeshNode* node = FindMeshNode(id_u32);
+    if (node == nullptr) {
+      continue;
+    }
+
+    String label;
+    if (p.value().is<const char*>()) {
+      label = p.value().as<const char*>();
+    } else if (p.value().is<JsonObject>()) {
+      label = p.value()["node"] | "";
+    }
+    if (label.length() > 0) {
+      node->set_label(label);
+    }
+  }
+
+  // Sensor global labels.
+  JsonObject sensors_obj = labels["sensors"].as<JsonObject>();
+  for (JsonPair p : sensors_obj) {
+    const String addr16 = p.key().c_str();
+    const char* label_c = p.value() | "";
+    if (label_c == nullptr || label_c[0] == '\0') {
+      continue;
+    }
+    const String label(label_c);
+
+    // Apply to any existing sensor with this address.
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    for (uint32_t id : ids) {
+      MeshNode* node = FindMeshNode(id);
+      if (node == nullptr) {
+        continue;
+      }
+      (void)node->SetSensorLabel(addr16, label);
+    }
+  }
+
+  // Global sensor ordering.
+  JsonObject order_obj = labels["order"].as<JsonObject>();
+  for (JsonPair p : order_obj) {
+    const String addr16 = p.key().c_str();
+    const int32_t rank = p.value().as<int32_t>();
+
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    for (uint32_t id : ids) {
+      MeshNode* node = FindMeshNode(id);
+      if (node == nullptr) {
+        continue;
+      }
+      (void)node->SetSensorGlobalRank(addr16, rank);
+    }
+  }
+
+  // Per-node sensor ordering.
+  JsonObject sorder_root = labels["sorder"].as<JsonObject>();
+  for (JsonPair node_pair : sorder_root) {
+    const String node_key_hex = node_pair.key().c_str();
+    uint32_t id_u32 = 0;
+    if (!ParseNodeIdToU32(node_key_hex, &id_u32)) {
+      continue;
+    }
+    MeshNode* node = FindMeshNode(id_u32);
+    if (node == nullptr) {
+      continue;
+    }
+    JsonObject node_map = node_pair.value().as<JsonObject>();
+    for (JsonPair p : node_map) {
+      const String addr16 = p.key().c_str();
+      const int32_t rank = p.value().as<int32_t>();
+      (void)node->SetSensorNodeRank(addr16, rank);
     }
   }
 }
 
 void SaveLabels() {
+  if (g_use_dummy_data) {
+    Serial.println(F("Saving Labels skipped (dummy data mode)."));
+    return;
+  }
+
+  // Build a compact JSON just for persistence; no global doc.
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+  JsonDocument labels;
+#else
+  StaticJsonDocument<8192> labels;
+#endif
+
+  JsonObject nodes_obj   = labels["nodes"].to<JsonObject>();
+  JsonObject sensors_obj = labels["sensors"].to<JsonObject>();
+  JsonObject order_obj   = labels["order"].to<JsonObject>();
+  JsonObject sorder_root = labels["sorder"].to<JsonObject>();
+
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (uint32_t id : ids) {
+    MeshNode* node = FindMeshNode(id);
+    if (node == nullptr) {
+      continue;
+    }
+
+    char node_key[9];
+    FormatNodeKey(id, node_key, sizeof(node_key));
+    const String node_key_hex(node_key);
+
+    if (node->label().length() > 0) {
+      nodes_obj[node_key_hex] = node->label();
+    }
+
+    for (const auto& sensor : node->sensors()) {
+      const String& addr16 = sensor.address;
+
+      if (sensor.label.length() > 0) {
+        sensors_obj[addr16] = sensor.label;
+      }
+
+      if (sensor.global_rank != std::numeric_limits<int32_t>::max()) {
+        order_obj[addr16] = sensor.global_rank;
+      }
+
+      if (sensor.node_rank != std::numeric_limits<int32_t>::max()) {
+        JsonObject node_sorder = sorder_root[node_key_hex].to<JsonObject>();
+        node_sorder[addr16] = sensor.node_rank;
+      }
+    }
+  }
+
   String json;
-  serializeJson(g_labels, json);
+  serializeJson(labels, json);
 
   Serial.println(F("Saving Labels..."));
-
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.putString("labels", json);
   g_root_preferences.end();
 }
 
+
 void EraseLabels() {
-  g_labels.clear();
-
-  g_last_seen["nodes"].to<JsonObject>();
-  g_labels["nodes"].to<JsonObject>();
-  g_labels["sensors"].to<JsonObject>();
-  g_labels["order"].to<JsonObject>();
-  g_labels["tile_order"].to<JsonObject>();
-  g_labels["sorder"].to<JsonObject>();
-  g_labels["mute"].to<JsonObject>();
-
   // Clear runtime labels and ordering from all nodes.
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   for (uint32_t id : ids) {
@@ -411,14 +525,18 @@ void EraseLabels() {
     node->set_label(String());
     std::vector<MeshNode::Sensor>& sensors = node->sensors();
     for (auto& sensor : sensors) {
-      sensor.label = String();
+      sensor.label.clear();
       sensor.global_rank = std::numeric_limits<int32_t>::max();
-      sensor.node_rank = std::numeric_limits<int32_t>::max();
+      sensor.node_rank   = std::numeric_limits<int32_t>::max();
     }
   }
 
-  SaveLabels();
+  // Wipe persisted labels.
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  g_root_preferences.remove("labels");
+  g_root_preferences.end();
 }
+
 
 
 void SaveLimits() {
@@ -541,87 +659,6 @@ void LoadFlashSettings() {
   g_flash_interval_ms = fi;
 }
 
-void EnsureDocuments() {
-  if (!g_last_seen["nodes"].is<JsonObject>())
-    g_last_seen["nodes"].to<JsonObject>();
-  if (!g_labels["nodes"].is<JsonObject>())
-    g_labels["nodes"].to<JsonObject>();
-  if (!g_labels["sensors"].is<JsonObject>())
-    g_labels["sensors"].to<JsonObject>();
-  if (!g_labels["order"].is<JsonObject>())
-    g_labels["order"].to<JsonObject>();
-  if (!g_labels["tile_order"].is<JsonObject>())
-    g_labels["tile_order"].to<JsonObject>();
-  if (!g_labels["sorder"].is<JsonObject>())
-    g_labels["sorder"].to<JsonObject>();
-  // NEW:
-  if (!g_labels["mute"].is<JsonObject>())
-    g_labels["mute"].to<JsonObject>();
-}
-
-// Populate MeshNode metadata (node label + per-sensor labels/ranks)
-// from g_labels JSON. MeshNode is runtime authority; JSON is persistence.
-static void ApplySensorMetadataFromLabels(MeshNode* node) {
-  if (node == nullptr) {
-    return;
-  }
-
-  EnsureDocuments();
-
-  const String node_key_hex = node->node_key_hex();
-
-  // Node label from g_labels["nodes"][node_key_hex].
-  String node_label;
-  JsonVariant node_entry = g_labels["nodes"][node_key_hex];
-  if (!node_entry.isNull()) {
-    if (node_entry.is<const char*>()) {
-      node_label = node_entry.as<const char*>();
-    } else if (node_entry.is<JsonObject>()) {
-      node_label = node_entry["node"] | "";
-    }
-  }
-  if (node_label.length() > 0) {
-    node->set_label(node_label);
-  }
-
-  JsonObject sensors_root = g_labels["sensors"].as<JsonObject>();
-  JsonObject order_root = g_labels["order"].as<JsonObject>();
-  JsonObject sorder_root = g_labels["sorder"].as<JsonObject>();
-  JsonObject node_sorder = sorder_root[node_key_hex].as<JsonObject>();
-
-  std::vector<MeshNode::Sensor>& sensors = node->sensors();
-  for (auto& sensor : sensors) {
-    const String addr16 = CanonAddr16(sensor.address);
-
-    const char* label_c = sensors_root[addr16] | "";
-    if (label_c != nullptr && label_c[0] != '\0') {
-      sensor.label = String(label_c);
-    }
-
-    if (order_root[addr16].is<int>()) {
-      sensor.global_rank = order_root[addr16].as<int>();
-    } else {
-      sensor.global_rank = std::numeric_limits<int32_t>::max();
-    }
-
-    if (node_sorder[addr16].is<int>()) {
-      sensor.node_rank = node_sorder[addr16].as<int>();
-    } else {
-      sensor.node_rank = std::numeric_limits<int32_t>::max();
-    }
-  }
-}
-
-static void ApplyAllLabelsToMeshNodes() {
-  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
-  for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
-    if (node != nullptr) {
-      ApplySensorMetadataFromLabels(node);
-    }
-  }
-}
-
 // Default high rank means "unspecified / after ranked ones"
 static int GetNodeRank(const String &node_id) {
   uint32_t id_u32 = 0;
@@ -639,9 +676,8 @@ static int GetNodeRank(const String &node_id) {
 // --- Topology persistence: fixed-size binary array of node IDs -------------
 constexpr size_t kMaxKnownNodes = 20;
 
-// Read sorted known IDs from NVS ("known_bin") into a vector (<=
-// kMaxKnownNodes).
-static bool ReadKnownFromNVS(std::vector<uint32_t> *out_ids) {
+// Read sorted known IDs from NVS ("known_bin") into a vector.
+static bool ReadKnownFromNVS(std::vector<uint32_t>* out_ids) {
   out_ids->clear();
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const size_t nbytes = g_root_preferences.getBytesLength("known_bin");
@@ -664,33 +700,27 @@ static bool ReadKnownFromNVS(std::vector<uint32_t> *out_ids) {
   return !out_ids->empty();
 }
 
-// Write sorted IDs to NVS ("known_bin"). Also remove legacy JSON key ("known").
-static void WriteKnownToNVS(const std::vector<uint32_t> &ids_sorted_unique) {
+// Write sorted IDs to NVS ("known_bin").
+static void WriteKnownToNVS(const std::vector<uint32_t>& ids_sorted_unique) {
   const size_t count = std::min(ids_sorted_unique.size(), kMaxKnownNodes);
 
   Serial.println(F("[NVS] Saving Known IDs to meshroot/known_bin"));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  (void)g_root_preferences.putBytes("known_bin", ids_sorted_unique.data(),
-                                    count * sizeof(uint32_t));
-  g_root_preferences.remove("known"); // stop carrying JSON forever
+  if (count > 0) {
+    (void)g_root_preferences.putBytes("known_bin", ids_sorted_unique.data(),
+                                      count * sizeof(uint32_t));
+  } else {
+    g_root_preferences.remove("known_bin");
+  }
+  g_root_preferences.remove("known");  // legacy
   g_root_preferences.end();
 }
 
-// Return true if id is already in the persisted set.
-static bool NodeIdKnown(uint32_t id) {
-  std::vector<uint32_t> prev;
-  if (!ReadKnownFromNVS(&prev))
-    return false;
-  return std::binary_search(prev.begin(), prev.end(), id);
-}
-
-// Add id to the persisted set (sorted/unique, clamped to kMaxKnownNodes).
-// Returns true if NVS was actually updated (i.e., set changed).
 // Add id to the persisted set (sorted/unique, clamped to kMaxKnownNodes).
 // Returns true if NVS was actually updated (i.e., set changed).
 static bool AddKnownAndPersist(uint32_t id) {
   std::vector<uint32_t> cur;
-  (void)ReadKnownFromNVS(&cur); // ok if empty
+  (void)ReadKnownFromNVS(&cur);  // ok if empty
 
   cur.push_back(id);
   std::sort(cur.begin(), cur.end());
@@ -700,12 +730,12 @@ static bool AddKnownAndPersist(uint32_t id) {
   }
 
   std::vector<uint32_t> prev;
-  (void)ReadKnownFromNVS(&prev); // ok if empty
+  (void)ReadKnownFromNVS(&prev);  // ok if empty
 
   const bool same = (prev.size() == cur.size()) &&
                     std::equal(prev.begin(), prev.end(), cur.begin());
   if (same) {
-    return false; // no NVS activity
+    return false;  // no NVS activity
   }
 
   Serial.printf("[NVS] known topology updated: %u node(s); latest=0x%08lX\n",
@@ -715,53 +745,40 @@ static bool AddKnownAndPersist(uint32_t id) {
   return true;
 }
 
-// Rewritten: build current set from g_last_seen, compare with NVS, persist iff
-// different.
+// Save known topology from MeshNode store, not from a JSON doc.
 void SaveKnownTopology() {
-  if (!g_topology_persist_enabled) {
+  if (!g_topology_persist_enabled || g_use_dummy_data) {
     return;
   }
 
-  EnsureDocuments();
-  JsonObjectConst nodes_cur = g_last_seen["nodes"].as<JsonObjectConst>();
-  if (nodes_cur.isNull() || nodes_cur.size() == 0)
-    return; // never persist empty
-
-  std::vector<uint32_t> cur;
-  cur.reserve(std::min<size_t>(nodes_cur.size(), kMaxKnownNodes));
-
-  for (JsonPairConst n : nodes_cur) {
-    const char *key = n.key().c_str();
-    uint32_t id = 0;
-    if (!ParseNodeIdToU32(String(key), &id))
-      continue;
-    cur.push_back(id);
-    if (cur.size() == kMaxKnownNodes)
-      break;
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  if (ids.empty()) {
+    return;
   }
 
-  if (cur.empty())
-    return;
-
+  std::vector<uint32_t> cur = ids;
   std::sort(cur.begin(), cur.end());
   cur.erase(std::unique(cur.begin(), cur.end()), cur.end());
+  if (cur.empty()) {
+    return;
+  }
 
   std::vector<uint32_t> prev;
-  (void)ReadKnownFromNVS(&prev); // ok if empty
+  (void)ReadKnownFromNVS(&prev);  // ok if empty
 
   const bool same = (prev.size() == cur.size()) &&
                     std::equal(prev.begin(), prev.end(), cur.begin());
-  if (same)
+  if (same) {
     return;
+  }
 
   Serial.printf("Updating known topology: %u node(s)\n",
                 static_cast<unsigned>(cur.size()));
   WriteKnownToNVS(cur);
 }
 
-// Load persisted known IDs and pre-seed g_last_seen so tiles appear on boot.
-// One-time migration: if "known_bin" is empty but legacy JSON "known" exists,
-// convert it to binary.
+// Load persisted known IDs and pre-seed MeshNode store so tiles can appear
+// on boot without any live traffic yet.
 void LoadKnownTopology() {
   if (!g_topology_persist_enabled) {
     return;
@@ -772,47 +789,34 @@ void LoadKnownTopology() {
     return;
   }
 
-  EnsureDocuments();
-  JsonObject nodes_out = g_last_seen["nodes"].to<JsonObject>();
   const uint32_t now_ms = millis();
-
   for (uint32_t id : ids) {
-    char node_key[16];
-    FormatNodeKey(id, node_key, sizeof(node_key));
-    JsonObject node_obj = nodes_out[node_key].to<JsonObject>();
-    node_obj["busGpio"] = node_obj["busGpio"] | -1;
-    node_obj["last"] = now_ms;
-    node_obj["sensors"].to<JsonObject>();
-
-    // Keep the MeshNode model in sync with preseeded topology so that
-    // tiles and buzzer logic can rely on MeshNode state.
-    MeshNode *node_model = GetOrCreateMeshNode(id);
-    if (node_model != nullptr) {
+    MeshNode* node_model = GetOrCreateMeshNode(id);
+    if (node_model != nullptr && node_model->last_update_ms() == 0U) {
       node_model->SetBusGpioAndLastUpdate(-1, now_ms);
     }
   }
 }
 
-// Remove persisted topology and clear in-memory nodes.
+// Remove persisted topology and clear in-memory nodes/tiles.
 void EraseKnownTopology() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.remove("known_bin");
-  g_root_preferences.remove("known"); // legacy
+  g_root_preferences.remove("known");      // legacy
+  g_root_preferences.remove("node_meta");  // also drop rank/mute snapshot
   g_root_preferences.end();
-  g_last_seen["nodes"].to<JsonObject>().clear();
+
+  ClearAllMeshNodes();
+  MeshTile::DestroyAll();
 }
 
-// Minimal root storage initialization: no versioning/backward compatibility.
-// We keep:
-//   - labels JSON
-//   - runtime settings (units, highlight, limits, buzzer, flash)
-//   - topology persist flag
-//   - known topology seed (if enabled)
-static void RootInitStorage() {
-  // Labels + base documents.
-  LoadLabels();
-  EnsureDocuments();
 
+// Minimal root storage initialization:
+//   - runtime settings (units, highlight, limits, buzzer, flash, tile display)
+//   - topology persist flag + known topology
+//   - per-node metadata (rank, mute, node labels)
+//   - sensor/node labels + ranks loaded directly into MeshNode instances
+static void RootInitStorage() {
   // Runtime settings (each uses its own defaults if key missing).
   LoadDisplayUnits();
   LoadHighlightSettings();
@@ -823,14 +827,15 @@ static void RootInitStorage() {
 
   // Topology persistence.
   LoadTopoPersistFlag();
-  LoadKnownTopology();
+  LoadKnownTopology();       // seeds MeshNode objects for persisted IDs
 
   // Per-node metadata (rank, mute, etc.).
   LoadNodeMetaFromNVS();
 
-  // Apply any persisted labels + per-sensor ordering into MeshNode model.
-  ApplyAllLabelsToMeshNodes();
+  // Labels + per-sensor ordering from NVS -> MeshNode model.
+  LoadLabels();
 }
+
 
 // Node ID canonicalization: accept only hex, with optional "0x"/"0X" prefix.
 // Canonical form for JSON keys: 8-hex, uppercase, no "0x".
@@ -896,31 +901,17 @@ static String CanonAddr16(const String &addr) {
   return out;
 }
 
-// Global (node-agnostic) rank.
-static int GetSensorRankGlobal(const String &addr16) {
-  const String key = CanonAddr16(addr16);
-  JsonVariant v = g_labels["order"][key];
-  if (v.is<int>())
-    return v.as<int>();
-  return 1000000;
-}
-
-static int GetSensorRankForNode(const String &node_id, const String &addr16) {
-  const String node_hex = CanonNodeHex8(node_id);
-  const String key = CanonAddr16(addr16);
-  JsonVariant v = g_labels["sorder"][node_hex][key];
-  if (v.is<int>()) {
-    return v.as<int>();
-  }
-  return GetSensorRankGlobal(key);
-}
-
-// Build one tile's Content from MeshNode state + labels + thresholds.
-// Falls back to legacy JSON only if no MeshNode exists (persisted topology
-// that has not yet reported).
-static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
+// Build one tile's Content from MeshNode state + thresholds.
+// If a node exists in MeshNode store, we render it; otherwise we skip.
+static bool BuildTileContentForNode(const String& node_key_hex,
+                                    uint32_t now_ms,
                                     bool node_connected,
-                                    MeshTile::Content *out) {
+                                    void* out_ptr) {
+  if (out_ptr == nullptr) {
+    return false;
+  }
+  MeshTile::Content* out = static_cast<MeshTile::Content*>(out_ptr);
+
   if (out == nullptr) {
     return false;
   }
@@ -928,174 +919,142 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
   const String node_hex = CanonNodeHex8(node_key_hex);
   uint32_t node_id_u32 = 0;
   if (!ParseNodeIdToU32(node_hex, &node_id_u32)) {
-    // Key is not a valid node id.
     return false;
   }
 
-  const MeshNode *node_model = FindMeshNode(node_id_u32);
+  const MeshNode* node_model = FindMeshNode(node_id_u32);
+  if (node_model == nullptr) {
+    // No model – nothing to show.
+    return false;
+  }
 
   MeshTile::Content c;
   c.display_fahrenheit = g_display_fahrenheit;
   c.show_sensor_labels = g_show_sensor_labels;
   c.show_age = g_show_age_label;
 
-  // Title: node label from MeshNode if present, otherwise formatted node id.
-  String title;
-  if (node_model != nullptr && node_model->label().length() > 0) {
-    title = node_model->label();
+  // Title: node label if present, otherwise formatted node id.
+  if (node_model->label().length() > 0) {
+    c.title = node_model->label();
   } else {
     char hex_id[11];  // "0x" + 8-hex + NUL
     snprintf(hex_id, sizeof(hex_id), "0x%08lX",
              static_cast<unsigned long>(node_id_u32));
-    title = hex_id;
-  }
-  c.title = title;
-
-  // Age minutes: prefer MeshNode, fallback to JSON.
-  uint32_t age_min = 0;
-  if (node_model != nullptr) {
-    age_min = node_model->ComputeAgeMinutes(now_ms);
-  } else {
-    EnsureDocuments();
-    JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
-    JsonObject node_obj = nodes[node_hex];
-    if (!node_obj.isNull()) {
-      uint32_t latest_ms = node_obj["last"] | 0U;
-      JsonObject sensors_obj = node_obj["sensors"].as<JsonObject>();
-      for (JsonPair s_entry : sensors_obj) {
-        const uint32_t s_last = s_entry.value()["last"] | 0U;
-        if (s_last > latest_ms) {
-          latest_ms = s_last;
-        }
-      }
-      if (latest_ms != 0U && latest_ms <= now_ms) {
-        age_min = (now_ms - latest_ms) / 60000U;
-      }
-    }
+    c.title = hex_id;
   }
 
+  // Age and stale/missing flags from MeshNode timestamps only.
+  const uint32_t age_min = node_model->ComputeAgeMinutes(now_ms);
   c.age_minutes = age_min;
+
   c.is_missing = g_highlight_missing_nodes && !node_connected &&
                  (g_stale_minutes_threshold > 0U) &&
                  (age_min >= g_stale_minutes_threshold);
   c.is_stale = node_connected && (g_stale_minutes_threshold > 0U) &&
                (age_min >= g_stale_minutes_threshold);
 
-  // Sequence health – only meaningful if we have a MeshNode model.
-  bool sequence_stuck = false;
-  if (node_model != nullptr) {
-    sequence_stuck = node_model->SequenceStuck(now_ms, kSeqStuckMsThreshold);
-  }
+  // Sequence health.
+  bool sequence_stuck = node_model->SequenceStuck(now_ms, kSeqStuckMsThreshold);
   c.seq_stuck = sequence_stuck;
 
-  const uint8_t node_mute = GetNodeMuteMask(node_hex);
+  const uint8_t node_mute = node_model->mute_mask() & 0x3u;
+
   bool node_has_alert = false;
   bool node_has_warning = false;
   int sv_count = 0;
 
-  if (node_model != nullptr) {
-    const auto &sensors = node_model->sensors();
+  const auto& sensors = node_model->sensors();
+  if (!sensors.empty()) {
+    // Sort sensor indices by effective rank, then address.
+    std::vector<size_t> indices;
+    indices.reserve(sensors.size());
+    for (size_t i = 0; i < sensors.size(); ++i) {
+      indices.push_back(i);
+    }
 
-    if (!sensors.empty()) {
-      // Sort sensor indices by per-node rank, then address.
-      std::vector<size_t> indices;
-      indices.reserve(sensors.size());
-      for (size_t i = 0; i < sensors.size(); ++i) {
-        indices.push_back(i);
+    auto effective_rank = [](const MeshNode::Sensor& s) -> int32_t {
+      if (s.node_rank != std::numeric_limits<int32_t>::max()) {
+        return s.node_rank;
+      }
+      return s.global_rank;
+    };
+
+    std::sort(indices.begin(), indices.end(),
+              [&](size_t ia, size_t ib) {
+                const MeshNode::Sensor& sa = sensors[ia];
+                const MeshNode::Sensor& sb = sensors[ib];
+
+                const int32_t ra = effective_rank(sa);
+                const int32_t rb = effective_rank(sb);
+                if (ra != rb) {
+                  return ra < rb;
+                }
+                return sa.address < sb.address;
+              });
+
+    for (size_t idx : indices) {
+      if (sv_count >= 2) {
+        break;  // only two sensor rows per tile
       }
 
-      auto effective_rank = [](const MeshNode::Sensor& s) -> int32_t {
-        if (s.node_rank != std::numeric_limits<int32_t>::max()) {
-          return s.node_rank;
+      const MeshNode::Sensor& sensor = sensors[idx];
+      MeshTile::SensorView& sv = c.sensors[sv_count++];
+
+      // Label: use sensor.label if set, otherwise the canonical address.
+      if (sensor.label.length() > 0) {
+        sv.label = sensor.label;
+      } else {
+        sv.label = CanonAddr16(sensor.address);
+      }
+
+      if (sensor.has_value && !isnan(sensor.temp_c)) {
+        sv.temp_c = sensor.temp_c;
+        sv.has_value = true;
+
+        const float t = sv.temp_c;
+
+        // Alerts (respect node mute).
+        bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
+        bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
+        if (low_alert && (node_mute & kMuteLow)) {
+          low_alert = false;
         }
-        return s.global_rank;
-      };
-
-      std::sort(indices.begin(), indices.end(),
-                [&](size_t ia, size_t ib) {
-                  const MeshNode::Sensor& sa = sensors[ia];
-                  const MeshNode::Sensor& sb = sensors[ib];
-
-                  const int32_t ra = effective_rank(sa);
-                  const int32_t rb = effective_rank(sb);
-                  if (ra != rb) {
-                    return ra < rb;
-                  }
-                  return sa.address < sb.address;
-                });
-
-      for (size_t idx : indices) {
-        if (sv_count >= 2) {
-          break; // only two sensor rows per tile
+        if (high_alert && (node_mute & kMuteHigh)) {
+          high_alert = false;
         }
+        sv.is_alert = (low_alert || high_alert);
 
-        const MeshNode::Sensor &sensor = sensors[idx];
-        MeshTile::SensorView &sv = c.sensors[sv_count++];
-
-        const String &addr16 = sensor.address;
-
-        // Prefer MeshNode's sensor label; fall back to JSON and finally address.
-        if (sensor.label.length() > 0) {
-          sv.label = sensor.label;
+        // Warnings only if not already alert (respect mute).
+        if (!sv.is_alert) {
+          bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
+          bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
+          if (low_warn && (node_mute & kMuteLow)) {
+            low_warn = false;
+          }
+          if (high_warn && (node_mute & kMuteHigh)) {
+            high_warn = false;
+          }
+          sv.is_warning = (low_warn || high_warn);
         } else {
-          const char* custom_label = g_labels["sensors"][addr16] | "";
-          if (custom_label != nullptr && custom_label[0] != '\0') {
-            sv.label = String(custom_label);
-          } else {
-            sv.label = CanonAddr16(addr16);
-          }
-        }
-
-        if (sensor.has_value && !isnan(sensor.temp_c)) {
-          sv.temp_c = sensor.temp_c;
-          sv.has_value = true;
-
-          const float t = sv.temp_c;
-
-          // Alerts (respect node mute).
-          bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
-          bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
-          if (low_alert && (node_mute & kMuteLow)) {
-            low_alert = false;
-          }
-          if (high_alert && (node_mute & kMuteHigh)) {
-            high_alert = false;
-          }
-          sv.is_alert = (low_alert || high_alert);
-
-          // Warnings only if not already alert (respect mute).
-          if (!sv.is_alert) {
-            bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
-            bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
-            if (low_warn && (node_mute & kMuteLow)) {
-              low_warn = false;
-            }
-            if (high_warn && (node_mute & kMuteHigh)) {
-              high_warn = false;
-            }
-            sv.is_warning = (low_warn || high_warn);
-          }
-        } else {
-          sv.temp_c = NAN;
-          sv.has_value = false;
-          sv.is_alert = false;
           sv.is_warning = false;
         }
+      } else {
+        sv.temp_c = NAN;
+        sv.has_value = false;
+        sv.is_alert = false;
+        sv.is_warning = false;
+      }
 
-        if (sv.is_alert) {
-          node_has_alert = true;
-        } else if (sv.is_warning) {
-          node_has_warning = true;
-        }
+      if (sv.is_alert) {
+        node_has_alert = true;
+      } else if (sv.is_warning) {
+        node_has_warning = true;
       }
     }
-  } else {
-    // No MeshNode: JSON-only node (persisted topology with no measurements).
-    // Leave sensor_count = 0; tile will show "(no sensors)".
   }
 
-  // Treat a sequence-stuck node as a warning-level condition unless it
-  // already has a temperature alert (red).
+  // Treat a sequence-stuck node as warning-level unless it already has
+  // a temperature alert.
   if (sequence_stuck && !node_has_alert) {
     node_has_warning = true;
   }
@@ -1289,6 +1248,8 @@ void GuiInit() {
   }
 
   lv_obj_t *screen = lv_scr_act();
+  lv_obj_set_style_bg_color(screen, lv_color_make(0x25, 0x25, 0x25), 0);
+lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(screen, 0, 0);
 
   // Disable all scrolling on the root screen
@@ -1343,7 +1304,7 @@ void GuiInit() {
   lv_obj_set_style_pad_all(g_ui_tile_container, 6, 0);
   lv_obj_set_style_pad_row(g_ui_tile_container, 6, 0);
   lv_obj_set_style_pad_column(g_ui_tile_container, 6, 0);
-  lv_obj_set_style_bg_color(g_ui_tile_container, lv_color_make(0x25, 0x25, 0x25), 0);
+  // lv_obj_set_style_bg_color(g_ui_tile_container, lv_color_make(0x25, 0x25, 0x25), 0);
   lv_obj_set_style_bg_opa(g_ui_tile_container, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(g_ui_tile_container, 0, 0);
 
@@ -1392,84 +1353,44 @@ void UpdateUptimeLabel() {
 }
 
 // Dummy data: 10 nodes, 2 sensors each, with simple ramping temps.
-// This feeds both the legacy g_last_seen/g_labels documents and the
-// MeshNode domain model so that CLI/GUI see the same synthetic topology.
+// This now populates only the MeshNode model + tile registry.
 static void BuildDummyData() {
-  // Reset JSON docs.
-  g_last_seen.clear();
-  g_labels.clear();
-  EnsureDocuments();
-
-  // Reset node model store as well so dummy data is self-contained.
   ClearAllMeshNodes();
+  MeshTile::DestroyAll();
 
-  const unsigned long now_ms = millis();
+  const uint32_t now_ms = millis();
   const float base_c = 21.0f;
-
-  JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-  JsonObject labels_nodes = g_labels["nodes"].to<JsonObject>();
 
   for (int i = 1; i <= 10; ++i) {
     const uint32_t node_id = 0xAA000000u + static_cast<uint32_t>(i);
-
-    char node_key[16];
-    FormatNodeKey(node_id, node_key, sizeof(node_key));
-
-    // Legacy JSON representation for the GUI.
-    JsonObject node = nodes[node_key].to<JsonObject>();
-    node["id"] = node_id;
-    node["busGpio"] = -1;
-    node["last"] = static_cast<uint32_t>(now_ms);
-
-    JsonObject sensors = node["sensors"].to<JsonObject>();
-
-    // Domain model node.
-    MeshNode *node_model = GetOrCreateMeshNode(node_id);
-    if (node_model != nullptr) {
-      node_model->SetBusGpioAndLastUpdate(-1, static_cast<uint32_t>(now_ms));
+    MeshNode* node_model = GetOrCreateMeshNode(node_id);
+    if (node_model == nullptr) {
+      continue;
     }
+    node_model->SetBusGpioAndLastUpdate(-1, now_ms);
 
     for (int s = 1; s <= 2; ++s) {
       char addr[17];
       snprintf(addr, sizeof(addr), "D%02d000000000001", i * 2 + s - 2);
 
-      JsonObject sensor = sensors[addr].to<JsonObject>();
-      sensor["type"] = "ds18b20";
-      sensor["ageMin"] = 0;
-      sensor["corr"] = false;
+      MeshNode::Sensor* sensor =
+          node_model->GetOrCreateSensor(String(addr));
+      if (sensor == nullptr) {
+        continue;
+      }
 
       const float temp_c = base_c + static_cast<float>((i - 1) * 2 + s - 1);
-      sensor["tC"] = temp_c;
-      sensor["last"] = static_cast<uint32_t>(now_ms);
-
-      // Mirror into MeshNode.
-      if (node_model != nullptr) {
-        MeshNode::Sensor *sensor_model =
-            node_model->GetOrCreateSensor(String(addr));
-        if (sensor_model != nullptr) {
-          sensor_model->temp_c = temp_c;
-          sensor_model->has_value = true;
-          sensor_model->corrected = false;
-          sensor_model->last_ms = static_cast<uint32_t>(now_ms);
-        }
-      }
+      sensor->temp_c = temp_c;
+      sensor->has_value = true;
+      sensor->corrected = false;
+      sensor->last_ms = now_ms;
     }
 
     // Simple node label: "Node 1", "Node 2", ...
     char name_buf[16];
     snprintf(name_buf, sizeof(name_buf), "Node %d", i);
-
-    if (node_model != nullptr) {
-      node_model->set_label(String(name_buf));
-    }
-
-    JsonObject labels_nodes = g_labels["nodes"].to<JsonObject>();
-    labels_nodes[node_key] = String(name_buf);
-
+    node_model->set_label(String(name_buf));
   }
-
-  // Reload ranks from NVS
-  LoadNodeMetaFromNVS();
 
   g_layout_dirty = true;
 }
@@ -1480,74 +1401,31 @@ void BuzzerBeepOnce() {
   DLOG("[BUZZER] Beep\n");
 }
 
-MeshTile &GetOrCreateTile(const String &node_id_str, int16_t tile_w,
-                          int16_t tile_h) {
-  auto it = g_tiles.find(node_id_str);
-  if (it != g_tiles.end() && it->second.tile != nullptr) {
-    // Ensure size in case geometry changed (e.g., rotation/res change).
-    it->second.tile->SetSize(tile_w, tile_h);
-    return *(it->second.tile);
-  }
-
-  // First time for this node: allocate a MeshTile rooted in the container.
-  MeshTile *tile = new MeshTile(g_ui_tile_container, tile_w, tile_h);
-
-  TileEntry entry;
-  entry.tile = tile;
-  auto result = g_tiles.emplace(node_id_str, entry);
-  return *(result.first->second.tile);
-}
-
 // ---------------------------------------------------------------------------
 // Tile rebuild
 // ---------------------------------------------------------------------------
 // Update just the "Age: N min" labels and stale/missing state.
 // No layout work, no object (re)creation.
 static void GuiAgeTick(uint32_t now_ms) {
-  EnsureDocuments();
-  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (uint32_t id : ids) {
+    MeshNode* node = FindMeshNode(id);
+    if (node == nullptr) {
+      continue;
+    }
 
-  for (auto &kv : g_tiles) {
-    const String &node_key_hex = kv.first;
-    MeshTile *tile = kv.second.tile;
+    char node_key[9];
+    FormatNodeKey(id, node_key, sizeof(node_key));
+    MeshTile* tile = MeshTile::Find(String(node_key));
     if (tile == nullptr) {
       continue;
     }
 
-    uint32_t age_min = 0;
-    bool have_model = false;
+    const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
 
-    // Prefer MeshNode as the source of truth if present.
-    uint32_t node_id_u32 = 0;
-    if (ParseNodeIdToU32(node_key_hex, &node_id_u32)) {
-      const MeshNode *node_model = FindMeshNode(node_id_u32);
-      if (node_model != nullptr) {
-        age_min = node_model->ComputeAgeMinutes(now_ms);
-        have_model = true;
-      }
-    }
-
-    // Fallback: legacy JSON (for nodes that are only in persisted topology).
-    if (!have_model) {
-      JsonObject node_obj = nodes[node_key_hex];
-      if (!node_obj.isNull()) {
-        uint32_t latest_ms = node_obj["last"] | 0U;
-        JsonObject sensors = node_obj["sensors"].as<JsonObject>();
-        for (JsonPair s_entry : sensors) {
-          const uint32_t s_last = s_entry.value()["last"] | 0U;
-          if (s_last > latest_ms) {
-            latest_ms = s_last;
-          }
-        }
-        if (latest_ms != 0U && latest_ms <= now_ms) {
-          age_min = (now_ms - latest_ms) / 60000U;
-        }
-      }
-    }
-
-    // As before: age tick treats tiles here as "known topology" and only
-    // marks missing, not connected vs. disconnected.
-    const bool node_connected = false;
+    // Age tick treats tiles here as "known topology" and only
+    // marks missing; connection state is handled elsewhere.
+    const bool node_connected = false;  // we only care about age here
     const bool is_missing = g_highlight_missing_nodes && !node_connected &&
                             (g_stale_minutes_threshold > 0U) &&
                             (age_min >= g_stale_minutes_threshold);
@@ -1558,17 +1436,16 @@ static void GuiAgeTick(uint32_t now_ms) {
   }
 }
 
-// NEW: cheap refresh used on most updates (no object creation)
+// Cheap refresh used on most updates (no object creation or layout).
 static void GuiRefreshValues(uint32_t now_ms) {
-  EnsureDocuments();
-  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
-
   // Snapshot current connections.
-  auto node_list = mesh.getNodeList();
-  std::vector<uint32_t> connected_ids(node_list.begin(), node_list.end());
+  auto mesh_node_list = mesh.getNodeList();
+  std::vector<uint32_t> connected_ids(mesh_node_list.begin(),
+                                      mesh_node_list.end());
+
   auto is_connected = [&](uint32_t node_id) -> bool {
-    for (uint32_t id : connected_ids) {
-      if (id == node_id) {
+    for (uint32_t connected_id : connected_ids) {
+      if (connected_id == node_id) {
         return true;
       }
     }
@@ -1583,25 +1460,26 @@ static void GuiRefreshValues(uint32_t now_ms) {
     lv_label_set_text(g_ui_label_peers, buffer);
   }
 
-  g_any_warning = false;
-  g_any_alert = false;
+  bool any_warning = false;
+  bool any_alert = false;
 
-  for (auto &kv : g_tiles) {
-    const String &node_key_hex = kv.first;
-    MeshTile *tile = kv.second.tile;
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (uint32_t id : ids) {
+    MeshNode* node = FindMeshNode(id);
+    if (node == nullptr) {
+      continue;
+    }
+
+    char node_key[9];
+    FormatNodeKey(id, node_key, sizeof(node_key));
+    const String node_key_hex(node_key);
+
+    MeshTile* tile = MeshTile::Find(node_key_hex);
     if (tile == nullptr) {
       continue;
     }
 
-    if (!nodes[node_key_hex].is<JsonObject>()) {
-      continue;
-    }
-
-    uint32_t node_id_u32 = 0;
-    bool node_connected = false;
-    if (ParseNodeIdToU32(node_key_hex, &node_id_u32)) {
-      node_connected = is_connected(node_id_u32);
-    }
+    const bool node_connected = is_connected(id);
 
     MeshTile::Content content;
     if (!BuildTileContentForNode(node_key_hex, now_ms, node_connected,
@@ -1613,11 +1491,14 @@ static void GuiRefreshValues(uint32_t now_ms) {
     tile->SetFlashIntervalMs(g_flash_interval_ms);
 
     if (content.node_has_alert) {
-      g_any_alert = true;
+      any_alert = true;
     } else if (content.is_stale || content.node_has_warning) {
-      g_any_warning = true;
+      any_warning = true;
     }
   }
+
+  g_any_alert = any_alert;
+  g_any_warning = any_warning;
 }
 
 void GuiRebuildTiles() {
@@ -1625,15 +1506,14 @@ void GuiRebuildTiles() {
     return;
   }
 
-  EnsureDocuments();
-  JsonObject nodes = g_last_seen["nodes"].as<JsonObject>();
-
   // Snapshot current connections.
-  auto node_list = mesh.getNodeList();
-  std::vector<uint32_t> connected_ids(node_list.begin(), node_list.end());
+  auto mesh_node_list = mesh.getNodeList();
+  std::vector<uint32_t> connected_ids(mesh_node_list.begin(),
+                                      mesh_node_list.end());
+
   auto is_connected = [&](uint32_t node_id) -> bool {
-    for (uint32_t id : connected_ids) {
-      if (id == node_id) {
+    for (uint32_t connected_id : connected_ids) {
+      if (connected_id == node_id) {
         return true;
       }
     }
@@ -1649,10 +1529,7 @@ void GuiRebuildTiles() {
   const lv_coord_t tile_w = (screen_w - (columns + 1) * gap) / columns;
   const lv_coord_t tile_h = 100;
 
-  g_any_warning = false;
-  g_any_alert = false;
-
-  // Update peers label while we're here.
+  // Update peers label.
   if (g_ui_label_peers != nullptr) {
     char buffer[32];
     snprintf(buffer, sizeof(buffer), "Peers: %u",
@@ -1660,35 +1537,26 @@ void GuiRebuildTiles() {
     lv_label_set_text(g_ui_label_peers, buffer);
   }
 
-  // Sort nodes by explicit tile_order, then label, then id.
-  std::vector<String> node_ids;
-  node_ids.reserve(nodes.size());
-  for (JsonPair e : nodes) {
-    node_ids.emplace_back(e.key().c_str());
-  }
+  // Collect node ids.
+  std::vector<uint32_t> ids = GetAllMeshNodeIds();
 
-  std::sort(node_ids.begin(), node_ids.end(),
-            [&](const String &a, const String &b) {
-              const int ra = GetNodeRank(a);
-              const int rb = GetNodeRank(b);
+  // Sort nodes by tile rank, then label, then id.
+  std::sort(ids.begin(), ids.end(),
+            [&](uint32_t a, uint32_t b) {
+              MeshNode* na = FindMeshNode(a);
+              MeshNode* nb = FindMeshNode(b);
+              if (na == nullptr || nb == nullptr) {
+                return a < b;
+              }
+
+              const int32_t ra = na->tile_rank();
+              const int32_t rb = nb->tile_rank();
               if (ra != rb) {
                 return ra < rb;
               }
 
-              auto get_label_for_sort = [&](const String& node_key) -> String {
-                uint32_t id_u32 = 0;
-                if (!ParseNodeIdToU32(node_key, &id_u32)) {
-                  return String();
-                }
-                MeshNode* node = FindMeshNode(id_u32);
-                if (node == nullptr) {
-                  return String();
-                }
-                return node->label();
-              };
-
-              const String la = get_label_for_sort(a);
-              const String lb = get_label_for_sort(b);
+              const String& la = na->label();
+              const String& lb = nb->label();
               if (la.length() && lb.length()) {
                 if (la != lb) {
                   return la < lb;
@@ -1700,12 +1568,22 @@ void GuiRebuildTiles() {
               return a < b;
             });
 
-  for (const String &node_key_hex : node_ids) {
-    uint32_t node_id_u32 = 0;
-    bool node_connected = false;
-    if (ParseNodeIdToU32(node_key_hex, &node_id_u32)) {
-      node_connected = is_connected(node_id_u32);
+  bool any_warning = false;
+  bool any_alert = false;
+
+  // Apply sorted order, build content, and push tiles to correct indices.
+  for (size_t index = 0; index < ids.size(); ++index) {
+    const uint32_t node_id = ids[index];
+    MeshNode* node = FindMeshNode(node_id);
+    if (node == nullptr) {
+      continue;
     }
+
+    char node_key[9];
+    FormatNodeKey(node_id, node_key, sizeof(node_key));
+    const String node_key_hex(node_key);
+
+    const bool node_connected = is_connected(node_id);
 
     MeshTile::Content content;
     if (!BuildTileContentForNode(node_key_hex, now_ms, node_connected,
@@ -1713,19 +1591,28 @@ void GuiRebuildTiles() {
       continue;
     }
 
-    MeshTile &tile = GetOrCreateTile(node_key_hex, tile_w, tile_h);
-    tile.SetContent(content);
-    tile.SetFlashIntervalMs(g_flash_interval_ms);
+    MeshTile* tile =
+        MeshTile::GetOrCreate(node_key_hex, g_ui_tile_container, tile_w,
+                              tile_h);
+    if (tile == nullptr) {
+      continue;
+    }
 
-    // Reorder LVGL children to match sorted order
-    tile.MoveToForeground();
+    tile->SetContent(content);
+    tile->SetFlashIntervalMs(g_flash_interval_ms);
+
+    // Reorder LVGL children to match the sorted ranking.
+    tile->EnsureChildIndex(static_cast<uint32_t>(index));
 
     if (content.node_has_alert) {
-      g_any_alert = true;
+      any_alert = true;
     } else if (content.is_stale || content.node_has_warning) {
-      g_any_warning = true;
+      any_warning = true;
     }
   }
+
+  g_any_alert = any_alert;
+  g_any_warning = any_warning;
 }
 
 // -----------------------------------------------------------------------------
@@ -1743,9 +1630,6 @@ void GuiRequestRender() { g_layout_dirty = true; }
 // -----------------------------------------------------------------------------
 // Display loop: rebuild tiles + buzzer + periodic refresh
 // -----------------------------------------------------------------------------
-
-// Display loop: rebuild tiles + buzzer + periodic refresh
-//
 // Tiles are now self-contained: each tile tracks its own flash timer and
 // decides when to repaint itself based on its Content and per-tile
 // flash interval.
@@ -1777,19 +1661,15 @@ void DisplayLoop() {
     last_build_ms = now_ms;
   }
 
-  // Drive per-tile time-based behaviour (flashing) using the tile's own
+  // Drive per-tile time-based behaviour (flashing) using each tile's own
   // timers and internal state.
-  for (auto &kv : g_tiles) {
-    MeshTile *tile = kv.second.tile;
-    if (tile != nullptr) {
-      tile->Loop(now_ms);
-    }
-  }
+  MeshTile::LoopAll(now_ms);
 
   // Uptime label updated at least once per minute; harmless to refresh here.
   UpdateUptimeLabel();
   lvgl_port_unlock();
 }
+
 
 void BuzzerLoop() {
   // Static state so we can be called every loop() tick.
@@ -1954,43 +1834,38 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
   GuiRequestRender();
 }
 
-static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
+static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
   (void)ctx;
   (void)argc;
   (void)argv;
 
-  EnsureDocuments();
-
   const uint32_t now_ms = millis();
-
-  // Snapshot all MeshNode IDs so we see every node the root knows about.
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   if (ids.empty()) {
     out.println(F("(no nodes)"));
   }
 
   for (uint32_t id : ids) {
-    MeshNode *node = FindMeshNode(id);
+    MeshNode* node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
 
-    const String node_hex = node->node_key_hex(); // 8-hex canonical id
-    String node_label = node->label();
-
+    const String node_hex = node->node_key_hex();
+    const String node_label = node->label();
     const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
     const int bus_gpio = node->bus_gpio();
 
     if (node_label.length() > 0) {
-      out.printf("node %s \"%s\" gpio=%d age=%lu min:\n", node_hex.c_str(),
-                 node_label.c_str(), bus_gpio,
+      out.printf("node %s \"%s\" gpio=%d age=%lu min:\n",
+                 node_hex.c_str(), node_label.c_str(), bus_gpio,
                  static_cast<unsigned long>(age_min));
     } else {
-      out.printf("node %s gpio=%d age=%lu min:\n", node_hex.c_str(), bus_gpio,
+      out.printf("node %s gpio=%d age=%lu min:\n",
+                 node_hex.c_str(), bus_gpio,
                  static_cast<unsigned long>(age_min));
     }
 
-    // Sequence / health line (same data as `debug nodes`, but shorter).
     if (node->has_sequence()) {
       const uint32_t seq = node->last_sequence();
       const uint32_t last_adv_ms = node->last_sequence_advance_ms();
@@ -2017,19 +1892,15 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
           stuck ? "YES" : "no");
     }
 
-    // Sensors for this node.
-    const auto &sensors = node->sensors();
+    const auto& sensors = node->sensors();
     if (sensors.empty()) {
       out.println(F("  (no sensors)"));
       continue;
     }
 
-    for (const auto &sensor : sensors) {
-      const String addr16 = sensor.address;
-      String sensor_label = sensor.label;
-      if (sensor_label.length() == 0) {
-        sensor_label = g_labels["sensors"][addr16] | "";
-      }
+    for (const auto& sensor : sensors) {
+      const String& addr16 = sensor.address;
+      const String sensor_label = sensor.label;
 
       String temp_s;
       if (!sensor.has_value || isnan(sensor.temp_c)) {
@@ -2044,21 +1915,19 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
       }
 
       if (sensor_label.length() > 0) {
-        out.printf("  %s \"%s\" : %s%s (age=%lu min)\n", addr16.c_str(),
-                   sensor_label.c_str(), temp_s.c_str(),
+        out.printf("  %s \"%s\" : %s%s (age=%lu min)\n",
+                   addr16.c_str(), sensor_label.c_str(),
+                   temp_s.c_str(),
                    sensor.corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       } else {
-        out.printf("  %s : %s%s (age=%lu min)\n", addr16.c_str(),
-                   temp_s.c_str(), sensor.corrected ? " (corr)" : "",
+        out.printf("  %s : %s%s (age=%lu min)\n",
+                   addr16.c_str(),
+                   temp_s.c_str(),
+                   sensor.corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       }
     }
-  }
-
-  // Still keep an eye on JSON doc capacity, since we use it for persistence.
-  if (g_last_seen.overflowed()) {
-    Serial.println(F("[WARN] g_last_seen overflow; increase capacity"));
   }
 
   GuiRequestRender();
@@ -2074,22 +1943,19 @@ static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
       out.println(F("ERR node rm <idHex>"));
       return;
     }
-    char key[9];
-    FormatNodeKey(id_u32, key, sizeof(key));
-    const String id_hex(key);
 
-    JsonObjectConst nodes_ro = g_last_seen["nodes"].as<JsonObjectConst>();
-    if (!nodes_ro[id_hex].is<JsonObjectConst>()) {
+    if (!RemoveMeshNode(id_u32)) {
       out.println(F("not found"));
       return;
     }
-    JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-    nodes.remove(id_hex);
+
+    // Persist updated topology (if enabled) and refresh UI.
     SaveKnownTopology();
     out.println(F("ok"));
     GuiRequestRender();
     return;
   }
+
 
   // node <idHex> <label...>
   if (argc < 3) {
@@ -2142,7 +2008,7 @@ static void CmdNodes(void *ctx, int argc, const String argv[], Print &out) {
   }
 }
 
-static void CmdName(void *ctx, int argc, const String argv[], Print &out) {
+static void CmdName(void* ctx, int argc, const String argv[], Print& out) {
   (void)ctx;
   if (argc < 3) {
     out.println(F("ERR name (usage: name <addr16> <label...>)"));
@@ -2165,24 +2031,26 @@ static void CmdName(void *ctx, int argc, const String argv[], Print &out) {
 
   const String addr16 = CanonAddr16(argv[1]);
 
-  EnsureDocuments();
-  g_labels["sensors"][addr16] = label;
-
-  // Update any existing sensors in MeshNode model.
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  bool applied = false;
   for (uint32_t id : ids) {
     MeshNode* node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
-    (void)node->SetSensorLabel(addr16, label);
+    if (node->SetSensorLabel(addr16, label)) {
+      applied = true;
+    }
+  }
+
+  if (!applied) {
+    out.println(F("WARN: no sensors with that address found"));
   }
 
   SaveLabels();
   out.println(F("ok"));
   GuiRequestRender();
 }
-
 
 static void CmdSave(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2208,18 +2076,33 @@ static void CmdErase(void *ctx, int argc, const String argv[], Print &out) {
   GuiRequestRender();
 }
 
-static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
+static void CmdStats(void* ctx, int argc, const String argv[], Print& out) {
   (void)ctx;
   (void)argc;
   (void)argv;
-  PrintJsonStats(out, "g_last_seen", g_last_seen);
-  PrintJsonStats(out, "g_labels", g_labels);
+
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  size_t sensor_count = 0;
+  for (uint32_t id : ids) {
+    MeshNode* node = FindMeshNode(id);
+    if (node != nullptr) {
+      sensor_count += node->sensors().size();
+    }
+  }
+
+  out.printf("nodes=%u sensors=%u\n",
+             static_cast<unsigned>(ids.size()),
+             static_cast<unsigned>(sensor_count));
 
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const size_t known_bytes = g_root_preferences.getBytesLength("known_bin");
+  const size_t labels_bytes = g_root_preferences.getString("labels", "").length();
   g_root_preferences.end();
+
   out.printf("known_bin NVS size=%u bytes\n",
              static_cast<unsigned>(known_bytes));
+  out.printf("labels NVS size=%u bytes\n",
+             static_cast<unsigned>(labels_bytes));
 }
 
 static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
@@ -2402,20 +2285,28 @@ static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
   }
   if (argv[1] == "on") {
     g_use_dummy_data = true;
+    // Drop any existing runtime nodes and tiles before building dummy set.
+    ClearAllMeshNodes();
+    MeshTile::DestroyAll();
     BuildDummyData();
     out.println(F("dummy=on"));
     GuiRequestRender();
   } else if (argv[1] == "off") {
     g_use_dummy_data = false;
-    g_last_seen.clear();
-    EnsureDocuments();
+
+    // Drop dummy nodes/tiles and restore from any persisted topology.
     ClearAllMeshNodes();
+    MeshTile::DestroyAll();
+    LoadKnownTopology();   // seeds MeshNode store from NVS if enabled
+
     out.println(F("dummy=off"));
     GuiRequestRender();
+
   } else {
     out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
   }
 }
+
 
 static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2575,69 +2466,7 @@ static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
              g_flash_interval_ms ? "enabled" : "off");
 }
 
-static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
-  (void)ctx;
-  EnsureDocuments();
-  JsonObject ord = g_labels["order"].to<JsonObject>();
 
-  if (argc >= 2 && argv[1] == "list") {
-    bool any = false;
-    for (JsonPair p : ord) {
-      any = true;
-      out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
-    }
-    if (!any) {
-      out.println(F("(empty)"));
-    }
-    out.println(F("ok"));
-    return;
-  }
-
-  if (argc >= 3 && argv[1] == "clear") {
-    const String key = CanonAddr16(argv[2]);
-    ord.remove(key);
-
-    // Drop global rank from all existing sensors with this address.
-    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
-    for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
-      if (node == nullptr) {
-        continue;
-      }
-      (void)node->SetSensorGlobalRank(key,
-                                      std::numeric_limits<int32_t>::max());
-    }
-
-    SaveLabels();
-    out.println(F("ok"));
-    GuiRequestRender();
-    return;
-  }
-
-  if (argc >= 3) {
-    const String key = CanonAddr16(argv[1]);
-    const int rank = argv[2].toInt();
-    ord[key] = rank;
-
-    // Apply to all existing sensors.
-    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
-    for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
-      if (node == nullptr) {
-        continue;
-      }
-      (void)node->SetSensorGlobalRank(key, rank);
-    }
-
-    SaveLabels();
-    out.println(F("ok"));
-    GuiRequestRender();
-    return;
-  }
-
-  out.println(F("ERR order (use 'order <addr16> <rank>' | 'order clear "
-                "<addr16>' | 'order list')"));
-}
 
 
 static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
@@ -2709,64 +2538,82 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
 }
 
 
-static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
+static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  EnsureDocuments();
-  JsonObject sroot = g_labels["sorder"].to<JsonObject>();
 
+  // order list
   if (argc >= 2 && argv[1] == "list") {
-    if (argc >= 3) {
-      const String node_id = argv[2];
-      JsonObject m = sroot[node_id].as<JsonObject>();
-      if (m.isNull())
-        out.println(F("(empty)"));
-      else {
-        bool any = false;
-        for (JsonPair p : m) {
-          any = true;
-          out.printf("%s : %d\n", p.key().c_str(), p.value().as<int>());
-        }
-        if (!any)
-          out.println(F("(empty)"));
+    // Build a map of addr16 -> global_rank from the current MeshNode store.
+    std::map<String, int32_t> rank_by_addr;
+
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    for (uint32_t id : ids) {
+      MeshNode* node = FindMeshNode(id);
+      if (node == nullptr) {
+        continue;
       }
+
+      const std::vector<MeshNode::Sensor>& sensors = node->sensors();
+      for (const auto& sensor : sensors) {
+        if (sensor.global_rank == std::numeric_limits<int32_t>::max()) {
+          continue;  // "unspecified"
+        }
+        const String addr16 = CanonAddr16(sensor.address);
+
+        auto it = rank_by_addr.find(addr16);
+        if (it == rank_by_addr.end()) {
+          rank_by_addr.emplace(addr16, sensor.global_rank);
+        } else {
+          // If multiple nodes disagree, keep the lowest rank.
+          if (sensor.global_rank < it->second) {
+            it->second = sensor.global_rank;
+          }
+        }
+      }
+    }
+
+    if (rank_by_addr.empty()) {
+      out.println(F("(empty)"));
       out.println(F("ok"));
       return;
     }
-    bool any_node = false;
-    for (JsonPair node_pair : sroot) {
-      any_node = true;
-      out.printf("[%s]\n", node_pair.key().c_str());
-      JsonObject m = node_pair.value();
-      bool any = false;
-      for (JsonPair p : m) {
-        any = true;
-        out.printf("  %s : %d\n", p.key().c_str(), p.value().as<int>());
-      }
-      if (!any)
-        out.println(F("  (empty)"));
+
+    // Sort by rank then address for stable, predictable output.
+    std::vector<std::pair<String, int32_t>> entries;
+    entries.reserve(rank_by_addr.size());
+    for (const auto& kv : rank_by_addr) {
+      entries.push_back(kv);
     }
-    if (!any_node)
-      out.println(F("(empty)"));
+
+    std::sort(entries.begin(), entries.end(),
+              [](const std::pair<String, int32_t>& a,
+                 const std::pair<String, int32_t>& b) {
+                if (a.second != b.second) {
+                  return a.second < b.second;
+                }
+                return a.first < b.first;
+              });
+
+    for (const auto& e : entries) {
+      out.printf("%s : %ld\n", e.first.c_str(),
+                 static_cast<long>(e.second));
+    }
     out.println(F("ok"));
     return;
   }
 
-  if (argc >= 4 && argv[1] == "clear") {
-    uint32_t id_u32 = 0;
-    if (!ParseNodeIdToU32(argv[2], &id_u32)) {
-      out.println(F("ERR sorder clear <nodeIdHex> <addr16>"));
-      return;
-    }
-    char node_key[9];
-    FormatNodeKey(id_u32, node_key, sizeof(node_key));
-    const String key = CanonAddr16(argv[3]);
-    JsonObject m = sroot[String(node_key)].to<JsonObject>();
-    m.remove(key);
+  // order clear <addr16>
+  if (argc >= 3 && argv[1] == "clear") {
+    const String key = CanonAddr16(argv[2]);
 
-    MeshNode* node = FindMeshNode(id_u32);
-    if (node != nullptr) {
-      (void)node->SetSensorNodeRank(key,
-                                    std::numeric_limits<int32_t>::max());
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    for (uint32_t id : ids) {
+      MeshNode* node = FindMeshNode(id);
+      if (node == nullptr) {
+        continue;
+      }
+      (void)node->SetSensorGlobalRank(
+          key, std::numeric_limits<int32_t>::max());
     }
 
     SaveLabels();
@@ -2775,18 +2622,176 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
+  // order <addr16> <rank>
+  if (argc >= 3) {
+    const String key = CanonAddr16(argv[1]);
+    const int32_t rank = argv[2].toInt();
+
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    bool applied = false;
+    for (uint32_t id : ids) {
+      MeshNode* node = FindMeshNode(id);
+      if (node == nullptr) {
+        continue;
+      }
+      if (node->SetSensorGlobalRank(key, rank)) {
+        applied = true;
+      }
+    }
+
+    if (!applied) {
+      out.println(F("WARN: no sensors with that address found"));
+    }
+
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
+  }
+
+  out.println(F("ERR order (use 'order <addr16> <rank>' | "
+                "'order clear <addr16>' | 'order list')"));
+}
+
+
+static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+
+  // sorder list [nodeIdHex]
+  if (argc >= 2 && argv[1] == "list") {
+    // sorder list <nodeIdHex>
+    if (argc >= 3) {
+      uint32_t id_u32 = 0;
+      if (!ParseNodeIdToU32(argv[2], &id_u32)) {
+        out.println(F("ERR sorder list <nodeIdHex>"));
+        return;
+      }
+
+      MeshNode* node = FindMeshNode(id_u32);
+      if (node == nullptr) {
+        out.println(F("(node not found)"));
+        out.println(F("ok"));
+        return;
+      }
+
+      const std::vector<MeshNode::Sensor>& sensors = node->sensors();
+      std::vector<std::pair<String, int32_t>> entries;
+      entries.reserve(sensors.size());
+
+      for (const auto& sensor : sensors) {
+        if (sensor.node_rank == std::numeric_limits<int32_t>::max()) {
+          continue;  // "unspecified"
+        }
+        entries.emplace_back(CanonAddr16(sensor.address), sensor.node_rank);
+      }
+
+      if (entries.empty()) {
+        out.println(F("(empty)"));
+        out.println(F("ok"));
+        return;
+      }
+
+      std::sort(entries.begin(), entries.end(),
+                [](const std::pair<String, int32_t>& a,
+                   const std::pair<String, int32_t>& b) {
+                  if (a.second != b.second) {
+                    return a.second < b.second;
+                  }
+                  return a.first < b.first;
+                });
+
+      for (const auto& e : entries) {
+        out.printf("%s : %ld\n", e.first.c_str(),
+                   static_cast<long>(e.second));
+      }
+      out.println(F("ok"));
+      return;
+    }
+
+    // sorder list (all nodes)
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    if (ids.empty()) {
+      out.println(F("(empty)"));
+      out.println(F("ok"));
+      return;
+    }
+
+    for (uint32_t id : ids) {
+      MeshNode* node = FindMeshNode(id);
+      if (node == nullptr) {
+        continue;
+      }
+
+      char node_key[9];
+      FormatNodeKey(id, node_key, sizeof(node_key));
+      out.printf("[%s]\n", node_key);
+
+      const std::vector<MeshNode::Sensor>& sensors = node->sensors();
+      std::vector<std::pair<String, int32_t>> entries;
+      entries.reserve(sensors.size());
+
+      for (const auto& sensor : sensors) {
+        if (sensor.node_rank == std::numeric_limits<int32_t>::max()) {
+          continue;
+        }
+        entries.emplace_back(CanonAddr16(sensor.address),
+                             sensor.node_rank);
+      }
+
+      if (entries.empty()) {
+        out.println(F("  (empty)"));
+      } else {
+        std::sort(entries.begin(), entries.end(),
+                  [](const std::pair<String, int32_t>& a,
+                     const std::pair<String, int32_t>& b) {
+                    if (a.second != b.second) {
+                      return a.second < b.second;
+                    }
+                    return a.first < b.first;
+                  });
+
+        for (const auto& e : entries) {
+          out.printf("  %s : %ld\n", e.first.c_str(),
+                     static_cast<long>(e.second));
+        }
+      }
+    }
+
+    out.println(F("ok"));
+    return;
+  }
+
+  // sorder clear <nodeIdHex> <addr16>
+  if (argc >= 4 && argv[1] == "clear") {
+    uint32_t id_u32 = 0;
+    if (!ParseNodeIdToU32(argv[2], &id_u32)) {
+      out.println(F("ERR sorder clear <nodeIdHex> <addr16>"));
+      return;
+    }
+
+    const String key = CanonAddr16(argv[3]);
+    MeshNode* node = FindMeshNode(id_u32);
+    if (node != nullptr) {
+      (void)node->SetSensorNodeRank(
+          key, std::numeric_limits<int32_t>::max());
+    }
+
+    SaveLabels();
+    out.println(F("ok"));
+    GuiRequestRender();
+    return;
+  }
+
+  // sorder <nodeIdHex> <addr16> <rank>
   if (argc >= 4) {
     uint32_t id_u32 = 0;
     if (!ParseNodeIdToU32(argv[1], &id_u32)) {
       out.println(F("ERR sorder <nodeIdHex> <addr16> <rank>"));
       return;
     }
-    char node_key[9];
-    FormatNodeKey(id_u32, node_key, sizeof(node_key));
+
     const String key = CanonAddr16(argv[2]);
-    const int rank = argv[3].toInt();
-    JsonObject m = sroot[String(node_key)].to<JsonObject>();
-    m[key] = rank;
+    const int32_t rank = argv[3].toInt();
 
     MeshNode* node = FindMeshNode(id_u32);
     if (node != nullptr) {
@@ -2800,9 +2805,10 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   out.println(
-      F("ERR sorder (use 'sorder <nodeIdHex> <addr16> <rank>' | 'sorder "
-        "clear <nodeIdHex> <addr16>' | 'sorder list [nodeIdHex]')"));
+      F("ERR sorder (use 'sorder <nodeIdHex> <addr16> <rank>' | "
+        "'sorder clear <nodeIdHex> <addr16>' | 'sorder list [nodeIdHex]')"));
 }
+
 
 // -----------------------------------------------------------------------------
 // Root announce and console
@@ -2824,14 +2830,15 @@ void RootAnnounce() {
 // Mesh callbacks (root)
 // -----------------------------------------------------------------------------
 
-void OnReceiveRoot(uint32_t from, String &msg) {
+void OnReceiveRoot(uint32_t from, String& msg) {
   bool structure_changed = false;
 
-  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
+  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n",
+       static_cast<unsigned long>(from),
        static_cast<unsigned>(msg.length()), msg.c_str());
 
   if (g_use_dummy_data) {
-    // In dummy mode, ignore real traffic to keep UI deterministic.
+    // In dummy mode, ignore real traffic.
     return;
   }
 
@@ -2841,7 +2848,7 @@ void OnReceiveRoot(uint32_t from, String &msg) {
     return;
   }
 
-  const char *type = doc["type"] | "temps";
+  const char* type = doc["type"] | "temps";
   if (strcmp(type, "temps") != 0) {
     DLOG("  ! ignoring type '%s'\n", type);
     return;
@@ -2849,15 +2856,11 @@ void OnReceiveRoot(uint32_t from, String &msg) {
 
   const uint32_t now_ms = millis();
 
-  // 1) MeshNode is the definitive authority: parse the full packet into it.
-  MeshNode *node_model = UpdateMeshNodeFromTempsJson(doc, from, now_ms);
+  MeshNode* node_model = UpdateMeshNodeFromTempsJson(doc, from, now_ms);
   if (node_model == nullptr) {
     DLOG("  ! UpdateMeshNodeFromTempsJson failed\n");
     return;
   }
-
-  // Pull in any persisted labels / ordering for this node & its sensors.
-  ApplySensorMetadataFromLabels(node_model);
 
   const uint32_t node_id = node_model->node_id();
   const int bus_gpio = node_model->bus_gpio();
@@ -2866,52 +2869,22 @@ void OnReceiveRoot(uint32_t from, String &msg) {
        static_cast<unsigned long>(node_id), bus_gpio,
        static_cast<unsigned>(node_model->sensors().size()));
 
-  // 2) Topology persistence: add/update known IDs based on the MeshNode id.
+  // Topology persistence: add/update known IDs.
   if (g_topology_persist_enabled) {
-    (void)AddKnownAndPersist(node_id);
+    structure_changed |= AddKnownAndPersist(node_id);
   }
 
-  // 3) Mirror MeshNode state into legacy JSON docs (console + persistence).
-  EnsureDocuments();
-  JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
-
-  char node_key[16];
-  FormatNodeKey(node_id, node_key, sizeof(node_key));
-
-  bool existed = nodes[node_key].is<JsonObject>();
-  JsonObject node_obj = nodes[node_key].to<JsonObject>();
-  if (!existed) {
-    structure_changed = true;
-  }
-
-  node_obj["busGpio"] = bus_gpio;
-  node_obj["last"] = now_ms;
-
-  JsonObject sensors_out = node_obj["sensors"].to<JsonObject>();
-  for (const auto &sensor : node_model->sensors()) {
-    const String &addr16 = sensor.address;
-    JsonObject sensor_out = sensors_out[addr16].to<JsonObject>();
-
-    if (sensor.has_value && !isnan(sensor.temp_c)) {
-      sensor_out["tC"] = sensor.temp_c;
-    } else {
-      sensor_out.remove("tC");
-    }
-    sensor_out["corr"] = sensor.corrected;
-    sensor_out["last"] = sensor.last_ms;
-  }
+  // For now, labels/ranks live in MeshNode only. If you want to
+  // re-apply persisted labels on each packet, call LoadLabels()
+  // occasionally or add a small cache here.
 
   GuiUpdateNodeSummary(node_model->node_id_str().c_str(), bus_gpio, now_ms);
 
-  // 4) Choose cheapest refresh path.
+  // Layout vs values.
   if (structure_changed) {
-    g_layout_dirty = true; // rebuild tiles (rare)
+    g_layout_dirty = true;   // new node(s)
   } else {
-    g_values_dirty = true; // just rewrite texts/colors
-  }
-
-  if (g_last_seen.overflowed()) {
-    Serial.println(F("[WARN] g_last_seen overflow; increase capacity"));
+    g_values_dirty = true;   // just values
   }
 }
 
@@ -2923,54 +2896,26 @@ void OnConnectionsChangedRoot() {
     return;
   }
 
-  EnsureDocuments();
-  JsonObject nodes = g_last_seen["nodes"].to<JsonObject>();
   const uint32_t now_ms = millis();
   bool structure_changed = false;
 
-  // Ensure each connected node has an entry.
-  for (const auto &id : mesh.getNodeList()) {
-    char node_key[16];
-    FormatNodeKey(id, node_key, sizeof(node_key));
-
-    bool existed = nodes[node_key].is<JsonObject>();
-    JsonObject node_obj = nodes[node_key].to<JsonObject>();
-    if (!existed) {
-      if (g_topology_persist_enabled) {
-        (void)AddKnownAndPersist(id);
-      }
-      structure_changed = true;
-    }
-
-    if (!node_obj["last"].is<uint32_t>()) {
-      node_obj["last"] = now_ms;
-    }
-    if (!node_obj["sensors"].is<JsonObject>()) {
-      node_obj["sensors"].to<JsonObject>();
-    }
-
-    // Keep MeshNode store aligned with connection topology as well.
-    MeshNode *node_model = GetOrCreateMeshNode(id);
+  for (const auto& id : mesh.getNodeList()) {
+    MeshNode* node_model = GetOrCreateMeshNode(id);
     if (node_model != nullptr && node_model->last_update_ms() == 0U) {
       node_model->SetBusGpioAndLastUpdate(-1, now_ms);
-    }
-
-    // Ensure node label + per-sensor metadata are synced from g_labels.
-    if (node_model != nullptr) {
-      ApplySensorMetadataFromLabels(node_model);
-    }
-
-    // Do not delete nodes; they age out visually.
-    if (structure_changed) {
-      g_layout_dirty = true; // new node(s) appeared → layout rebuild
-    } else {
-      g_values_dirty = true; // pure connection changes → value refresh only
+      structure_changed = true;
     }
   }
 
-  // Do not delete nodes; they age out visually.
+  if (structure_changed) {
+    g_layout_dirty = true;
+  } else {
+    g_values_dirty = true;
+  }
+
   GuiRequestRender();
 }
+
 
 // -----------------------------------------------------------------------------
 // Arduino entry points (root)
@@ -2979,9 +2924,6 @@ void OnConnectionsChangedRoot() {
 void setup() {
   Serial.begin(DBG_BAUD);
   delay(200);
-
-  g_last_seen.clear();
-  g_labels.clear();
 
   RootInitStorage();
 

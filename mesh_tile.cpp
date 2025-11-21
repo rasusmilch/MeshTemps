@@ -1,5 +1,101 @@
 #include "mesh_tile.h"
 
+#include <map>
+
+// Anonymous namespace for the registry backing store.
+namespace {
+
+std::map<String, MeshTile*>& TileRegistry() {
+  // Lazy init to avoid static initialization order issues.
+  static std::map<String, MeshTile*>* registry =
+      new std::map<String, MeshTile*>();
+  return *registry;
+}
+
+}  // namespace
+
+// ---- Static registry API ---------------------------------------------------
+
+std::map<String, MeshTile*>& MeshTile::Registry() {
+  return TileRegistry();
+}
+
+MeshTile* MeshTile::GetOrCreate(const String& node_key_hex,
+                                lv_obj_t* parent,
+                                lv_coord_t width,
+                                lv_coord_t height) {
+  std::map<String, MeshTile*>& registry = Registry();
+  auto it = registry.find(node_key_hex);
+  if (it != registry.end() && it->second != nullptr) {
+    MeshTile* tile = it->second;
+    tile->SetSize(width, height);
+    return tile;
+  }
+
+  // First time for this node: allocate tile and register it.
+  MeshTile* tile = new MeshTile(parent, width, height);
+  tile->SetNodeKey(node_key_hex);
+  registry[node_key_hex] = tile;
+  return tile;
+}
+
+MeshTile* MeshTile::Find(const String& node_key_hex) {
+  std::map<String, MeshTile*>& registry = Registry();
+  auto it = registry.find(node_key_hex);
+  if (it == registry.end()) {
+    return nullptr;
+  }
+  return it->second;
+}
+
+void MeshTile::ForEach(VisitFunc func, void* user_data) {
+  if (func == nullptr) {
+    return;
+  }
+  std::map<String, MeshTile*>& registry = Registry();
+  for (auto& entry : registry) {
+    MeshTile* tile = entry.second;
+    if (tile != nullptr) {
+      func(tile, user_data);
+    }
+  }
+}
+
+void MeshTile::LoopAll(uint32_t now_ms) {
+  std::map<String, MeshTile*>& registry = Registry();
+  for (auto& entry : registry) {
+    MeshTile* tile = entry.second;
+    if (tile != nullptr) {
+      tile->Loop(now_ms);
+    }
+  }
+}
+
+void MeshTile::Destroy(const String& node_key_hex) {
+  std::map<String, MeshTile*>& registry = Registry();
+  auto it = registry.find(node_key_hex);
+  if (it == registry.end()) {
+    return;
+  }
+  MeshTile* tile = it->second;
+  registry.erase(it);
+  if (tile != nullptr) {
+    delete tile;
+  }
+}
+
+void MeshTile::DestroyAll() {
+  std::map<String, MeshTile*>& registry = Registry();
+  for (auto& entry : registry) {
+    if (entry.second != nullptr) {
+      delete entry.second;
+    }
+  }
+  registry.clear();
+}
+
+// ---- ctor / dtor -----------------------------------------------------------
+
 MeshTile::MeshTile(lv_obj_t* parent,
                    lv_coord_t width,
                    lv_coord_t height) {
@@ -16,6 +112,15 @@ MeshTile::MeshTile(lv_obj_t* parent,
   flash_interval_ms_ = 0;
   last_flash_toggle_ms_ = 0;
 }
+
+MeshTile::~MeshTile() {
+  // Destroy LVGL object tree if still present.
+  if (root_ != nullptr) {
+    lv_obj_del(root_);
+    root_ = nullptr;
+  }
+}
+
 
 void MeshTile::InitWidgets(lv_obj_t* parent,
                            lv_coord_t width,
@@ -399,6 +504,26 @@ void MeshTile::SetFlashIntervalMs(uint32_t interval_ms) {
     }
   }
 }
+
+void MeshTile::EnsureChildIndex(uint32_t desired_index) {
+  if (root_ == nullptr) {
+    return;
+  }
+
+  lv_obj_t* parent = lv_obj_get_parent(root_);
+  if (parent == nullptr) {
+    return;
+  }
+
+  uint32_t current_index = lv_obj_get_index(root_);
+  if (current_index == desired_index) {
+    // Already in the right spot; avoid LVGL churn.
+    return;
+  }
+
+  lv_obj_move_to_index(root_, static_cast<lv_coord_t>(desired_index));
+}
+
 
 // Per-tile time-based update. Call this once per main loop with millis().
 void MeshTile::Loop(uint32_t now_ms) {

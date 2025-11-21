@@ -177,4 +177,7 @@ std::vector<uint32_t> GetAllMeshNodeIds();
 // Clear all known nodes from the global store (used by dummy mode).
 void ClearAllMeshNodes();
 
+// Remove a single node from the global store; returns true if removed.
+bool RemoveMeshNode(uint32_t node_id);
+
 #endif  // MESH_NODE_H_

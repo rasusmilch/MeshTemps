@@ -3,99 +3,129 @@
 
 #include <Arduino.h>
 #include <lvgl.h>
+#include <map>
 
-// A self-contained LVGL "status tile" widget used to display a single node.
-//
-// This class owns a root lv_obj_t and its child labels. It does not know
-// anything about JSON, mesh, or thresholds. The caller supplies a Content
-// snapshot, and the tile renders it (layout, text, colors, flashing).
+// Forward declaration so we can use it in Content.
 class MeshTile {
  public:
-  // Description of a single sensor line rendered on the tile.
   struct SensorView {
-    String label;        // e.g. "Rack Inlet"
-    float temp_c = NAN;  // raw °C value (tile will format using units flag)
+    String label;
+    float temp_c = NAN;
     bool has_value = false;
     bool is_alert = false;
     bool is_warning = false;
   };
 
-  // Snapshot of everything the tile needs to render itself.
   struct Content {
-    String title;              // top line, e.g. "Server Room"
-    uint32_t age_minutes = 0;  // "Age: N min"
+    String title;
+
+    // Node UI state.
+    uint32_t age_minutes = 0;
+    bool is_missing = false;
+    bool is_stale = false;
+    bool seq_stuck = false;
 
     bool node_has_alert = false;
     bool node_has_warning = false;
-    bool is_missing = false;
-    bool is_stale = false;
 
-    // True if the node's sequence number has not advanced for an
-    // extended period while messages are still being received.
-    bool seq_stuck = false;
-
-    // Display units.
+    // Display options.
     bool display_fahrenheit = true;
+    bool show_sensor_labels = true;
+    bool show_age = true;
 
-    // Up to two sensors per tile.
+    // Up to 2 sensors.
     int sensor_count = 0;
     SensorView sensors[2];
-
-    // UI toggles from root.
-    bool show_sensor_labels = true;  // show/hide sensor name text
-    bool show_age = true;            // show/hide "Age: N min"
   };
 
-  MeshTile(lv_obj_t* parent,
-           lv_coord_t width,
-           lv_coord_t height);
+  // Visitor function type for iterating all tiles.
+  using VisitFunc = void (*)(MeshTile* tile, void* user_data);
+
+  // ---- Static registry API (MeshTile is the sole owner of tiles) ----
+
+  // Get or create the tile for a given node key (8-hex String).
+  // Creates the LVGL object under |parent| if needed, and ensures size.
+  static MeshTile* GetOrCreate(const String& node_key_hex,
+                               lv_obj_t* parent,
+                               lv_coord_t width,
+                               lv_coord_t height);
+
+  // Find an existing tile by node key; returns nullptr if not present.
+  static MeshTile* Find(const String& node_key_hex);
+
+  // Visit all tiles currently registered.
+  static void ForEach(VisitFunc func, void* user_data);
+
+  // Destroy tile for a given node, deleting its LVGL object.
+  static void Destroy(const String& node_key_hex);
+
+  // Destroy all tiles and clear registry.
+  static void DestroyAll();
+
+  // Iterate all tiles and advance their per-tile timers (flashing, etc.).
+  static void LoopAll(uint32_t now_ms);
+
+
+  // ---- Per-tile API ----
+
+  MeshTile(lv_obj_t* parent, lv_coord_t width, lv_coord_t height);
+  ~MeshTile();
+
+  // Node key this tile represents (canonical 8-hex, e.g. "10000001").
+  const String& node_key_hex() const { return node_key_hex_; }
 
   // Resize tile when layout changes.
   void SetSize(lv_coord_t width, lv_coord_t height);
 
-  // Full content update (title, age, sensors, colors/highlights).
+  // Full content update (title, sensors, flags, etc.).
   void SetContent(const Content& content);
 
-  // Cheap "age only" update used on minute ticks.
-  void SetAgeOnly(uint32_t age_minutes,
-                  bool is_missing,
-                  bool is_stale);
+  // Cheap age-only update.
+  void SetAgeOnly(uint32_t age_minutes, bool is_missing, bool is_stale);
 
-  // Set flashing interval for warning/alert tiles (0 = off).
+  // Set flashing interval (0 = no flash).
   void SetFlashIntervalMs(uint32_t interval_ms);
 
-  lv_obj_t* root() const { return root_; }
-
-  void MoveToForeground();
-  
-  // Per-tile time-based update. Call once per loop() with millis().
+  // Per-frame time-based behavior (flashing, etc.).
   void Loop(uint32_t now_ms);
 
+  // Reorder within parent to the given child index if needed.
+  // Uses lv_obj_move_to_index() but only when the index actually changes.
+  void EnsureChildIndex(uint32_t desired_index);
+
+  // Optional access to root LVGL object if needed.
+  lv_obj_t* root() const { return root_; }
+
  private:
-  void InitWidgets(lv_obj_t* parent,
-                   lv_coord_t width,
-                   lv_coord_t height);
+  // Internal registry.
+  static std::map<String, MeshTile*>& Registry();
+
+  // Set node key after construction.
+  void SetNodeKey(const String& node_key_hex) { node_key_hex_ = node_key_hex; }
+
+  void InitWidgets(lv_obj_t* parent, lv_coord_t width, lv_coord_t height);
   void UpdateBaseColors();
   void UpdateTextsAndLayout();
   void ApplyBaseColors();
+  void ApplyFlashColors(bool flash_active);
+  void MoveToForeground();
   void ApplyFlashPhase(bool flash_on);
+
+  String node_key_hex_;  // 8-hex node id this tile is tied to.
 
   lv_obj_t* root_ = nullptr;
   lv_obj_t* label_loc_ = nullptr;
   lv_obj_t* label_age_ = nullptr;
-
-  // Per-sensor name + temperature labels (two "slots" per tile).
   lv_obj_t* sensor_name_label_[2] = {nullptr, nullptr};
   lv_obj_t* sensor_temp_label_[2] = {nullptr, nullptr};
 
-  // Cached colors for current content.
+  Content content_;
+
   lv_color_t bg_normal_;
   lv_color_t fg_normal_;
   lv_color_t bg_flash_;
   lv_color_t fg_flash_;
   lv_color_t sensor_color_[2];
-
-  Content content_;
 
   bool last_flash_active_ = false;
   uint32_t flash_interval_ms_ = 0;
