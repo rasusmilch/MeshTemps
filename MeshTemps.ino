@@ -84,6 +84,15 @@ static String JoinTokens(int argc, const String argv[], int start) {
   return out;
 }
 
+// Echo the full command line (argv[0..argc-1]) before executing a handler.
+static void PrintCommandHeader(Print& out, int argc, const String argv[]) {
+  // Always print a line so you can see that the handler actually fired,
+  // even if argc is 0 for some reason.
+  const String line = JoinTokens(argc, argv, 0);
+  out.print(F("> "));
+  out.println(line);
+}
+
 // Prints document usage in both ArduinoJson v6 and v7.
 static void PrintJsonStats(Print &out, const char *name,
                            const JsonDocument &doc) {
@@ -1725,13 +1734,15 @@ void BuzzerLoop() {
 
 static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  (void)argc;
-  (void)argv;
+  PrintCommandHeader(out, argc, argv);
   g_console.PrintHelp(out);
 }
 
+
 static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc >= 2 && argv[1] == "erase") {
     g_root_preferences.begin("meshroot", false);
     g_root_preferences.remove("known_bin");
@@ -1754,15 +1765,19 @@ static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
 
   // mute list
   if (argc >= 2 && argv[1] == "list") {
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     if (ids.empty()) {
-      out.println(F("(empty)"));
-      out.println(F("ok"));
+      out.println(F("mute list: (no nodes)"));
       return;
     }
+
+    out.printf("mute list: %u node(s)\n",
+               static_cast<unsigned>(ids.size()));
+
     for (uint32_t id : ids) {
       MeshNode* node = FindMeshNode(id);
       if (node == nullptr) {
@@ -1773,7 +1788,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
       FormatNodeKey(id, key, sizeof(key));
       out.printf("%s : %s\n", key, NodeMuteMaskToString(mask));
     }
-    out.println(F("ok"));
+    out.println(F("mute list: done"));
     return;
   }
 
@@ -1787,7 +1802,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
     MeshNode* node = FindMeshNode(id_u32);
     const uint8_t mask =
         (node != nullptr) ? (node->mute_mask() & 0x3u) : kMuteNone;
-    out.printf("0x%08lX : %s\n", static_cast<unsigned long>(id_u32),
+    out.printf("mute get 0x%08lX : %s\n", static_cast<unsigned long>(id_u32),
                NodeMuteMaskToString(mask));
     return;
   }
@@ -1834,10 +1849,10 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
   GuiRequestRender();
 }
 
+
 static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
   (void)ctx;
-  (void)argc;
-  (void)argv;
+  PrintCommandHeader(out, argc, argv);
 
   const uint32_t now_ms = millis();
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
@@ -1935,6 +1950,7 @@ static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
 
 static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
 
   // node rm <idHex>
   if (argc >= 3 && argv[1] == "rm") {
@@ -1945,17 +1961,18 @@ static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     if (!RemoveMeshNode(id_u32)) {
-      out.println(F("not found"));
+      out.printf("node rm 0x%08lX: not found\n",
+                 static_cast<unsigned long>(id_u32));
       return;
     }
 
     // Persist updated topology (if enabled) and refresh UI.
     SaveKnownTopology();
-    out.println(F("ok"));
+    out.printf("node rm 0x%08lX: removed and topology saved\n",
+               static_cast<unsigned long>(id_u32));
     GuiRequestRender();
     return;
   }
-
 
   // node <idHex> <label...>
   if (argc < 3) {
@@ -1983,25 +2000,30 @@ static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("ERR node (usage: node <idHex> <label...>)"));
     return;
   }
-  char key[9];
-  FormatNodeKey(id_u32, key, sizeof(key));
-  const String id_hex(key);
 
   MeshNode* node_model = GetOrCreateMeshNode(id_u32);
   if (node_model != nullptr) {
     node_model->set_label(label);
     SaveNodeMetaToNVSIfChanged();
+    out.printf("node 0x%08lX label=\"%s\"\n",
+               static_cast<unsigned long>(id_u32),
+               label.c_str());
+  } else {
+    out.printf("node 0x%08lX: FAILED to set label \"%s\"\n",
+               static_cast<unsigned long>(id_u32),
+               label.c_str());
   }
-  out.println(F("ok"));
   GuiRequestRender();
 }
 
-
 static void CmdNodes(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc >= 2 && argv[1] == "clear") {
     EraseKnownTopology();
-    out.println(F("ok"));
+    out.println(
+        F("nodes clear: erased persisted topology and in-memory nodes"));
     GuiRequestRender();
   } else {
     out.println(F("ERR nodes (use: nodes clear)"));
@@ -2048,12 +2070,15 @@ static void CmdName(void* ctx, int argc, const String argv[], Print& out) {
   }
 
   SaveLabels();
-  out.println(F("ok"));
+  out.printf("name %s=\"%s\" (labels saved)\n",
+             addr16.c_str(), label.c_str());
   GuiRequestRender();
 }
 
+
 static void CmdSave(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
   (void)argc;
   (void)argv;
   SaveLabels();
@@ -2061,6 +2086,7 @@ static void CmdSave(void *ctx, int argc, const String argv[], Print &out) {
 }
 static void CmdLoad(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
   (void)argc;
   (void)argv;
   LoadLabels();
@@ -2069,6 +2095,7 @@ static void CmdLoad(void *ctx, int argc, const String argv[], Print &out) {
 }
 static void CmdErase(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
   (void)argc;
   (void)argv;
   EraseLabels();
@@ -2078,6 +2105,7 @@ static void CmdErase(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdStats(void* ctx, int argc, const String argv[], Print& out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
   (void)argc;
   (void)argv;
 
@@ -2107,6 +2135,7 @@ static void CmdStats(void* ctx, int argc, const String argv[], Print& out) {
 
 static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
 
   // Extended debug: "debug nodes" prints per-node age and sequence health.
   if (argc >= 2 && argv[1] == "nodes") {
@@ -2185,6 +2214,8 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdUnits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc < 2) {
     out.println(F("ERR units (use 'units c' or 'units f')"));
     return;
@@ -2206,6 +2237,8 @@ static void CmdUnits(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdHighlight(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc < 3) {
     out.println(F("ERR highlight (use 'highlight missing on|off' or 'highlight "
                   "stale <min>')"));
@@ -2241,6 +2274,7 @@ static void CmdHighlight(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdLabels(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
 
   if (argc < 3) {
     out.printf("labels sensor=%s age=%s\n", g_show_sensor_labels ? "on" : "off",
@@ -2279,6 +2313,8 @@ static void CmdLabels(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc < 2) {
     out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
     return;
@@ -2310,6 +2346,8 @@ static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   auto ToC = [&](float v) {
     return g_display_fahrenheit ? (v - 32.0f) / 1.8f : v;
   };
@@ -2352,6 +2390,8 @@ static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc < 2) {
     out.println(F("topo cmds:\n"
                   "  topo show\n"
@@ -2385,7 +2425,7 @@ static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
     g_topology_persist_enabled = true;
     SaveKnownTopology();
     g_topology_persist_enabled = prev;
-    out.println(F("ok"));
+    out.println(F("topo save: requested persist of current RAM topology"));
     return;
   }
 
@@ -2396,13 +2436,14 @@ static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
     LoadKnownTopology();
     g_topology_persist_enabled = prev;
     GuiRequestRender();
-    out.println(F("ok"));
+    out.println(F("topo load: pre-seeded MeshNode store from NVS"));
     return;
   }
 
   if (sub == "clear") {
     EraseKnownTopology();
-    out.println(F("ok"));
+    out.println(
+        F("topo clear: erased persisted topology and in-memory nodes"));
     GuiRequestRender();
     return;
   }
@@ -2410,8 +2451,11 @@ static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ERR topo (type just 'topo' for help)"));
 }
 
+
 static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc < 4) {
     out.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> "
                   "<alert_gap_ms>, gaps>=0)"));
@@ -2436,6 +2480,8 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc < 2) {
     out.println(F("ERR flash (use 'flash <interval_ms>' or 'flash off')"));
     return;
@@ -2466,20 +2512,21 @@ static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
              g_flash_interval_ms ? "enabled" : "off");
 }
 
-
-
-
 static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
 
   // norder list
   if (argc >= 2 && argv[1] == "list") {
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     if (ids.empty()) {
-      out.println(F("(empty)"));
-      out.println(F("ok"));
+      out.println(F("norder list: (no nodes)"));
       return;
     }
+
+    out.printf("norder list: %u node(s)\n",
+               static_cast<unsigned>(ids.size()));
+
     for (uint32_t id : ids) {
       MeshNode* node = FindMeshNode(id);
       if (node == nullptr) {
@@ -2490,7 +2537,7 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
       out.printf("%s : %ld\n", key,
                  static_cast<long>(node->tile_rank()));
     }
-    out.println(F("ok"));
+    out.println(F("norder list: done"));
     return;
   }
 
@@ -2506,7 +2553,8 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
       node->set_tile_rank(std::numeric_limits<int32_t>::max());
       SaveNodeMetaToNVSIfChanged();
     }
-    out.println(F("ok"));
+    out.printf("norder clear %s: rank reset to default\n",
+               argv[2].c_str());
     GuiRequestRender();
     return;
   }
@@ -2525,10 +2573,11 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
       node->set_tile_rank(rank);
       char key[9];
       FormatNodeKey(id_u32, key, sizeof(key));
-      out.printf("norder: %s -> %ld\n", key, static_cast<long>(rank));
+      out.printf("norder %s -> %ld\n", key, static_cast<long>(rank));
       SaveNodeMetaToNVSIfChanged();
+    } else {
+      out.printf("norder %s: FAILED to set rank\n", argv[1].c_str());
     }
-    out.println(F("ok"));
     GuiRequestRender();
     return;
   }
@@ -2537,9 +2586,9 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
                 "'norder clear <nodeIdHex>' | 'norder list')"));
 }
 
-
 static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
 
   // order list
   if (argc >= 2 && argv[1] == "list") {
@@ -2573,8 +2622,7 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     if (rank_by_addr.empty()) {
-      out.println(F("(empty)"));
-      out.println(F("ok"));
+      out.println(F("order list: (empty)"));
       return;
     }
 
@@ -2594,11 +2642,13 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
                 return a.first < b.first;
               });
 
+    out.printf("order list: %u unique address(es)\n",
+               static_cast<unsigned>(entries.size()));
     for (const auto& e : entries) {
       out.printf("%s : %ld\n", e.first.c_str(),
                  static_cast<long>(e.second));
     }
-    out.println(F("ok"));
+    out.println(F("order list: done"));
     return;
   }
 
@@ -2617,7 +2667,7 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     SaveLabels();
-    out.println(F("ok"));
+    out.printf("order clear %s: global rank reset\n", key.c_str());
     GuiRequestRender();
     return;
   }
@@ -2644,7 +2694,8 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     SaveLabels();
-    out.println(F("ok"));
+    out.printf("order %s -> %ld (labels saved)\n",
+               key.c_str(), static_cast<long>(rank));
     GuiRequestRender();
     return;
   }
@@ -2653,9 +2704,9 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
                 "'order clear <addr16>' | 'order list')"));
 }
 
-
 static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
 
   // sorder list [nodeIdHex]
   if (argc >= 2 && argv[1] == "list") {
@@ -2669,8 +2720,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
 
       MeshNode* node = FindMeshNode(id_u32);
       if (node == nullptr) {
-        out.println(F("(node not found)"));
-        out.println(F("ok"));
+        out.printf("sorder list %s: (node not found)\n", argv[2].c_str());
         return;
       }
 
@@ -2686,8 +2736,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
       }
 
       if (entries.empty()) {
-        out.println(F("(empty)"));
-        out.println(F("ok"));
+        out.printf("sorder list %s: (no per-node ranks)\n", argv[2].c_str());
         return;
       }
 
@@ -2700,19 +2749,19 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
                   return a.first < b.first;
                 });
 
+      out.printf("sorder list %s:\n", argv[2].c_str());
       for (const auto& e : entries) {
         out.printf("%s : %ld\n", e.first.c_str(),
                    static_cast<long>(e.second));
       }
-      out.println(F("ok"));
+      out.printf("sorder list %s: done\n", argv[2].c_str());
       return;
     }
 
     // sorder list (all nodes)
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     if (ids.empty()) {
-      out.println(F("(empty)"));
-      out.println(F("ok"));
+      out.println(F("sorder list: (no nodes)"));
       return;
     }
 
@@ -2757,7 +2806,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
       }
     }
 
-    out.println(F("ok"));
+    out.println(F("sorder list: done"));
     return;
   }
 
@@ -2777,7 +2826,8 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     SaveLabels();
-    out.println(F("ok"));
+    out.printf("sorder clear %s %s: rank reset\n",
+               argv[2].c_str(), key.c_str());
     GuiRequestRender();
     return;
   }
@@ -2799,7 +2849,8 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     SaveLabels();
-    out.println(F("ok"));
+    out.printf("sorder %s %s -> %ld\n",
+               argv[1].c_str(), key.c_str(), static_cast<long>(rank));
     GuiRequestRender();
     return;
   }
@@ -2808,6 +2859,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
       F("ERR sorder (use 'sorder <nodeIdHex> <addr16> <rank>' | "
         "'sorder clear <nodeIdHex> <addr16>' | 'sorder list [nodeIdHex]')"));
 }
+
 
 
 // -----------------------------------------------------------------------------
@@ -3551,13 +3603,14 @@ static float boilingPointC_fromInHgElev(float inHg, float elev_ft) {
 
 static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
-  (void)argc;
-  (void)argv;
+  PrintCommandHeader(out, argc, argv);
   g_console.PrintHelp(out);
 }
 
 static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   if (argc < 2) {
     out.printf("debug=%s\n", g_debug_enabled ? "on" : "off");
     return;
@@ -3568,22 +3621,26 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
 
 static void CmdScan(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
   (void)argc;
   (void)argv;
   ScanSensors();
-  out.println(F("ok"));
+  out.printf("scan: enumerated %u DS18B20 sensor(s)\n",
+             static_cast<unsigned>(g_devices.size()));
 }
 
 static void CmdSendNow(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
   (void)argc;
   (void)argv;
   SendTemperatures();
-  out.println(F("ok"));
+  out.println(F("sendnow: temperatures frame sent to mesh"));
 }
 
 static void CmdBoilPt(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
   if (argc < 2) {
     out.println(F("ERR boilpt <inHg> [elev_ft]"));
     return;
@@ -3619,7 +3676,10 @@ static void CmdBoilPt(void *ctx, int argc, const String argv[], Print &out) {
              (double)inHg, (double)TbC, (double)TbF);
 }
 
-static void CmdWhoAmI(void *, int, const String[], Print &out) {
+static void CmdWhoAmI(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
   const uint32_t node = mesh.getNodeId();
   const uint64_t mac = ESP.getEfuseMac(); // base MAC from eFuse
   out.printf("nodeId: 0x%08lX\n", static_cast<unsigned long>(node));
@@ -3628,8 +3688,11 @@ static void CmdWhoAmI(void *, int, const String[], Print &out) {
              static_cast<unsigned long>(mac & 0xFFFFFFFFul));
 }
 
+
 static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+  
   if (argc < 2) {
     out.println(F("cal cmds:\n"
                   "  cal ice [addr16]\n"
@@ -3643,36 +3706,47 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
   const String sub = argv[1];
+
   if (sub == "ice") {
-    if (argc >= 3)
+    if (argc >= 3) {
       CalibrationStart(argv[2], kCalIce);
-    else
+      out.printf("cal ice %s: session started\n", argv[2].c_str());
+    } else {
       CalibrationStartAll(kCalIce);
-    out.println(F("ok"));
+      out.println(F("cal ice: session started for all attached sensors"));
+    }
     return;
   }
+
   if (sub == "boil") {
-    if (argc >= 3)
+    if (argc >= 3) {
       CalibrationStart(argv[2], kCalBoil);
-    else
+      out.printf("cal boil %s: session started\n", argv[2].c_str());
+    } else {
       CalibrationStartAll(kCalBoil);
-    out.println(F("ok"));
+      out.println(F("cal boil: session started for all attached sensors"));
+    }
     return;
   }
+
   if (sub == "lock") {
     if (argc < 3) {
       out.println(F("ERR cal lock <actualC>"));
       return;
     }
-    CalibrationLockAll(argv[2].toFloat());
-    out.println(F("ok"));
+    const float actual_c = argv[2].toFloat();
+    CalibrationLockAll(actual_c);
+    out.printf("cal lock %.3fC: lock requested for active sensors\n",
+               static_cast<double>(actual_c));
     return;
   }
+
   if (sub == "solve") {
     CalibrationSolveAndSaveAll();
-    out.println(F("ok"));
+    out.println(F("cal solve: attempted solve + save for all locked sensors"));
     return;
   }
+
   if (sub == "list") {
     for (const auto &e : g_cal_entries) {
       const Coeff &c = e.coeff;
@@ -3681,6 +3755,7 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
     }
     return;
   }
+
   if (sub == "show") {
     if (argc >= 3) {
       const int idx = FindCalIndex(argv[2]);
@@ -3688,8 +3763,9 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
         const Coeff &c = g_cal_entries[(size_t)idx].coeff;
         out.printf("%s : a1=%.6f a0=%.6f\n", argv[2].c_str(), (double)c.a1,
                    (double)c.a0);
-      } else
-        out.println(F("not found"));
+      } else {
+        out.printf("cal show %s: not found\n", argv[2].c_str());
+      }
     } else {
       for (const auto &e : g_cal_entries) {
         const Coeff &c = e.coeff;
@@ -3699,25 +3775,29 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
     }
     return;
   }
+
   if (sub == "clear") {
     if (argc < 3) {
       out.println(F("ERR cal clear <addr16>"));
       return;
     }
     ClearCalibration(argv[2]);
-    out.println(F("ok"));
+    out.printf("cal clear %s: coefficients removed\n", argv[2].c_str());
     return;
   }
+
   if (sub == "save") {
     SaveAllCalibration();
-    out.println(F("saved"));
+    out.println(F("cal save: all calibration coefficients persisted to NVS"));
     return;
   }
+
   if (sub == "load") {
     LoadAllCalibration();
-    out.println(F("loaded"));
+    out.println(F("cal load: calibration coefficients loaded from NVS"));
     return;
   }
+
   out.println(F("ERR cal (type just 'cal' for help)"));
 }
 
