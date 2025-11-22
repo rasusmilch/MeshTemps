@@ -17,8 +17,8 @@
 #include <math.h>
 #include <painlessMesh.h>
 
+#include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
 #include "serial_console.h"
-#include "mesh_node.h"  // make NodeMetaRecord & MeshNode visible before auto-prototypes
 
 #include <array>
 #include <vector>
@@ -85,7 +85,7 @@ static String JoinTokens(int argc, const String argv[], int start) {
 }
 
 // Echo the full command line (argv[0..argc-1]) before executing a handler.
-static void PrintCommandHeader(Print& out, int argc, const String argv[]) {
+static void PrintCommandHeader(Print &out, int argc, const String argv[]) {
   // Always print a line so you can see that the handler actually fired,
   // even if argc is 0 for some reason.
   const String line = JoinTokens(argc, argv, 0);
@@ -193,10 +193,9 @@ volatile size_t g_ui_peers = 0;
 
 Board *g_board = nullptr;
 
-void GuiRebuildTiles();  // forward
+void GuiRebuildTiles(); // forward
 // BuildTileContentForNode is defined later, after mesh_tile.h is included.
 // No extra prototype needed here.
-
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -216,7 +215,7 @@ static uint8_t GetNodeMuteMask(const String &node_id) {
   if (!ParseNodeIdToU32(node_id, &id_u32)) {
     return kMuteNone;
   }
-  MeshNode* node = FindMeshNode(id_u32);
+  MeshNode *node = FindMeshNode(id_u32);
   if (node == nullptr) {
     return kMuteNone;
   }
@@ -256,11 +255,11 @@ static void LoadNodeMetaFromNVS() {
   g_root_preferences.end();
 
   for (size_t i = 0; i < records.size(); ++i) {
-    const NodeMetaRecord& rec = records[i];
+    const NodeMetaRecord &rec = records[i];
 
     // Only apply metadata to nodes that already exist (from known topology
     // or live traffic). Do NOT create nodes here.
-    MeshNode* node = FindMeshNode(rec.node_id);
+    MeshNode *node = FindMeshNode(rec.node_id);
     if (node == nullptr) {
       continue;
     }
@@ -268,16 +267,15 @@ static void LoadNodeMetaFromNVS() {
     node->set_tile_rank(rec.tile_rank);
     node->set_mute_mask(rec.mute_mask);
   }
-
 }
 
 // Build a sorted vector of current node metadata.
-static void BuildCurrentNodeMeta(std::vector<NodeMetaRecord>* out) {
+static void BuildCurrentNodeMeta(std::vector<NodeMetaRecord> *out) {
   out->clear();
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   out->reserve(ids.size());
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
@@ -289,7 +287,7 @@ static void BuildCurrentNodeMeta(std::vector<NodeMetaRecord>* out) {
     out->push_back(rec);
   }
   std::sort(out->begin(), out->end(),
-            [](const NodeMetaRecord& a, const NodeMetaRecord& b) {
+            [](const NodeMetaRecord &a, const NodeMetaRecord &b) {
               return a.node_id < b.node_id;
             });
 }
@@ -321,7 +319,7 @@ static void SaveNodeMetaToNVSIfChanged() {
   bool same = (cur.size() == prev.size());
   if (same) {
     for (size_t i = 0; i < cur.size(); ++i) {
-      if (cur[i].node_id   != prev[i].node_id ||
+      if (cur[i].node_id != prev[i].node_id ||
           cur[i].tile_rank != prev[i].tile_rank ||
           cur[i].mute_mask != prev[i].mute_mask) {
         same = false;
@@ -388,14 +386,14 @@ void LoadLabels() {
     if (!ParseNodeIdToU32(node_key_hex, &id_u32)) {
       continue;
     }
-    MeshNode* node = FindMeshNode(id_u32);
+    MeshNode *node = FindMeshNode(id_u32);
     if (node == nullptr) {
       continue;
     }
 
     String label;
-    if (p.value().is<const char*>()) {
-      label = p.value().as<const char*>();
+    if (p.value().is<const char *>()) {
+      label = p.value().as<const char *>();
     } else if (p.value().is<JsonObject>()) {
       label = p.value()["node"] | "";
     }
@@ -408,7 +406,7 @@ void LoadLabels() {
   JsonObject sensors_obj = labels["sensors"].as<JsonObject>();
   for (JsonPair p : sensors_obj) {
     const String addr16 = p.key().c_str();
-    const char* label_c = p.value() | "";
+    const char *label_c = p.value() | "";
     if (label_c == nullptr || label_c[0] == '\0') {
       continue;
     }
@@ -417,7 +415,7 @@ void LoadLabels() {
     // Apply to any existing sensor with this address.
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
@@ -433,7 +431,7 @@ void LoadLabels() {
 
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
@@ -449,7 +447,7 @@ void LoadLabels() {
     if (!ParseNodeIdToU32(node_key_hex, &id_u32)) {
       continue;
     }
-    MeshNode* node = FindMeshNode(id_u32);
+    MeshNode *node = FindMeshNode(id_u32);
     if (node == nullptr) {
       continue;
     }
@@ -475,14 +473,14 @@ void SaveLabels() {
   StaticJsonDocument<8192> labels;
 #endif
 
-  JsonObject nodes_obj   = labels["nodes"].to<JsonObject>();
+  JsonObject nodes_obj = labels["nodes"].to<JsonObject>();
   JsonObject sensors_obj = labels["sensors"].to<JsonObject>();
-  JsonObject order_obj   = labels["order"].to<JsonObject>();
+  JsonObject order_obj = labels["order"].to<JsonObject>();
   JsonObject sorder_root = labels["sorder"].to<JsonObject>();
 
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
@@ -495,8 +493,8 @@ void SaveLabels() {
       nodes_obj[node_key_hex] = node->label();
     }
 
-    for (const auto& sensor : node->sensors()) {
-      const String& addr16 = sensor.address;
+    for (const auto &sensor : node->sensors()) {
+      const String &addr16 = sensor.address;
 
       if (sensor.label.length() > 0) {
         sensors_obj[addr16] = sensor.label;
@@ -522,21 +520,20 @@ void SaveLabels() {
   g_root_preferences.end();
 }
 
-
 void EraseLabels() {
   // Clear runtime labels and ordering from all nodes.
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
     node->set_label(String());
-    std::vector<MeshNode::Sensor>& sensors = node->sensors();
-    for (auto& sensor : sensors) {
+    std::vector<MeshNode::Sensor> &sensors = node->sensors();
+    for (auto &sensor : sensors) {
       sensor.label.clear();
       sensor.global_rank = std::numeric_limits<int32_t>::max();
-      sensor.node_rank   = std::numeric_limits<int32_t>::max();
+      sensor.node_rank = std::numeric_limits<int32_t>::max();
     }
   }
 
@@ -545,8 +542,6 @@ void EraseLabels() {
   g_root_preferences.remove("labels");
   g_root_preferences.end();
 }
-
-
 
 void SaveLimits() {
   Serial.println(F("Saving Limit Settings..."));
@@ -674,19 +669,18 @@ static int GetNodeRank(const String &node_id) {
   if (!ParseNodeIdToU32(node_id, &id_u32)) {
     return 1000000;
   }
-  MeshNode* node = FindMeshNode(id_u32);
+  MeshNode *node = FindMeshNode(id_u32);
   if (node == nullptr) {
     return 1000000;
   }
   return static_cast<int>(node->tile_rank());
 }
 
-
 // --- Topology persistence: fixed-size binary array of node IDs -------------
 constexpr size_t kMaxKnownNodes = 20;
 
 // Read sorted known IDs from NVS ("known_bin") into a vector.
-static bool ReadKnownFromNVS(std::vector<uint32_t>* out_ids) {
+static bool ReadKnownFromNVS(std::vector<uint32_t> *out_ids) {
   out_ids->clear();
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const size_t nbytes = g_root_preferences.getBytesLength("known_bin");
@@ -710,7 +704,7 @@ static bool ReadKnownFromNVS(std::vector<uint32_t>* out_ids) {
 }
 
 // Write sorted IDs to NVS ("known_bin").
-static void WriteKnownToNVS(const std::vector<uint32_t>& ids_sorted_unique) {
+static void WriteKnownToNVS(const std::vector<uint32_t> &ids_sorted_unique) {
   const size_t count = std::min(ids_sorted_unique.size(), kMaxKnownNodes);
 
   Serial.println(F("[NVS] Saving Known IDs to meshroot/known_bin"));
@@ -721,7 +715,7 @@ static void WriteKnownToNVS(const std::vector<uint32_t>& ids_sorted_unique) {
   } else {
     g_root_preferences.remove("known_bin");
   }
-  g_root_preferences.remove("known");  // legacy
+  g_root_preferences.remove("known"); // legacy
   g_root_preferences.end();
 }
 
@@ -729,7 +723,7 @@ static void WriteKnownToNVS(const std::vector<uint32_t>& ids_sorted_unique) {
 // Returns true if NVS was actually updated (i.e., set changed).
 static bool AddKnownAndPersist(uint32_t id) {
   std::vector<uint32_t> cur;
-  (void)ReadKnownFromNVS(&cur);  // ok if empty
+  (void)ReadKnownFromNVS(&cur); // ok if empty
 
   cur.push_back(id);
   std::sort(cur.begin(), cur.end());
@@ -739,12 +733,12 @@ static bool AddKnownAndPersist(uint32_t id) {
   }
 
   std::vector<uint32_t> prev;
-  (void)ReadKnownFromNVS(&prev);  // ok if empty
+  (void)ReadKnownFromNVS(&prev); // ok if empty
 
   const bool same = (prev.size() == cur.size()) &&
                     std::equal(prev.begin(), prev.end(), cur.begin());
   if (same) {
-    return false;  // no NVS activity
+    return false; // no NVS activity
   }
 
   Serial.printf("[NVS] known topology updated: %u node(s); latest=0x%08lX\n",
@@ -773,7 +767,7 @@ void SaveKnownTopology() {
   }
 
   std::vector<uint32_t> prev;
-  (void)ReadKnownFromNVS(&prev);  // ok if empty
+  (void)ReadKnownFromNVS(&prev); // ok if empty
 
   const bool same = (prev.size() == cur.size()) &&
                     std::equal(prev.begin(), prev.end(), cur.begin());
@@ -800,7 +794,7 @@ void LoadKnownTopology() {
 
   const uint32_t now_ms = millis();
   for (uint32_t id : ids) {
-    MeshNode* node_model = GetOrCreateMeshNode(id);
+    MeshNode *node_model = GetOrCreateMeshNode(id);
     if (node_model != nullptr && node_model->last_update_ms() == 0U) {
       node_model->SetBusGpioAndLastUpdate(-1, now_ms);
     }
@@ -811,14 +805,13 @@ void LoadKnownTopology() {
 void EraseKnownTopology() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   g_root_preferences.remove("known_bin");
-  g_root_preferences.remove("known");      // legacy
-  g_root_preferences.remove("node_meta");  // also drop rank/mute snapshot
+  g_root_preferences.remove("known");     // legacy
+  g_root_preferences.remove("node_meta"); // also drop rank/mute snapshot
   g_root_preferences.end();
 
   ClearAllMeshNodes();
   MeshTile::DestroyAll();
 }
-
 
 // Minimal root storage initialization:
 //   - runtime settings (units, highlight, limits, buzzer, flash, tile display)
@@ -836,7 +829,7 @@ static void RootInitStorage() {
 
   // Topology persistence.
   LoadTopoPersistFlag();
-  LoadKnownTopology();       // seeds MeshNode objects for persisted IDs
+  LoadKnownTopology(); // seeds MeshNode objects for persisted IDs
 
   // Per-node metadata (rank, mute, etc.).
   LoadNodeMetaFromNVS();
@@ -844,7 +837,6 @@ static void RootInitStorage() {
   // Labels + per-sensor ordering from NVS -> MeshNode model.
   LoadLabels();
 }
-
 
 // Node ID canonicalization: accept only hex, with optional "0x"/"0X" prefix.
 // Canonical form for JSON keys: 8-hex, uppercase, no "0x".
@@ -912,14 +904,12 @@ static String CanonAddr16(const String &addr) {
 
 // Build one tile's Content from MeshNode state + thresholds.
 // If a node exists in MeshNode store, we render it; otherwise we skip.
-static bool BuildTileContentForNode(const String& node_key_hex,
-                                    uint32_t now_ms,
-                                    bool node_connected,
-                                    void* out_ptr) {
+static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
+                                    bool node_connected, void *out_ptr) {
   if (out_ptr == nullptr) {
     return false;
   }
-  MeshTile::Content* out = static_cast<MeshTile::Content*>(out_ptr);
+  MeshTile::Content *out = static_cast<MeshTile::Content *>(out_ptr);
 
   if (out == nullptr) {
     return false;
@@ -931,7 +921,7 @@ static bool BuildTileContentForNode(const String& node_key_hex,
     return false;
   }
 
-  const MeshNode* node_model = FindMeshNode(node_id_u32);
+  const MeshNode *node_model = FindMeshNode(node_id_u32);
   if (node_model == nullptr) {
     // No model – nothing to show.
     return false;
@@ -946,7 +936,7 @@ static bool BuildTileContentForNode(const String& node_key_hex,
   if (node_model->label().length() > 0) {
     c.title = node_model->label();
   } else {
-    char hex_id[11];  // "0x" + 8-hex + NUL
+    char hex_id[11]; // "0x" + 8-hex + NUL
     snprintf(hex_id, sizeof(hex_id), "0x%08lX",
              static_cast<unsigned long>(node_id_u32));
     c.title = hex_id;
@@ -972,7 +962,7 @@ static bool BuildTileContentForNode(const String& node_key_hex,
   bool node_has_warning = false;
   int sv_count = 0;
 
-  const auto& sensors = node_model->sensors();
+  const auto &sensors = node_model->sensors();
   if (!sensors.empty()) {
     // Sort sensor indices by effective rank, then address.
     std::vector<size_t> indices;
@@ -981,33 +971,32 @@ static bool BuildTileContentForNode(const String& node_key_hex,
       indices.push_back(i);
     }
 
-    auto effective_rank = [](const MeshNode::Sensor& s) -> int32_t {
+    auto effective_rank = [](const MeshNode::Sensor &s) -> int32_t {
       if (s.node_rank != std::numeric_limits<int32_t>::max()) {
         return s.node_rank;
       }
       return s.global_rank;
     };
 
-    std::sort(indices.begin(), indices.end(),
-              [&](size_t ia, size_t ib) {
-                const MeshNode::Sensor& sa = sensors[ia];
-                const MeshNode::Sensor& sb = sensors[ib];
+    std::sort(indices.begin(), indices.end(), [&](size_t ia, size_t ib) {
+      const MeshNode::Sensor &sa = sensors[ia];
+      const MeshNode::Sensor &sb = sensors[ib];
 
-                const int32_t ra = effective_rank(sa);
-                const int32_t rb = effective_rank(sb);
-                if (ra != rb) {
-                  return ra < rb;
-                }
-                return sa.address < sb.address;
-              });
+      const int32_t ra = effective_rank(sa);
+      const int32_t rb = effective_rank(sb);
+      if (ra != rb) {
+        return ra < rb;
+      }
+      return sa.address < sb.address;
+    });
 
     for (size_t idx : indices) {
       if (sv_count >= 2) {
-        break;  // only two sensor rows per tile
+        break; // only two sensor rows per tile
       }
 
-      const MeshNode::Sensor& sensor = sensors[idx];
-      MeshTile::SensorView& sv = c.sensors[sv_count++];
+      const MeshNode::Sensor &sensor = sensors[idx];
+      MeshTile::SensorView &sv = c.sensors[sv_count++];
 
       // Label: use sensor.label if set, otherwise the canonical address.
       if (sensor.label.length() > 0) {
@@ -1258,7 +1247,7 @@ void GuiInit() {
 
   lv_obj_t *screen = lv_scr_act();
   lv_obj_set_style_bg_color(screen, lv_color_make(0x25, 0x25, 0x25), 0);
-lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
+  lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(screen, 0, 0);
 
   // Disable all scrolling on the root screen
@@ -1313,7 +1302,8 @@ lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
   lv_obj_set_style_pad_all(g_ui_tile_container, 6, 0);
   lv_obj_set_style_pad_row(g_ui_tile_container, 6, 0);
   lv_obj_set_style_pad_column(g_ui_tile_container, 6, 0);
-  // lv_obj_set_style_bg_color(g_ui_tile_container, lv_color_make(0x25, 0x25, 0x25), 0);
+  // lv_obj_set_style_bg_color(g_ui_tile_container, lv_color_make(0x25, 0x25,
+  // 0x25), 0);
   lv_obj_set_style_bg_opa(g_ui_tile_container, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(g_ui_tile_container, 0, 0);
 
@@ -1372,7 +1362,7 @@ static void BuildDummyData() {
 
   for (int i = 1; i <= 10; ++i) {
     const uint32_t node_id = 0xAA000000u + static_cast<uint32_t>(i);
-    MeshNode* node_model = GetOrCreateMeshNode(node_id);
+    MeshNode *node_model = GetOrCreateMeshNode(node_id);
     if (node_model == nullptr) {
       continue;
     }
@@ -1382,8 +1372,7 @@ static void BuildDummyData() {
       char addr[17];
       snprintf(addr, sizeof(addr), "D%02d000000000001", i * 2 + s - 2);
 
-      MeshNode::Sensor* sensor =
-          node_model->GetOrCreateSensor(String(addr));
+      MeshNode::Sensor *sensor = node_model->GetOrCreateSensor(String(addr));
       if (sensor == nullptr) {
         continue;
       }
@@ -1418,14 +1407,14 @@ void BuzzerBeepOnce() {
 static void GuiAgeTick(uint32_t now_ms) {
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
 
     char node_key[9];
     FormatNodeKey(id, node_key, sizeof(node_key));
-    MeshTile* tile = MeshTile::Find(String(node_key));
+    MeshTile *tile = MeshTile::Find(String(node_key));
     if (tile == nullptr) {
       continue;
     }
@@ -1434,7 +1423,7 @@ static void GuiAgeTick(uint32_t now_ms) {
 
     // Age tick treats tiles here as "known topology" and only
     // marks missing; connection state is handled elsewhere.
-    const bool node_connected = false;  // we only care about age here
+    const bool node_connected = false; // we only care about age here
     const bool is_missing = g_highlight_missing_nodes && !node_connected &&
                             (g_stale_minutes_threshold > 0U) &&
                             (age_min >= g_stale_minutes_threshold);
@@ -1474,7 +1463,7 @@ static void GuiRefreshValues(uint32_t now_ms) {
 
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
@@ -1483,7 +1472,7 @@ static void GuiRefreshValues(uint32_t now_ms) {
     FormatNodeKey(id, node_key, sizeof(node_key));
     const String node_key_hex(node_key);
 
-    MeshTile* tile = MeshTile::Find(node_key_hex);
+    MeshTile *tile = MeshTile::Find(node_key_hex);
     if (tile == nullptr) {
       continue;
     }
@@ -1550,32 +1539,31 @@ void GuiRebuildTiles() {
   std::vector<uint32_t> ids = GetAllMeshNodeIds();
 
   // Sort nodes by tile rank, then label, then id.
-  std::sort(ids.begin(), ids.end(),
-            [&](uint32_t a, uint32_t b) {
-              MeshNode* na = FindMeshNode(a);
-              MeshNode* nb = FindMeshNode(b);
-              if (na == nullptr || nb == nullptr) {
-                return a < b;
-              }
+  std::sort(ids.begin(), ids.end(), [&](uint32_t a, uint32_t b) {
+    MeshNode *na = FindMeshNode(a);
+    MeshNode *nb = FindMeshNode(b);
+    if (na == nullptr || nb == nullptr) {
+      return a < b;
+    }
 
-              const int32_t ra = na->tile_rank();
-              const int32_t rb = nb->tile_rank();
-              if (ra != rb) {
-                return ra < rb;
-              }
+    const int32_t ra = na->tile_rank();
+    const int32_t rb = nb->tile_rank();
+    if (ra != rb) {
+      return ra < rb;
+    }
 
-              const String& la = na->label();
-              const String& lb = nb->label();
-              if (la.length() && lb.length()) {
-                if (la != lb) {
-                  return la < lb;
-                }
-              } else if (la.length() || lb.length()) {
-                // Labeled nodes first.
-                return la.length() > lb.length();
-              }
-              return a < b;
-            });
+    const String &la = na->label();
+    const String &lb = nb->label();
+    if (la.length() && lb.length()) {
+      if (la != lb) {
+        return la < lb;
+      }
+    } else if (la.length() || lb.length()) {
+      // Labeled nodes first.
+      return la.length() > lb.length();
+    }
+    return a < b;
+  });
 
   bool any_warning = false;
   bool any_alert = false;
@@ -1583,7 +1571,7 @@ void GuiRebuildTiles() {
   // Apply sorted order, build content, and push tiles to correct indices.
   for (size_t index = 0; index < ids.size(); ++index) {
     const uint32_t node_id = ids[index];
-    MeshNode* node = FindMeshNode(node_id);
+    MeshNode *node = FindMeshNode(node_id);
     if (node == nullptr) {
       continue;
     }
@@ -1600,9 +1588,8 @@ void GuiRebuildTiles() {
       continue;
     }
 
-    MeshTile* tile =
-        MeshTile::GetOrCreate(node_key_hex, g_ui_tile_container, tile_w,
-                              tile_h);
+    MeshTile *tile = MeshTile::GetOrCreate(node_key_hex, g_ui_tile_container,
+                                           tile_w, tile_h);
     if (tile == nullptr) {
       continue;
     }
@@ -1689,8 +1676,6 @@ void DisplayLoop() {
   lvgl_port_unlock();
 }
 
-
-
 void BuzzerLoop() {
   // Static state so we can be called every loop() tick.
   static bool buzzer_on = false;
@@ -1749,7 +1734,6 @@ static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
   g_console.PrintHelp(out);
 }
 
-
 static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -1786,11 +1770,10 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
       return;
     }
 
-    out.printf("mute list: %u node(s)\n",
-               static_cast<unsigned>(ids.size()));
+    out.printf("mute list: %u node(s)\n", static_cast<unsigned>(ids.size()));
 
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
@@ -1810,7 +1793,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
       out.println(F("ERR mute get (nodeId must be hex, e.g. 0x1234ABCD)"));
       return;
     }
-    MeshNode* node = FindMeshNode(id_u32);
+    MeshNode *node = FindMeshNode(id_u32);
     const uint8_t mask =
         (node != nullptr) ? (node->mute_mask() & 0x3u) : kMuteNone;
     out.printf("mute get 0x%08lX : %s\n", static_cast<unsigned long>(id_u32),
@@ -1840,8 +1823,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
     mask = kMuteLow;
   } else if (mode.equalsIgnoreCase("high")) {
     mask = kMuteHigh;
-  } else if (mode.equalsIgnoreCase("both") ||
-             mode.equalsIgnoreCase("all") ||
+  } else if (mode.equalsIgnoreCase("both") || mode.equalsIgnoreCase("all") ||
              mode.equalsIgnoreCase("on")) {
     mask = kMuteBoth;
   } else {
@@ -1849,7 +1831,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  MeshNode* node = GetOrCreateMeshNode(id_u32);
+  MeshNode *node = GetOrCreateMeshNode(id_u32);
   if (node != nullptr) {
     node->set_mute_mask(mask);
     SaveNodeMetaToNVSIfChanged();
@@ -1860,8 +1842,7 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
   GuiRequestRender();
 }
 
-
-static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
 
@@ -1872,7 +1853,7 @@ static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
   }
 
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
@@ -1883,12 +1864,11 @@ static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
     const int bus_gpio = node->bus_gpio();
 
     if (node_label.length() > 0) {
-      out.printf("node %s \"%s\" gpio=%d age=%lu min:\n",
-                 node_hex.c_str(), node_label.c_str(), bus_gpio,
+      out.printf("node %s \"%s\" gpio=%d age=%lu min:\n", node_hex.c_str(),
+                 node_label.c_str(), bus_gpio,
                  static_cast<unsigned long>(age_min));
     } else {
-      out.printf("node %s gpio=%d age=%lu min:\n",
-                 node_hex.c_str(), bus_gpio,
+      out.printf("node %s gpio=%d age=%lu min:\n", node_hex.c_str(), bus_gpio,
                  static_cast<unsigned long>(age_min));
     }
 
@@ -1918,14 +1898,14 @@ static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
           stuck ? "YES" : "no");
     }
 
-    const auto& sensors = node->sensors();
+    const auto &sensors = node->sensors();
     if (sensors.empty()) {
       out.println(F("  (no sensors)"));
       continue;
     }
 
-    for (const auto& sensor : sensors) {
-      const String& addr16 = sensor.address;
+    for (const auto &sensor : sensors) {
+      const String &addr16 = sensor.address;
       const String sensor_label = sensor.label;
 
       String temp_s;
@@ -1941,16 +1921,13 @@ static void CmdLs(void* ctx, int argc, const String argv[], Print& out) {
       }
 
       if (sensor_label.length() > 0) {
-        out.printf("  %s \"%s\" : %s%s (age=%lu min)\n",
-                   addr16.c_str(), sensor_label.c_str(),
-                   temp_s.c_str(),
+        out.printf("  %s \"%s\" : %s%s (age=%lu min)\n", addr16.c_str(),
+                   sensor_label.c_str(), temp_s.c_str(),
                    sensor.corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       } else {
-        out.printf("  %s : %s%s (age=%lu min)\n",
-                   addr16.c_str(),
-                   temp_s.c_str(),
-                   sensor.corrected ? " (corr)" : "",
+        out.printf("  %s : %s%s (age=%lu min)\n", addr16.c_str(),
+                   temp_s.c_str(), sensor.corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       }
     }
@@ -2012,17 +1989,15 @@ static void CmdNode(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  MeshNode* node_model = GetOrCreateMeshNode(id_u32);
+  MeshNode *node_model = GetOrCreateMeshNode(id_u32);
   if (node_model != nullptr) {
     node_model->set_label(label);
     SaveNodeMetaToNVSIfChanged();
     out.printf("node 0x%08lX label=\"%s\"\n",
-               static_cast<unsigned long>(id_u32),
-               label.c_str());
+               static_cast<unsigned long>(id_u32), label.c_str());
   } else {
     out.printf("node 0x%08lX: FAILED to set label \"%s\"\n",
-               static_cast<unsigned long>(id_u32),
-               label.c_str());
+               static_cast<unsigned long>(id_u32), label.c_str());
   }
   GuiRequestRender();
 }
@@ -2041,7 +2016,7 @@ static void CmdNodes(void *ctx, int argc, const String argv[], Print &out) {
   }
 }
 
-static void CmdName(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdName(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   if (argc < 3) {
     out.println(F("ERR name (usage: name <addr16> <label...>)"));
@@ -2067,7 +2042,7 @@ static void CmdName(void* ctx, int argc, const String argv[], Print& out) {
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   bool applied = false;
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
@@ -2081,11 +2056,9 @@ static void CmdName(void* ctx, int argc, const String argv[], Print& out) {
   }
 
   SaveLabels();
-  out.printf("name %s=\"%s\" (labels saved)\n",
-             addr16.c_str(), label.c_str());
+  out.printf("name %s=\"%s\" (labels saved)\n", addr16.c_str(), label.c_str());
   GuiRequestRender();
 }
-
 
 static void CmdSave(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2095,15 +2068,23 @@ static void CmdSave(void *ctx, int argc, const String argv[], Print &out) {
   SaveLabels();
   out.println(F("saved"));
 }
+
 static void CmdLoad(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
   (void)argc;
   (void)argv;
+
+  // Re-apply per-node metadata (tile rank, mute mask) first.
+  LoadNodeMetaFromNVS();
+
+  // Then re-apply labels and per-sensor ordering.
   LoadLabels();
+
   out.println(F("loaded"));
   GuiRequestRender();
 }
+
 static void CmdErase(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -2114,7 +2095,7 @@ static void CmdErase(void *ctx, int argc, const String argv[], Print &out) {
   GuiRequestRender();
 }
 
-static void CmdStats(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
   (void)argc;
@@ -2123,25 +2104,24 @@ static void CmdStats(void* ctx, int argc, const String argv[], Print& out) {
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   size_t sensor_count = 0;
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node != nullptr) {
       sensor_count += node->sensors().size();
     }
   }
 
-  out.printf("nodes=%u sensors=%u\n",
-             static_cast<unsigned>(ids.size()),
+  out.printf("nodes=%u sensors=%u\n", static_cast<unsigned>(ids.size()),
              static_cast<unsigned>(sensor_count));
 
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const size_t known_bytes = g_root_preferences.getBytesLength("known_bin");
-  const size_t labels_bytes = g_root_preferences.getString("labels", "").length();
+  const size_t labels_bytes =
+      g_root_preferences.getString("labels", "").length();
   g_root_preferences.end();
 
   out.printf("known_bin NVS size=%u bytes\n",
              static_cast<unsigned>(known_bytes));
-  out.printf("labels NVS size=%u bytes\n",
-             static_cast<unsigned>(labels_bytes));
+  out.printf("labels NVS size=%u bytes\n", static_cast<unsigned>(labels_bytes));
 }
 
 static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
@@ -2344,7 +2324,7 @@ static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
     // Drop dummy nodes/tiles and restore from any persisted topology.
     ClearAllMeshNodes();
     MeshTile::DestroyAll();
-    LoadKnownTopology();   // seeds MeshNode store from NVS if enabled
+    LoadKnownTopology(); // seeds MeshNode store from NVS if enabled
 
     out.println(F("dummy=off"));
     GuiRequestRender();
@@ -2353,7 +2333,6 @@ static void CmdDummy(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("ERR dummy (use 'dummy on' or 'dummy off')"));
   }
 }
-
 
 static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2446,22 +2425,26 @@ static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
     g_topology_persist_enabled = true;
     LoadKnownTopology();
     g_topology_persist_enabled = prev;
+
+    // After seeding nodes, apply per-node meta and labels.
+    LoadNodeMetaFromNVS();
+    LoadLabels();
+
     GuiRequestRender();
-    out.println(F("topo load: pre-seeded MeshNode store from NVS"));
+    out.println(
+        F("topo load: pre-seeded MeshNode store + meta + labels from NVS"));
     return;
   }
 
   if (sub == "clear") {
     EraseKnownTopology();
-    out.println(
-        F("topo clear: erased persisted topology and in-memory nodes"));
+    out.println(F("topo clear: erased persisted topology and in-memory nodes"));
     GuiRequestRender();
     return;
   }
 
   out.println(F("ERR topo (type just 'topo' for help)"));
 }
-
 
 static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -2535,18 +2518,16 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
       return;
     }
 
-    out.printf("norder list: %u node(s)\n",
-               static_cast<unsigned>(ids.size()));
+    out.printf("norder list: %u node(s)\n", static_cast<unsigned>(ids.size()));
 
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
       char key[9];
       FormatNodeKey(id, key, sizeof(key));
-      out.printf("%s : %ld\n", key,
-                 static_cast<long>(node->tile_rank()));
+      out.printf("%s : %ld\n", key, static_cast<long>(node->tile_rank()));
     }
     out.println(F("norder list: done"));
     return;
@@ -2559,13 +2540,12 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
       out.println(F("ERR norder clear <nodeIdHex>"));
       return;
     }
-    MeshNode* node = FindMeshNode(id_u32);
+    MeshNode *node = FindMeshNode(id_u32);
     if (node != nullptr) {
       node->set_tile_rank(std::numeric_limits<int32_t>::max());
       SaveNodeMetaToNVSIfChanged();
     }
-    out.printf("norder clear %s: rank reset to default\n",
-               argv[2].c_str());
+    out.printf("norder clear %s: rank reset to default\n", argv[2].c_str());
     GuiRequestRender();
     return;
   }
@@ -2579,7 +2559,7 @@ static void CmdNorder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     const int32_t rank = argv[2].toInt();
-    MeshNode* node = GetOrCreateMeshNode(id_u32);
+    MeshNode *node = GetOrCreateMeshNode(id_u32);
     if (node != nullptr) {
       node->set_tile_rank(rank);
       char key[9];
@@ -2608,15 +2588,15 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
 
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
 
-      const std::vector<MeshNode::Sensor>& sensors = node->sensors();
-      for (const auto& sensor : sensors) {
+      const std::vector<MeshNode::Sensor> &sensors = node->sensors();
+      for (const auto &sensor : sensors) {
         if (sensor.global_rank == std::numeric_limits<int32_t>::max()) {
-          continue;  // "unspecified"
+          continue; // "unspecified"
         }
         const String addr16 = CanonAddr16(sensor.address);
 
@@ -2640,13 +2620,13 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
     // Sort by rank then address for stable, predictable output.
     std::vector<std::pair<String, int32_t>> entries;
     entries.reserve(rank_by_addr.size());
-    for (const auto& kv : rank_by_addr) {
+    for (const auto &kv : rank_by_addr) {
       entries.push_back(kv);
     }
 
     std::sort(entries.begin(), entries.end(),
-              [](const std::pair<String, int32_t>& a,
-                 const std::pair<String, int32_t>& b) {
+              [](const std::pair<String, int32_t> &a,
+                 const std::pair<String, int32_t> &b) {
                 if (a.second != b.second) {
                   return a.second < b.second;
                 }
@@ -2655,9 +2635,8 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
 
     out.printf("order list: %u unique address(es)\n",
                static_cast<unsigned>(entries.size()));
-    for (const auto& e : entries) {
-      out.printf("%s : %ld\n", e.first.c_str(),
-                 static_cast<long>(e.second));
+    for (const auto &e : entries) {
+      out.printf("%s : %ld\n", e.first.c_str(), static_cast<long>(e.second));
     }
     out.println(F("order list: done"));
     return;
@@ -2669,12 +2648,11 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
 
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
-      (void)node->SetSensorGlobalRank(
-          key, std::numeric_limits<int32_t>::max());
+      (void)node->SetSensorGlobalRank(key, std::numeric_limits<int32_t>::max());
     }
 
     SaveLabels();
@@ -2691,7 +2669,7 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     bool applied = false;
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
@@ -2705,8 +2683,8 @@ static void CmdOrder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     SaveLabels();
-    out.printf("order %s -> %ld (labels saved)\n",
-               key.c_str(), static_cast<long>(rank));
+    out.printf("order %s -> %ld (labels saved)\n", key.c_str(),
+               static_cast<long>(rank));
     GuiRequestRender();
     return;
   }
@@ -2729,19 +2707,19 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
         return;
       }
 
-      MeshNode* node = FindMeshNode(id_u32);
+      MeshNode *node = FindMeshNode(id_u32);
       if (node == nullptr) {
         out.printf("sorder list %s: (node not found)\n", argv[2].c_str());
         return;
       }
 
-      const std::vector<MeshNode::Sensor>& sensors = node->sensors();
+      const std::vector<MeshNode::Sensor> &sensors = node->sensors();
       std::vector<std::pair<String, int32_t>> entries;
       entries.reserve(sensors.size());
 
-      for (const auto& sensor : sensors) {
+      for (const auto &sensor : sensors) {
         if (sensor.node_rank == std::numeric_limits<int32_t>::max()) {
-          continue;  // "unspecified"
+          continue; // "unspecified"
         }
         entries.emplace_back(CanonAddr16(sensor.address), sensor.node_rank);
       }
@@ -2752,8 +2730,8 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
       }
 
       std::sort(entries.begin(), entries.end(),
-                [](const std::pair<String, int32_t>& a,
-                   const std::pair<String, int32_t>& b) {
+                [](const std::pair<String, int32_t> &a,
+                   const std::pair<String, int32_t> &b) {
                   if (a.second != b.second) {
                     return a.second < b.second;
                   }
@@ -2761,9 +2739,8 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
                 });
 
       out.printf("sorder list %s:\n", argv[2].c_str());
-      for (const auto& e : entries) {
-        out.printf("%s : %ld\n", e.first.c_str(),
-                   static_cast<long>(e.second));
+      for (const auto &e : entries) {
+        out.printf("%s : %ld\n", e.first.c_str(), static_cast<long>(e.second));
       }
       out.printf("sorder list %s: done\n", argv[2].c_str());
       return;
@@ -2777,7 +2754,7 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     for (uint32_t id : ids) {
-      MeshNode* node = FindMeshNode(id);
+      MeshNode *node = FindMeshNode(id);
       if (node == nullptr) {
         continue;
       }
@@ -2786,31 +2763,30 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
       FormatNodeKey(id, node_key, sizeof(node_key));
       out.printf("[%s]\n", node_key);
 
-      const std::vector<MeshNode::Sensor>& sensors = node->sensors();
+      const std::vector<MeshNode::Sensor> &sensors = node->sensors();
       std::vector<std::pair<String, int32_t>> entries;
       entries.reserve(sensors.size());
 
-      for (const auto& sensor : sensors) {
+      for (const auto &sensor : sensors) {
         if (sensor.node_rank == std::numeric_limits<int32_t>::max()) {
           continue;
         }
-        entries.emplace_back(CanonAddr16(sensor.address),
-                             sensor.node_rank);
+        entries.emplace_back(CanonAddr16(sensor.address), sensor.node_rank);
       }
 
       if (entries.empty()) {
         out.println(F("  (empty)"));
       } else {
         std::sort(entries.begin(), entries.end(),
-                  [](const std::pair<String, int32_t>& a,
-                     const std::pair<String, int32_t>& b) {
+                  [](const std::pair<String, int32_t> &a,
+                     const std::pair<String, int32_t> &b) {
                     if (a.second != b.second) {
                       return a.second < b.second;
                     }
                     return a.first < b.first;
                   });
 
-        for (const auto& e : entries) {
+        for (const auto &e : entries) {
           out.printf("  %s : %ld\n", e.first.c_str(),
                      static_cast<long>(e.second));
         }
@@ -2830,15 +2806,14 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     const String key = CanonAddr16(argv[3]);
-    MeshNode* node = FindMeshNode(id_u32);
+    MeshNode *node = FindMeshNode(id_u32);
     if (node != nullptr) {
-      (void)node->SetSensorNodeRank(
-          key, std::numeric_limits<int32_t>::max());
+      (void)node->SetSensorNodeRank(key, std::numeric_limits<int32_t>::max());
     }
 
     SaveLabels();
-    out.printf("sorder clear %s %s: rank reset\n",
-               argv[2].c_str(), key.c_str());
+    out.printf("sorder clear %s %s: rank reset\n", argv[2].c_str(),
+               key.c_str());
     GuiRequestRender();
     return;
   }
@@ -2854,14 +2829,14 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
     const String key = CanonAddr16(argv[2]);
     const int32_t rank = argv[3].toInt();
 
-    MeshNode* node = FindMeshNode(id_u32);
+    MeshNode *node = FindMeshNode(id_u32);
     if (node != nullptr) {
       (void)node->SetSensorNodeRank(key, rank);
     }
 
     SaveLabels();
-    out.printf("sorder %s %s -> %ld\n",
-               argv[1].c_str(), key.c_str(), static_cast<long>(rank));
+    out.printf("sorder %s %s -> %ld\n", argv[1].c_str(), key.c_str(),
+               static_cast<long>(rank));
     GuiRequestRender();
     return;
   }
@@ -2870,8 +2845,6 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
       F("ERR sorder (use 'sorder <nodeIdHex> <addr16> <rank>' | "
         "'sorder clear <nodeIdHex> <addr16>' | 'sorder list [nodeIdHex]')"));
 }
-
-
 
 // -----------------------------------------------------------------------------
 // Root announce and console
@@ -2893,11 +2866,10 @@ void RootAnnounce() {
 // Mesh callbacks (root)
 // -----------------------------------------------------------------------------
 
-void OnReceiveRoot(uint32_t from, String& msg) {
+void OnReceiveRoot(uint32_t from, String &msg) {
   bool structure_changed = false;
 
-  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n",
-       static_cast<unsigned long>(from),
+  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
        static_cast<unsigned>(msg.length()), msg.c_str());
 
   if (g_use_dummy_data) {
@@ -2911,7 +2883,7 @@ void OnReceiveRoot(uint32_t from, String& msg) {
     return;
   }
 
-  const char* type = doc["type"] | "temps";
+  const char *type = doc["type"] | "temps";
   if (strcmp(type, "temps") != 0) {
     DLOG("  ! ignoring type '%s'\n", type);
     return;
@@ -2919,7 +2891,15 @@ void OnReceiveRoot(uint32_t from, String& msg) {
 
   const uint32_t now_ms = millis();
 
-  MeshNode* node_model = UpdateMeshNodeFromTempsJson(doc, from, now_ms);
+  // Determine the nodeId the leaf claims *before* we update the model,
+  // and record how many sensors we had so we can detect newly created ones.
+  const uint32_t payload_node_id = doc["nodeId"] | from;
+  size_t prev_sensor_count = 0;
+  if (MeshNode *existing = FindMeshNode(payload_node_id)) {
+    prev_sensor_count = existing->sensors().size();
+  }
+
+  MeshNode *node_model = UpdateMeshNodeFromTempsJson(doc, from, now_ms);
   if (node_model == nullptr) {
     DLOG("  ! UpdateMeshNodeFromTempsJson failed\n");
     return;
@@ -2928,26 +2908,30 @@ void OnReceiveRoot(uint32_t from, String& msg) {
   const uint32_t node_id = node_model->node_id();
   const int bus_gpio = node_model->bus_gpio();
 
+  // If this temps frame caused new sensors to exist on this node
+  // (first-ever temps, or additional sensors), re-apply persisted labels
+  // so those sensors immediately pick up any saved names/order.
+  const size_t new_sensor_count = node_model->sensors().size();
+  if (new_sensor_count > prev_sensor_count) {
+    LoadLabels();
+  }
+
   DLOG("  nodeId=0x%08lX busGpio=%d sensors=%u\n",
        static_cast<unsigned long>(node_id), bus_gpio,
-       static_cast<unsigned>(node_model->sensors().size()));
+       static_cast<unsigned>(new_sensor_count));
 
   // Topology persistence: add/update known IDs.
   if (g_topology_persist_enabled) {
     structure_changed |= AddKnownAndPersist(node_id);
   }
 
-  // For now, labels/ranks live in MeshNode only. If you want to
-  // re-apply persisted labels on each packet, call LoadLabels()
-  // occasionally or add a small cache here.
-
   GuiUpdateNodeSummary(node_model->node_id_str().c_str(), bus_gpio, now_ms);
 
-  // Layout vs values.
+  // Layout vs values: new node means layout; otherwise just value refresh.
   if (structure_changed) {
-    g_layout_dirty = true;   // new node(s)
+    g_layout_dirty = true; // new node(s)
   } else {
-    g_values_dirty = true;   // just values
+    g_values_dirty = true; // existing tiles, changed values/labels
   }
 }
 
@@ -2961,13 +2945,29 @@ void OnConnectionsChangedRoot() {
 
   const uint32_t now_ms = millis();
   bool structure_changed = false;
+  bool new_node_seen = false;
 
-  for (const auto& id : mesh.getNodeList()) {
-    MeshNode* node_model = GetOrCreateMeshNode(id);
-    if (node_model != nullptr && node_model->last_update_ms() == 0U) {
+  for (const auto &id : mesh.getNodeList()) {
+    MeshNode *node_model = GetOrCreateMeshNode(id);
+    if (node_model == nullptr) {
+      continue;
+    }
+
+    // last_update_ms()==0 means this node model was just created and has
+    // never been updated (no temps, no persisted topology seed).
+    if (node_model->last_update_ms() == 0U) {
       node_model->SetBusGpioAndLastUpdate(-1, now_ms);
       structure_changed = true;
+      new_node_seen = true;
     }
+  }
+
+  // If any brand-new node appeared via a connection event, re-apply
+  // per-node metadata (tile rank, mute, etc.) and labels so those nodes
+  // immediately pick up any persisted settings.
+  if (new_node_seen) {
+    LoadNodeMetaFromNVS();
+    LoadLabels();
   }
 
   if (structure_changed) {
@@ -2978,7 +2978,6 @@ void OnConnectionsChangedRoot() {
 
   GuiRequestRender();
 }
-
 
 // -----------------------------------------------------------------------------
 // Arduino entry points (root)
