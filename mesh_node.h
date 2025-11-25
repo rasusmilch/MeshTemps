@@ -61,6 +61,11 @@ class MeshNode {
   Sensor* FindSensor(const String& address);
   const Sensor* FindSensor(const String& address) const;
 
+  // Returns pointer to first sensor whose label matches (case-insensitive),
+  // or nullptr if not found. Used by the room map view for "Room"/"Underbelly".
+  Sensor* FindSensorByLabel(const String& label);
+  const Sensor* FindSensorByLabel(const String& label) const;
+
   // Helpers for callers that want to populate nodes without going through a
   // full JSON "temps" document (e.g. dummy data, tests).
   void SetBusGpioAndLastUpdate(int bus_gpio, uint32_t now_ms);

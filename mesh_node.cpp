@@ -32,6 +32,26 @@ const MeshNode::Sensor* MeshNode::FindSensor(const String& address) const {
   return nullptr;
 }
 
+// Find sensors by human label (case-insensitive), e.g. "Room" / "Underbelly".
+MeshNode::Sensor* MeshNode::FindSensorByLabel(const String& label) {
+  for (auto& sensor : sensors_) {
+    if (sensor.label.equalsIgnoreCase(label)) {
+      return &sensor;
+    }
+  }
+  return nullptr;
+}
+
+const MeshNode::Sensor* MeshNode::FindSensorByLabel(
+    const String& label) const {
+  for (const auto& sensor : sensors_) {
+    if (sensor.label.equalsIgnoreCase(label)) {
+      return &sensor;
+    }
+  }
+  return nullptr;
+}
+
 bool MeshNode::SetSensorLabel(const String& address, const String& label) {
   Sensor* sensor = FindSensor(address);
   if (sensor == nullptr) {
