@@ -144,6 +144,9 @@ UiViewMode g_ui_view_mode = kUiViewModeTiles;
 // When true, the house map uses "Underbelly" sensors instead of "Room".
 bool g_map_use_underbelly = false;
 
+// When true, the screen shows map, not tiles
+bool g_screen_use_map = false;
+
 // Normalized rectangle inside a 0..1000 x 0..1000 logical space.
 struct RoomRectNorm {
   int16_t x1;
@@ -154,8 +157,8 @@ struct RoomRectNorm {
 
 // Static description of one logical room on the map.
 struct RoomDef {
-  const char* id;           // canonical id for matching node labels
-  const char* display_name; // label printed in the UI
+  const char *id;           // canonical id for matching node labels
+  const char *display_name; // label printed in the UI
   bool is_outside;          // true for outdoor zone
   uint8_t rect_count;       // 1 or 2
   RoomRectNorm rects[2];    // up to two rectangles (L-shapes)
@@ -164,25 +167,49 @@ struct RoomDef {
 // Coordinates are in a 0..1000 x 0..1000 "house" space. These are
 // deliberately approximate; you can tweak them later without touching logic.
 static const RoomDef kRoomDefs[] = {
-    // id,             display_name,     is_outside, rect_count, {{x1,y1,x2,y2}, ...}
-    {"frontroom",      "Front Room",        false, 1, {{   0,   0,  400, 300}, {0,0,0,0}}},
-    {"livingroom",     "Living Room",       false, 1, {{ 400,   0, 1000, 300}, {0,0,0,0}}},
-    {"masterbedroom",  "Master Bedroom",    false, 1, {{   0, 300,  400, 700}, {0,0,0,0}}},
-    {"masterbathroom", "Master Bath",       false, 1, {{   0, 700,  250,1000}, {0,0,0,0}}},
-    {"bathroom",       "Bathroom",          false, 1, {{ 400, 300,  600, 550}, {0,0,0,0}}},
-    {"cornerbedroom",  "Corner Bedroom",    false, 1, {{ 750, 550, 1000,1000}, {0,0,0,0}}},
-    {"kidsroom",       "Kids Room",         false, 1, {{ 250, 700,  500,1000}, {0,0,0,0}}},
-    {"nathansroom",    "Nathan's Room",     false, 1, {{ 500, 700,  750,1000}, {0,0,0,0}}},
+    // id,             display_name,     is_outside, rect_count, {{x1,y1,x2,y2},
+    // ...}
+    {"frontroom", "Front Room", false, 1, {{0, 0, 400, 300}, {0, 0, 0, 0}}},
+    {"livingroom",
+     "Living Room",
+     false,
+     1,
+     {{400, 0, 1000, 300}, {0, 0, 0, 0}}},
+    {"masterbedroom",
+     "Master Bedroom",
+     false,
+     1,
+     {{0, 300, 400, 700}, {0, 0, 0, 0}}},
+    {"masterbathroom",
+     "Master Bath",
+     false,
+     1,
+     {{0, 700, 250, 1000}, {0, 0, 0, 0}}},
+    {"bathroom", "Bathroom", false, 1, {{400, 300, 600, 550}, {0, 0, 0, 0}}},
+    {"cornerbedroom",
+     "Corner Bedroom",
+     false,
+     1,
+     {{750, 550, 1000, 1000}, {0, 0, 0, 0}}},
+    {"kidsroom", "Kids Room", false, 1, {{250, 700, 500, 1000}, {0, 0, 0, 0}}},
+    {"nathansroom",
+     "Nathan's Room",
+     false,
+     1,
+     {{500, 700, 750, 1000}, {0, 0, 0, 0}}},
     // Kitchen as an L-shape: main body + leg.
-    {"kitchen",        "Kitchen",           false, 2,
-                       {{ 400, 300, 1000, 700},     // main
-                        { 250, 550,  400,1000}}},   // leg
+    {"kitchen",
+     "Kitchen",
+     false,
+     2,
+     {{400, 300, 1000, 700},   // main
+      {250, 550, 400, 1000}}}, // leg
+
     // Outdoor zone: drawn outside the house, in map-container space.
-    {"outside",        "Outside",           true,  1, {{   0,   0,  250, 250}, {0,0,0,0}}},
+    {"outside", "Outside", true, 1, {{0, 0, 250, 250}, {0, 0, 0, 0}}},
 };
 
-constexpr size_t kRoomCount =
-    sizeof(kRoomDefs) / sizeof(kRoomDefs[0]);
+constexpr size_t kRoomCount = sizeof(kRoomDefs) / sizeof(kRoomDefs[0]);
 
 // ---------------------------------------------------------------------------
 // House / outside layout configuration
@@ -190,23 +217,36 @@ constexpr size_t kRoomCount =
 
 // House placement relative to the map container.
 // Negative values mean "auto": size = 80% of container, centered.
-constexpr lv_coord_t kHousePosXPx   = -1;   // e.g. 40 to pin X, or -1 for auto
-constexpr lv_coord_t kHousePosYPx   = -1;   // e.g. 20 to pin Y, or -1 for auto
-constexpr lv_coord_t kHouseWidthPx  = -1;   // e.g. 280 to fix width, or -1
-constexpr lv_coord_t kHouseHeightPx = -1;   // e.g. 200 to fix height, or -1
+constexpr lv_coord_t kHousePosXPx = -1;   // e.g. 40 to pin X, or -1 for auto
+constexpr lv_coord_t kHousePosYPx = -1;   // e.g. 20 to pin Y, or -1 for auto
+constexpr lv_coord_t kHouseWidthPx = -1;  // e.g. 280 to fix width, or -1
+constexpr lv_coord_t kHouseHeightPx = -1; // e.g. 200 to fix height, or -1
 
 // "Outside" label position in absolute pixels in the map container.
 constexpr lv_coord_t kOutsideLabelPosXPx = 6;
 constexpr lv_coord_t kOutsideLabelPosYPx = 4;
 
-// Track the last house size we configured so we don't depend on lv_obj_get_width()
+// When position/size are auto (<0), place the house inside the "outside"
+// area with these margins (in the map container's inner coordinate space).
+constexpr lv_coord_t kHouseAutoMarginLeftPx = 8;
+constexpr lv_coord_t kHouseAutoMarginRightPx = 8;
+constexpr lv_coord_t kHouseAutoMarginBottomPx = 8;
+
+// Vertical gap between the outside label and the top of the house rectangle.
+constexpr lv_coord_t kHouseAutoGapBelowOutsideLabelPx = 4;
+
+// Fallback top margin if there is no outside label.
+constexpr lv_coord_t kHouseAutoMarginTopPx = 8;
+
+// Track the last house size we configured so we don't depend on
+// lv_obj_get_width()
 static lv_coord_t g_house_w = 0;
 static lv_coord_t g_house_h = 0;
 
 struct RoomWidget {
-  const RoomDef* def = nullptr;
-  lv_obj_t* rect_objs[2] = {nullptr, nullptr};
-  lv_obj_t* label_obj = nullptr;
+  const RoomDef *def = nullptr;
+  lv_obj_t *rect_objs[2] = {nullptr, nullptr};
+  lv_obj_t *label_obj = nullptr;
 
   float temp_c = NAN;
   bool has_value = false;
@@ -223,19 +263,20 @@ struct RoomWidget {
 std::vector<RoomWidget> g_room_widgets;
 
 // Map containers.
-lv_obj_t* g_ui_map_container = nullptr;
-lv_obj_t* g_ui_map_house = nullptr;
+lv_obj_t *g_ui_map_container = nullptr;
+lv_obj_t *g_ui_map_house = nullptr;
 
 // Map helpers (implemented later).
-static String CanonicalRoomId(const String& input);
-static MeshNode* FindNodeForRoom(const RoomDef& def);
+static String CanonicalRoomId(const String &input);
+static MeshNode *FindNodeForRoom(const RoomDef &def);
 static lv_color_t ColorForTemperature(float temp_c, bool has_value);
 static void RoomMapBuildWidgets();
 static void RoomMapRebuild(uint32_t now_ms);
 static void RoomMapRefresh(uint32_t now_ms);
 static void RoomMapLoop(uint32_t now_ms);
 static void RoomMapSetViewMode(UiViewMode mode);
-static void BellyButtonEvent(lv_event_t* e);
+static void BellyButtonEvent(lv_event_t *e);
+static void ViewButtonEvent(lv_event_t *e);
 
 bool g_topology_persist_enabled = true;
 
@@ -288,6 +329,9 @@ float g_alert_high_c = 30.0;
 bool g_any_warning = false;
 bool g_any_alert = false;
 
+// Top bar height in pixels; must match GuiInit().
+constexpr lv_coord_t kTopBarHeightPx = 36;
+
 // LVGL GUI state (root).
 lv_obj_t *g_ui_label_title = nullptr;
 lv_obj_t *g_ui_label_peers = nullptr;
@@ -295,6 +339,9 @@ lv_obj_t *g_ui_label_uptime = nullptr;
 lv_obj_t *g_ui_tile_container = nullptr;
 lv_obj_t *g_ui_button_belly = nullptr;
 lv_obj_t *g_ui_button_belly_label = nullptr;
+
+lv_obj_t *g_ui_button_map = nullptr;
+lv_obj_t *g_ui_button_map_label = nullptr;
 
 volatile bool g_layout_dirty = false; // expensive: create/reflow tiles
 volatile bool g_values_dirty = false; // cheap: rewrite texts/colors only
@@ -1366,7 +1413,8 @@ void GuiInit() {
 
   // Top bar.
   lv_obj_t *bar = lv_obj_create(screen);
-  lv_obj_set_size(bar, lv_pct(100), 36);
+  lv_obj_set_size(bar, lv_pct(100), kTopBarHeightPx);
+
   lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 0);
   lv_obj_set_style_pad_all(bar, 4, 0);
   lv_obj_set_style_radius(bar, 0, 0);
@@ -1394,7 +1442,7 @@ void GuiInit() {
   // Small button to toggle Room / Underbelly view for the map.
   g_ui_button_belly = lv_btn_create(bar);
   lv_obj_set_size(g_ui_button_belly, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  lv_obj_align(g_ui_button_belly, LV_ALIGN_RIGHT_MID, -80, 0);
+  lv_obj_align(g_ui_button_belly, LV_ALIGN_RIGHT_MID, -150, 0);
   lv_obj_add_event_cb(g_ui_button_belly, BellyButtonEvent, LV_EVENT_CLICKED,
                       nullptr);
 
@@ -1402,20 +1450,34 @@ void GuiInit() {
   lv_label_set_text(g_ui_button_belly_label, "Room");
   lv_obj_center(g_ui_button_belly_label);
 
+  // Small button to toggle Tile / map view.
+  g_ui_button_map = lv_btn_create(bar);
+  lv_obj_set_size(g_ui_button_map, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_align(g_ui_button_map, LV_ALIGN_RIGHT_MID, -60, 0);
+  lv_obj_add_event_cb(g_ui_button_map, ViewButtonEvent, LV_EVENT_CLICKED,
+                      nullptr);
+
+  g_ui_button_map_label = lv_label_create(g_ui_button_map);
+  lv_label_set_text(g_ui_button_map_label, "Tiles");
+  lv_obj_center(g_ui_button_map_label);
+
   // Tile container below the bar.
   g_ui_tile_container = lv_obj_create(screen);
 
-  // Work out available height so we don't overlap the bar.
-  lv_coord_t scr_h = lv_obj_get_height(screen);
-  if (scr_h == 0) {
-    lv_disp_t *disp = lv_disp_get_default();
-    if (disp) {
-      scr_h = lv_disp_get_ver_res(disp);
-    }
+  // Use the display's physical vertical resolution plus the known bar height.
+  // This avoids relying on lv_obj_get_height(bar) before layout.
+  lv_disp_t *disp = lv_disp_get_default();
+  lv_coord_t scr_h =
+      disp ? lv_disp_get_ver_res(disp) : lv_obj_get_height(screen);
+  if (scr_h <= 0) {
+    scr_h = 480; // safe fallback; adjust if your panel is not 480px tall
   }
 
-  const lv_coord_t bar_h = lv_obj_get_height(bar);
-  lv_coord_t cont_h = (scr_h > bar_h) ? (scr_h - bar_h) : scr_h;
+  lv_coord_t cont_h =
+      (scr_h > kTopBarHeightPx) ? (scr_h - kTopBarHeightPx) : scr_h;
+
+  Serial.printf("GuiInit: scr_h=%d, cont_h=%d (bar=%d)\n", (int)scr_h,
+                (int)cont_h, (int)kTopBarHeightPx);
 
   lv_obj_set_size(g_ui_tile_container, lv_pct(100), cont_h);
   lv_obj_align_to(g_ui_tile_container, bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
@@ -1438,6 +1500,7 @@ void GuiInit() {
   g_ui_map_container = lv_obj_create(screen);
   lv_obj_set_size(g_ui_map_container, lv_pct(100), cont_h);
   lv_obj_align_to(g_ui_map_container, bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+
   lv_obj_set_style_pad_all(g_ui_map_container, 6, 0);
   lv_obj_set_style_bg_opa(g_ui_map_container, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(g_ui_map_container, 0, 0);
@@ -1453,7 +1516,6 @@ void GuiInit() {
 
   lvgl_port_unlock();
 }
-
 
 // Called when node metadata changes.
 void GuiUpdateNodeSummary(const char *, int, uint32_t) {
@@ -1495,9 +1557,9 @@ static void BuildDummyData() {
 
   // Base temps in °C: indoor rooms around 20–26 °C, outside cooler.
   const float base_room_c = 21.0f;
-  const float underbelly_offset_c = -2.0f;  // underbelly a bit cooler
+  const float underbelly_offset_c = -2.0f; // underbelly a bit cooler
 
-  unsigned long addr_counter = 1;  // simple unique address generator
+  unsigned long addr_counter = 1; // simple unique address generator
 
   for (size_t i = 0; i < kRoomCount; ++i) {
     const RoomDef &def = kRoomDefs[i];
@@ -1562,7 +1624,6 @@ static void BuildDummyData() {
   g_layout_dirty = true;
   g_values_dirty = true;
 }
-
 
 // Placeholder buzzer.
 void BuzzerBeepOnce() {
@@ -1788,7 +1849,7 @@ void GuiRebuildTiles() {
 
 // Canonicalize a user-facing room name into an id string that matches
 // RoomDef::id, e.g. "Master Bedroom" -> "masterbedroom".
-static String CanonicalRoomId(const String& input) {
+static String CanonicalRoomId(const String &input) {
   String out;
   out.reserve(input.length());
   for (size_t i = 0; i < input.length(); ++i) {
@@ -1805,15 +1866,15 @@ static String CanonicalRoomId(const String& input) {
 }
 
 // Find the MeshNode whose label maps to this room, if any.
-static MeshNode* FindNodeForRoom(const RoomDef& def) {
+static MeshNode *FindNodeForRoom(const RoomDef &def) {
   const String target_id(def.id);
   const std::vector<uint32_t> ids = GetAllMeshNodeIds();
   for (uint32_t id : ids) {
-    MeshNode* node = FindMeshNode(id);
+    MeshNode *node = FindMeshNode(id);
     if (node == nullptr) {
       continue;
     }
-    const String& label = node->label();
+    const String &label = node->label();
     if (label.length() == 0) {
       continue;
     }
@@ -1862,28 +1923,41 @@ static lv_color_t ColorForTemperature(float temp_c, bool has_value) {
 }
 
 // Create or recreate LVGL objects for the house map and all rooms.
+// Create or recreate LVGL objects for the house map and all rooms.
 static void RoomMapBuildWidgets() {
   if (g_ui_map_container == nullptr) {
     return;
   }
 
-  // Remove any previous map objects.
+  // Remove any previous map objects, but keep style (padding, bg, etc.).
   lv_obj_clean(g_ui_map_container);
   g_ui_map_house = nullptr;
   g_room_widgets.clear();
 
-  // Container size with robust fallback.
-  lv_coord_t cont_w = lv_obj_get_width(g_ui_map_container);
-  lv_coord_t cont_h = lv_obj_get_height(g_ui_map_container);
+  // Logical size of the map area (we treat the container itself as the
+  // coordinate system; LVGL already applies padding for us).
+  lv_coord_t cont_w = lv_obj_get_content_width(g_ui_map_container);
+  lv_coord_t cont_h = lv_obj_get_content_height(g_ui_map_container);
   if (cont_w <= 0 || cont_h <= 0) {
     lv_disp_t *disp = lv_disp_get_default();
     if (disp != nullptr) {
-      if (cont_w <= 0) cont_w = lv_disp_get_hor_res(disp);
-      if (cont_h <= 0) cont_h = lv_disp_get_ver_res(disp);
+      if (cont_w <= 0) {
+        cont_w = lv_disp_get_hor_res(disp);
+      }
+      if (cont_h <= 0) {
+        cont_h = lv_disp_get_ver_res(disp);
+      }
     }
-    if (cont_w <= 0) cont_w = 320;
-    if (cont_h <= 0) cont_h = 240;
+    if (cont_w <= 0) {
+      cont_w = 320;
+    }
+    if (cont_h <= 0) {
+      cont_h = 240;
+    }
   }
+
+  const lv_coord_t inner_w = cont_w;
+  const lv_coord_t inner_h = cont_h;
 
   g_room_widgets.resize(kRoomCount);
 
@@ -1896,8 +1970,11 @@ static void RoomMapBuildWidgets() {
     }
   }
 
+  lv_obj_t *outside_label_obj = nullptr;
+  lv_coord_t outside_label_height = 0;
+
   // -------------------------------------------------------------------------
-  // OUTSIDE: full background rectangle that fills the entire container.
+  // OUTSIDE: full background rectangle that fills the map container.
   // -------------------------------------------------------------------------
   if (outside_index >= 0) {
     const RoomDef &outside_def = kRoomDefs[outside_index];
@@ -1907,11 +1984,10 @@ static void RoomMapBuildWidgets() {
     lv_obj_t *rect = lv_obj_create(g_ui_map_container);
     outside_widget.rect_objs[0] = rect;
 
-    // Fill the entire map container.
+    // Fill the entire map container; padding is already handled by LVGL.
     lv_obj_set_pos(rect, 0, 0);
-    lv_obj_set_size(rect, cont_w, cont_h);
+    lv_obj_set_size(rect, inner_w, inner_h);
 
-    // Flat background; no "walls" here.
     lv_obj_set_style_radius(rect, 0, 0);
     lv_obj_set_style_border_width(rect, 0, 0);
     lv_obj_set_style_pad_all(rect, 0, 0);
@@ -1919,12 +1995,14 @@ static void RoomMapBuildWidgets() {
     lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, 0);
     lv_obj_clear_flag(rect, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Label at an absolute position in the container.
-    outside_widget.label_obj = lv_label_create(g_ui_map_container);
-    lv_label_set_text(outside_widget.label_obj, outside_def.display_name);
-    lv_obj_set_style_text_color(outside_widget.label_obj, lv_color_white(), 0);
-    lv_obj_set_pos(outside_widget.label_obj,
-                   kOutsideLabelPosXPx, kOutsideLabelPosYPx);
+    // "Outside" label anchored near the top-left of the map.
+    outside_label_obj = lv_label_create(g_ui_map_container);
+    outside_widget.label_obj = outside_label_obj;
+    lv_label_set_text(outside_label_obj, outside_def.display_name);
+    lv_obj_set_style_text_color(outside_label_obj, lv_color_white(), 0);
+    lv_obj_set_pos(outside_label_obj, kOutsideLabelPosXPx, kOutsideLabelPosYPx);
+
+    outside_label_height = lv_obj_get_height(outside_label_obj);
 
     outside_widget.temp_c = NAN;
     outside_widget.has_value = false;
@@ -1938,44 +2016,107 @@ static void RoomMapBuildWidgets() {
   }
 
   // -------------------------------------------------------------------------
-  // HOUSE: slightly smaller rectangle, on top of the outside.
+  // HOUSE: rectangle inside the map area, just below the outside label.
   // -------------------------------------------------------------------------
-  // Determine house size from configuration (or default 80%).
-  lv_coord_t house_w = kHouseWidthPx;
-  lv_coord_t house_h = kHouseHeightPx;
-  if (house_w <= 0 || house_w > cont_w) {
-    house_w = (cont_w * 8) / 10;
+
+  // Compute the usable inner size for the map content.
+
+  if (cont_w <= 0) {
+    cont_w = lv_obj_get_width(g_ui_map_container);
   }
-  if (house_h <= 0 || house_h > cont_h) {
-    house_h = (cont_h * 8) / 10;
+  if (cont_h <= 0) {
+    cont_h = lv_obj_get_height(g_ui_map_container);
   }
 
-  // Determine house position (absolute), or center it if configured < 0.
-  lv_coord_t house_x = kHousePosXPx;
-  lv_coord_t house_y = kHousePosYPx;
-  if (house_x < 0 || house_x + house_w > cont_w) {
-    house_x = (cont_w - house_w) / 2;
+  // Compute margins for the house inside the map.
+  lv_coord_t margin_left = kHouseAutoMarginLeftPx;
+  lv_coord_t margin_right = kHouseAutoMarginRightPx;
+  lv_coord_t margin_top = kHouseAutoMarginTopPx;
+  lv_coord_t margin_bottom = kHouseAutoMarginBottomPx;
+
+  // If we have an outside label, push the top margin down to clear it.
+  if (outside_label_obj != nullptr && outside_label_height > 0) {
+    const lv_coord_t label_bottom = kOutsideLabelPosYPx + outside_label_height;
+    const lv_coord_t min_top = label_bottom + kHouseAutoGapBelowOutsideLabelPx;
+    if (margin_top < min_top) {
+      margin_top = min_top;
+    }
   }
-  if (house_y < 0 || house_y + house_h > cont_h) {
-    house_y = (cont_h - house_h) / 2;
+
+  // Make sure margins are sane compared to the available height.
+  // Enforce at least 16 px of house height.
+  if (margin_top + margin_bottom + 16 > inner_h) {
+    margin_top = 8;
+    margin_bottom = 8;
+    if (margin_top + margin_bottom + 16 > inner_h) {
+      margin_top = 4;
+      margin_bottom = 4;
+    }
+  }
+
+  // Width: either fixed or full inner width minus horizontal margins.
+  lv_coord_t house_w = kHouseWidthPx;
+  if (house_w <= 0 || house_w > inner_w) {
+    house_w = inner_w - (margin_left + margin_right);
+    if (house_w < 16) {
+      house_w = inner_w; // last resort: just fill width
+      margin_left = 0;
+      margin_right = 0;
+    }
+  }
+
+  // Height: either fixed or full inner height minus vertical margins.
+  lv_coord_t house_h = kHouseHeightPx;
+  if (house_h <= 0 || house_h > inner_h) {
+    house_h = inner_h - (margin_top + margin_bottom);
+    if (house_h < 16) {
+      house_h = 16;
+      // if this happens, margins were huge; but bottom will still not overflow
+    }
+  }
+
+  // X position: either fixed or centered between left/right margins.
+  lv_coord_t house_x = kHousePosXPx;
+  if (house_x < 0 || house_x + house_w > inner_w) {
+    const lv_coord_t usable_w = inner_w - (margin_left + margin_right);
+    const lv_coord_t extra_space =
+        (usable_w > house_w) ? (usable_w - house_w) : 0;
+    house_x = margin_left + extra_space / 2;
+  }
+
+  // Y position: either fixed or just margin_top.
+  lv_coord_t house_y = kHousePosYPx;
+  if (house_y < 0 || house_y + house_h > inner_h) {
+    house_y = margin_top;
+  }
+
+  // Final safety clamp: never let the house run off the bottom.
+  if (house_y + house_h > inner_h) {
+    house_h = inner_h - house_y;
+    if (house_h < 16) {
+      house_h = 16;
+    }
   }
 
   g_ui_map_house = lv_obj_create(g_ui_map_container);
   lv_obj_set_size(g_ui_map_house, house_w, house_h);
   lv_obj_set_pos(g_ui_map_house, house_x, house_y);
-  lv_obj_set_style_bg_color(g_ui_map_house,
-                            lv_color_make(0x30, 0x30, 0x30), 0);
+  lv_obj_set_style_bg_color(g_ui_map_house, lv_color_make(0x30, 0x30, 0x30), 0);
   lv_obj_set_style_bg_opa(g_ui_map_house, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(g_ui_map_house, 6, 0);
   lv_obj_set_style_border_width(g_ui_map_house, 0, 0);
+  lv_obj_set_style_pad_all(g_ui_map_house, 0, 0);
   lv_obj_clear_flag(g_ui_map_house, LV_OBJ_FLAG_SCROLLABLE);
 
-  // Remember size so we do not depend on lv_obj_get_width/height elsewhere.
   g_house_w = house_w;
   g_house_h = house_h;
 
-  // Ensure house (and thus all interior rooms) is drawn above the outside.
+  // Draw house and rooms above the outside background.
   lv_obj_move_foreground(g_ui_map_house);
+
+  Serial.printf("map: inner_h=%d, house_y=%d, house_h=%d, bottom=%d\n",
+                (int)inner_h, (int)house_y, (int)house_h,
+                (int)(house_y + house_h));
 
   // -------------------------------------------------------------------------
   // INTERIOR ROOMS: rooms inside the house rectangle.
@@ -1983,8 +2124,7 @@ static void RoomMapBuildWidgets() {
   for (size_t i = 0; i < kRoomCount; ++i) {
     const RoomDef &def = kRoomDefs[i];
     if (def.is_outside) {
-      // Already handled above.
-      continue;
+      continue; // already handled
     }
 
     RoomWidget &widget = g_room_widgets[i];
@@ -1993,12 +2133,16 @@ static void RoomMapBuildWidgets() {
     lv_obj_t *parent = g_ui_map_house;
 
     lv_coord_t parent_w =
-        (g_house_w > 0) ? g_house_w : lv_obj_get_width(g_ui_map_house);
+        (g_house_w > 0) ? g_house_w : lv_obj_get_content_width(g_ui_map_house);
     lv_coord_t parent_h =
-        (g_house_h > 0) ? g_house_h : lv_obj_get_height(g_ui_map_house);
+        (g_house_h > 0) ? g_house_h : lv_obj_get_content_height(g_ui_map_house);
 
-    if (parent_w <= 0) parent_w = house_w;
-    if (parent_h <= 0) parent_h = house_h;
+    if (parent_w <= 0) {
+      parent_w = house_w;
+    }
+    if (parent_h <= 0) {
+      parent_h = house_h;
+    }
 
     // Create each rectangle (supports L-shapes with rect_count == 2).
     for (uint8_t r = 0; r < def.rect_count && r < 2; ++r) {
@@ -2007,22 +2151,15 @@ static void RoomMapBuildWidgets() {
       lv_obj_t *rect = lv_obj_create(parent);
       widget.rect_objs[r] = rect;
 
-      const lv_coord_t x =
-          static_cast<lv_coord_t>((static_cast<int32_t>(parent_w) * rr.x1) /
-                                  1000);
-      const lv_coord_t y =
-          static_cast<lv_coord_t>((static_cast<int32_t>(parent_h) * rr.y1) /
-                                  1000);
-      lv_coord_t w_px =
-          static_cast<lv_coord_t>((static_cast<int32_t>(parent_w) *
-                                   (rr.x2 - rr.x1)) /
-                                  1000);
-      lv_coord_t h_px =
-          static_cast<lv_coord_t>((static_cast<int32_t>(parent_h) *
-                                   (rr.y2 - rr.y1)) /
-                                  1000);
+      const lv_coord_t x = static_cast<lv_coord_t>(
+          (static_cast<int32_t>(parent_w) * rr.x1) / 1000);
+      const lv_coord_t y = static_cast<lv_coord_t>(
+          (static_cast<int32_t>(parent_h) * rr.y1) / 1000);
+      lv_coord_t w_px = static_cast<lv_coord_t>(
+          (static_cast<int32_t>(parent_w) * (rr.x2 - rr.x1)) / 1000);
+      lv_coord_t h_px = static_cast<lv_coord_t>(
+          (static_cast<int32_t>(parent_h) * (rr.y2 - rr.y1)) / 1000);
 
-      // Strip a small "wall" margin, but never drive them to 0.
       const lv_coord_t wall_px = 3;
       if (w_px > 2 * wall_px) {
         w_px -= 2 * wall_px;
@@ -2030,35 +2167,33 @@ static void RoomMapBuildWidgets() {
       if (h_px > 2 * wall_px) {
         h_px -= 2 * wall_px;
       }
-      if (w_px < 4) w_px = 4;
-      if (h_px < 4) h_px = 4;
+      if (w_px < 4) {
+        w_px = 4;
+      }
+      if (h_px < 4) {
+        h_px = 4;
+      }
 
       lv_obj_set_pos(rect, x + wall_px, y + wall_px);
       lv_obj_set_size(rect, w_px, h_px);
 
       lv_obj_set_style_radius(rect, 4, 0);
       lv_obj_set_style_border_width(rect, 1, 0);
-      lv_obj_set_style_border_color(rect,
-                                    lv_color_make(0x10, 0x10, 0x10), 0);
+      lv_obj_set_style_border_color(rect, lv_color_make(0x10, 0x10, 0x10), 0);
       lv_obj_set_style_pad_all(rect, 2, 0);
-      lv_obj_set_style_bg_color(rect,
-                                lv_color_make(0x40, 0x40, 0x40), 0);
+      lv_obj_set_style_bg_color(rect, lv_color_make(0x40, 0x40, 0x40), 0);
       lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, 0);
       lv_obj_clear_flag(rect, LV_OBJ_FLAG_SCROLLABLE);
     }
 
-    // Label: make it a *sibling* of the rectangles (parent = house),
-    // and align it to the top of the first rect. This way, even if a
-    // second rect (L-shape leg) overlaps that area, the label is drawn
-    // last and stays visible on top.
+    // Label: sibling of rectangles, anchored to the first rect.
     if (widget.rect_objs[0] != nullptr) {
       widget.label_obj = lv_label_create(g_ui_map_house);
       lv_label_set_text(widget.label_obj, def.display_name);
       lv_obj_set_style_text_color(widget.label_obj, lv_color_white(), 0);
-      lv_obj_align_to(widget.label_obj, widget.rect_objs[0],
-                      LV_ALIGN_TOP_MID, 0, 0);
+      lv_obj_align_to(widget.label_obj, widget.rect_objs[0], LV_ALIGN_TOP_MID,
+                      0, 0);
     } else {
-      // Degenerate case: no rects; just put the label in the house.
       widget.label_obj = lv_label_create(g_ui_map_house);
       lv_label_set_text(widget.label_obj, def.display_name);
       lv_obj_set_style_text_color(widget.label_obj, lv_color_white(), 0);
@@ -2075,9 +2210,12 @@ static void RoomMapBuildWidgets() {
     widget.flash_enabled = false;
     widget.base_color = lv_color_make(0x40, 0x40, 0x40);
   }
+
+  // Ensure the outside label (if any) is drawn above the house.
+  if (outside_label_obj != nullptr) {
+    lv_obj_move_foreground(outside_label_obj);
+  }
 }
-
-
 
 // Rebuild map layout and immediately refresh visuals.
 static void RoomMapRebuild(uint32_t now_ms) {
@@ -2111,10 +2249,10 @@ static void RoomMapRefresh(uint32_t now_ms) {
     return false;
   };
 
-  const char* kRoomLabel = "Room";
-  const char* kUnderbellyLabel = "Underbelly";
+  const char *kRoomLabel = "Room";
+  const char *kUnderbellyLabel = "Underbelly";
 
-  for (auto& widget : g_room_widgets) {
+  for (auto &widget : g_room_widgets) {
     widget.temp_c = NAN;
     widget.has_value = false;
     widget.is_alert = false;
@@ -2124,12 +2262,12 @@ static void RoomMapRefresh(uint32_t now_ms) {
     widget.node_present = false;
     widget.flash_enabled = false;
 
-    const RoomDef* def = widget.def;
+    const RoomDef *def = widget.def;
     if (def == nullptr) {
       continue;
     }
 
-    MeshNode* node = FindNodeForRoom(*def);
+    MeshNode *node = FindNodeForRoom(*def);
     if (node == nullptr) {
       if (widget.label_obj != nullptr) {
         char buf[64];
@@ -2145,23 +2283,21 @@ static void RoomMapRefresh(uint32_t now_ms) {
     const bool node_connected = IsConnected(node_id);
     const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
 
-    const bool node_missing =
-        g_highlight_missing_nodes && !node_connected &&
-        (g_stale_minutes_threshold > 0U) &&
-        (age_min >= g_stale_minutes_threshold);
+    const bool node_missing = g_highlight_missing_nodes && !node_connected &&
+                              (g_stale_minutes_threshold > 0U) &&
+                              (age_min >= g_stale_minutes_threshold);
 
     const bool node_stale = node_connected &&
                             (g_stale_minutes_threshold > 0U) &&
                             (age_min >= g_stale_minutes_threshold);
 
-    const bool seq_stuck =
-        node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
+    const bool seq_stuck = node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
     widget.sequence_stuck = seq_stuck;
 
-    const char* wanted_label =
+    const char *wanted_label =
         g_map_use_underbelly ? kUnderbellyLabel : kRoomLabel;
 
-    const MeshNode::Sensor* sensor =
+    const MeshNode::Sensor *sensor =
         node->FindSensorByLabel(String(wanted_label));
 
     if (sensor == nullptr || !sensor->has_value || isnan(sensor->temp_c)) {
@@ -2225,7 +2361,7 @@ static void RoomMapRefresh(uint32_t now_ms) {
       border_color = lv_color_make(0x80, 0x40, 0xFF);
     }
 
-    for (lv_obj_t* rect : widget.rect_objs) {
+    for (lv_obj_t *rect : widget.rect_objs) {
       if (rect == nullptr) {
         continue;
       }
@@ -2237,7 +2373,7 @@ static void RoomMapRefresh(uint32_t now_ms) {
     if (widget.label_obj != nullptr) {
       if (widget.has_value) {
         float display_temp = widget.temp_c;
-        const char* unit = "C";
+        const char *unit = "C";
         if (g_display_fahrenheit) {
           display_temp = widget.temp_c * 1.8f + 32.0f;
           unit = "F";
@@ -2262,8 +2398,8 @@ static void RoomMapLoop(uint32_t now_ms) {
   }
 
   if (g_flash_interval_ms == 0) {
-    for (auto& widget : g_room_widgets) {
-      for (lv_obj_t* rect : widget.rect_objs) {
+    for (auto &widget : g_room_widgets) {
+      for (lv_obj_t *rect : widget.rect_objs) {
         if (rect != nullptr) {
           lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, 0);
         }
@@ -2273,7 +2409,7 @@ static void RoomMapLoop(uint32_t now_ms) {
   }
 
   bool any_flashing = false;
-  for (const auto& widget : g_room_widgets) {
+  for (const auto &widget : g_room_widgets) {
     if (widget.flash_enabled) {
       any_flashing = true;
       break;
@@ -2291,8 +2427,8 @@ static void RoomMapLoop(uint32_t now_ms) {
     last_toggle_ms = now_ms;
   }
 
-  for (auto& widget : g_room_widgets) {
-    for (lv_obj_t* rect : widget.rect_objs) {
+  for (auto &widget : g_room_widgets) {
+    for (lv_obj_t *rect : widget.rect_objs) {
       if (rect == nullptr) {
         continue;
       }
@@ -2345,14 +2481,37 @@ static void RoomMapSetViewMode(UiViewMode mode) {
   g_values_dirty = true;
 }
 
-static void BellyButtonEvent(lv_event_t* e) {
+static void BellyButtonEvent(lv_event_t *e) {
   (void)e;
   g_map_use_underbelly = !g_map_use_underbelly;
 
   if (g_ui_button_belly_label != nullptr) {
-    lv_label_set_text(
-        g_ui_button_belly_label,
-        g_map_use_underbelly ? "Underbelly" : "Room");
+    lv_label_set_text(g_ui_button_belly_label,
+                      g_map_use_underbelly ? "Underbelly" : "Room");
+  }
+
+  g_layout_dirty = true;
+  g_values_dirty = true;
+}
+
+static void ViewButtonEvent(lv_event_t *e) {
+  (void)e;
+  bool current_view = g_ui_view_mode;
+
+  switch (g_ui_view_mode) {
+  case kUiViewModeMap:
+    RoomMapSetViewMode(kUiViewModeTiles);
+    break;
+
+  case kUiViewModeTiles:
+    RoomMapSetViewMode(kUiViewModeMap);
+    g_map_use_underbelly = false;
+    break;
+  }
+
+  if (g_ui_button_map_label != nullptr) {
+    lv_label_set_text(g_ui_button_map_label,
+                      (g_ui_view_mode == kUiViewModeMap) ? "Map" : "Tiles");
   }
 
   g_layout_dirty = true;
@@ -2405,8 +2564,7 @@ void DisplayLoop() {
   }
 
   // Layout / content refresh throttled to avoid hammering LVGL.
-  if ((g_layout_dirty || g_values_dirty) &&
-      (now_ms - last_build_ms >= 50U)) {
+  if ((g_layout_dirty || g_values_dirty) && (now_ms - last_build_ms >= 50U)) {
     if (g_layout_dirty) {
       g_layout_dirty = false;
       GuiRebuildTiles();      // heavy path, rare
@@ -2914,11 +3072,9 @@ static void CmdView(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  if (sub.equalsIgnoreCase("belly") ||
-      sub.equalsIgnoreCase("underbelly")) {
+  if (sub.equalsIgnoreCase("belly") || sub.equalsIgnoreCase("underbelly")) {
     if (argc < 3) {
-      out.printf("view belly=%s\n",
-                 g_map_use_underbelly ? "on" : "off");
+      out.printf("view belly=%s\n", g_map_use_underbelly ? "on" : "off");
       out.println(F("usage: view belly on|off"));
       return;
     }
@@ -3852,9 +4008,7 @@ void setup() {
                             "topo show|on|off|save|load|clear");
   g_console.RegisterCommand("labels", &CmdLabels,
                             "labels sensor on|off | labels age on|off");
-  g_console.RegisterCommand("view", &CmdView,
-                            "view tiles | map [room|belly]");
-
+  g_console.RegisterCommand("view", &CmdView, "view tiles | map [room|belly]");
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);
