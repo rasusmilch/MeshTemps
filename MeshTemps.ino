@@ -1576,21 +1576,113 @@ void UpdateUptimeLabel() {
   lv_label_set_text(g_ui_label_uptime, buffer);
 }
 
-// Dummy data: 10 nodes, 2 sensors each, with simple ramping temps.
-// This now populates only the MeshNode model + tile registry.
-// Dummy data: one node per RoomDef, with "Room" and "Underbelly" sensors
-// so that both the tile view and the house map (room/underbelly) work.
+// Dummy data: one node per RoomDef with "Room" and "Underbelly" sensors.
+// This version deliberately creates at least one instance of each "issue":
+//  - Normal in-range
+//  - High warning
+//  - High alert
+//  - Low warning
+//  - Low alert
+//  - Missing sensor data
+//  - Stale sensor
+//  - "Missing" node (old last_update_ms)
 static void BuildDummyData() {
   ClearAllMeshNodes();
   MeshTile::DestroyAll();
 
   const uint32_t now_ms = millis();
 
-  // Base temps in °C: indoor rooms around 20–26 °C, outside cooler.
-  const float base_room_c = 20.0f;
-  const float underbelly_offset_c = -20.0f; // underbelly a bit cooler
+  // Snapshot current limits so dummy behavior tracks whatever the user
+  // configured via "limits" commands.
+  const float warn_low  = g_warn_low_c;
+  const float warn_high = g_warn_high_c;
+  const float alert_low = g_alert_low_c;
+  const float alert_high = g_alert_high_c;
 
-  unsigned long addr_counter = 1; // simple unique address generator
+  auto NormalTemp = [&]() -> float {
+    if (!isnan(warn_low) && !isnan(warn_high) && warn_high > warn_low) {
+      return (warn_low + warn_high) * 0.5f;
+    }
+    return 21.0f;  // fallback
+  };
+
+  auto WarnHighTemp = [&]() -> float {
+    if (!isnan(warn_high) && !isnan(alert_high) && alert_high > warn_high) {
+      return (warn_high + alert_high) * 0.5f;
+    }
+    if (!isnan(warn_high)) {
+      return warn_high + 1.0f;
+    }
+    return NormalTemp() + 5.0f;
+  };
+
+  auto AlertHighTemp = [&]() -> float {
+    if (!isnan(alert_high)) {
+      return alert_high + 1.0f;
+    }
+    return WarnHighTemp() + 3.0f;
+  };
+
+  auto WarnLowTemp = [&]() -> float {
+    if (!isnan(warn_low) && !isnan(alert_low) && warn_low > alert_low) {
+      return (warn_low + alert_low) * 0.5f;
+    }
+    if (!isnan(warn_low)) {
+      return warn_low - 0.5f;
+    }
+    return NormalTemp() - 5.0f;
+  };
+
+  auto AlertLowTemp = [&]() -> float {
+    if (!isnan(alert_low)) {
+      return alert_low - 1.0f;
+    }
+    return WarnLowTemp() - 3.0f;
+  };
+
+  const float t_normal    = NormalTemp();
+  const float t_warn_hi   = WarnHighTemp();
+  const float t_alert_hi  = AlertHighTemp();
+  const float t_warn_lo   = WarnLowTemp();
+  const float t_alert_lo  = AlertLowTemp();
+
+  // Underbelly baseline: generally cooler than room.
+  const float belly_normal = t_normal - 10.0f;
+
+  // "Stale" age: just beyond the configured stale threshold.
+  const uint32_t stale_minutes =
+      (g_stale_minutes_threshold > 0U) ? (g_stale_minutes_threshold + 1U) : 6U;
+  const uint32_t stale_age_ms = stale_minutes * 60000UL;
+
+  unsigned long addr_counter = 1;  // simple unique address generator
+
+  auto AddSensor = [&](MeshNode *node, const char *label, bool has_value,
+                       float temp_c, bool make_stale) {
+    if (node == nullptr) {
+      return;
+    }
+    char addr[17];
+    snprintf(addr, sizeof(addr), "%016lu",
+             static_cast<unsigned long>(addr_counter++));
+    MeshNode::Sensor *sensor =
+        node->GetOrCreateSensor(String(addr));
+    if (sensor == nullptr) {
+      return;
+    }
+
+    sensor->label = String(label);
+    sensor->corrected = false;
+
+    if (has_value) {
+      sensor->temp_c = temp_c;
+      sensor->has_value = true;
+      sensor->last_ms = make_stale ? (now_ms - stale_age_ms) : now_ms;
+    } else {
+      sensor->temp_c = NAN;
+      sensor->has_value = false;
+      sensor->last_ms = 0U;
+    }
+  };
 
   for (size_t i = 0; i < kRoomCount; ++i) {
     const RoomDef &def = kRoomDefs[i];
@@ -1602,64 +1694,82 @@ static void BuildDummyData() {
       continue;
     }
 
-    // Mark as "seen" now so age/missing logic does not trip immediately.
-    node_model->SetBusGpioAndLastUpdate(-1, now_ms);
-
     // Node label must match RoomDef::id via CanonicalRoomId(),
     // so we use display_name here ("Front Room", "Kitchen", "Outside", etc.).
     node_model->set_label(String(def.display_name));
+    node_model->set_mute_mask(0);
+    node_model->set_tile_rank(std::numeric_limits<int32_t>::max());
 
-    // Temperature pattern:
-    //  - Indoors: slight gradient per room index.
-    //  - Outside: a bit colder.
-    float room_temp_c = base_room_c + static_cast<float>(i);
-    if (def.is_outside) {
-      room_temp_c = base_room_c - 5.0f;
+    // Default: node is "fresh". Specific scenarios can override this.
+    uint32_t node_update_ms = now_ms;
+
+    // Scenario assignment by RoomDef::id:
+    if (strcmp(def.id, "frontroom") == 0) {
+      // Completely normal.
+      AddSensor(node_model, "Room",       true, t_normal,      false);
+      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+
+    } else if (strcmp(def.id, "livingroom") == 0) {
+      // High warning (above warn_high, below alert_high) on Room.
+      AddSensor(node_model, "Room",       true, t_warn_hi,     false);
+      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+
+    } else if (strcmp(def.id, "masterbedroom") == 0) {
+      // High alert on Room.
+      AddSensor(node_model, "Room",       true, t_alert_hi,    false);
+      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+
+    } else if (strcmp(def.id, "masterbath") == 0) {
+      // Low warning on Room, stale Underbelly sensor.
+      AddSensor(node_model, "Room",       true, t_warn_lo,     false);
+      AddSensor(node_model, "Underbelly", true, belly_normal,  true);
+
+    } else if (strcmp(def.id, "bath") == 0) {
+      // Low alert on Room.
+      AddSensor(node_model, "Room",       true, t_alert_lo,    false);
+      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+
+    } else if (strcmp(def.id, "corner") == 0) {
+      // Missing data: sensor exists but has no value.
+      AddSensor(node_model, "Room",       false, NAN,          false);
+      AddSensor(node_model, "Underbelly", true,  belly_normal, false);
+
+    } else if (strcmp(def.id, "kidsroom") == 0) {
+      // Node that looks "missing": last_update_ms is far in the past.
+      node_update_ms = now_ms - stale_age_ms;
+      AddSensor(node_model, "Room",       true, t_normal,      true);
+      AddSensor(node_model, "Underbelly", true, belly_normal,  true);
+
+    } else if (strcmp(def.id, "nathans") == 0) {
+      // Underbelly high alert, Room normal.
+      AddSensor(node_model, "Room",       true, t_normal,      false);
+      AddSensor(node_model, "Underbelly", true, t_alert_hi,    false);
+
+    } else if (strcmp(def.id, "kitchen") == 0) {
+      // Underbelly low warning, Room normal.
+      AddSensor(node_model, "Room",       true, t_normal,      false);
+      AddSensor(node_model, "Underbelly", true, t_warn_lo,     false);
+
+    } else if (strcmp(def.id, "outside") == 0) {
+      // Outside: cooler but normal Room, missing Underbelly data.
+      AddSensor(node_model, "Room",       true, t_normal - 5.0f, false);
+      AddSensor(node_model, "Underbelly", false, NAN,            false);
+
+    } else {
+      // Fallback: treat as normal.
+      AddSensor(node_model, "Room",       true, t_normal,     false);
+      AddSensor(node_model, "Underbelly", true, belly_normal, false);
     }
 
-    // Always create a "Room" sensor (map uses label "Room" when
-    // g_map_use_underbelly == false).
-    char addr_room[17];
-    snprintf(addr_room, sizeof(addr_room), "%016lu",
-            static_cast<unsigned long>(addr_counter++));
-    MeshNode::Sensor *room_sensor =
-        node_model->GetOrCreateSensor(String(addr_room));
-    if (room_sensor != nullptr) {
-      room_sensor->temp_c = room_temp_c;
-      room_sensor->has_value = true;
-      room_sensor->corrected = false;
-      room_sensor->last_ms = now_ms;
-      room_sensor->label = String("Room");
-    }
-
-    // Always create an "Underbelly" sensor so underbelly map view has data for
-    // all rooms, including Outside.
-    char addr_belly[17];
-    snprintf(addr_belly, sizeof(addr_belly), "%016lu",
-            static_cast<unsigned long>(addr_counter++));
-    MeshNode::Sensor *belly_sensor =
-        node_model->GetOrCreateSensor(String(addr_belly));
-    if (belly_sensor != nullptr) {
-      float belly_temp_c = room_temp_c + underbelly_offset_c;
-      // If you prefer Outside underbelly to match Outside directly, comment this
-      // line out for is_outside and use room_temp_c instead.
-      if (def.is_outside) {
-        // Option A: same as outside temp
-        belly_temp_c = room_temp_c;
-      }
-      belly_sensor->temp_c = belly_temp_c;
-      belly_sensor->has_value = true;
-      belly_sensor->corrected = false;
-      belly_sensor->last_ms = now_ms;
-      belly_sensor->label = String("Underbelly");
-    }
-
+    // Mark as "seen" at the chosen time so age/missing logic behaves.
+    node_model->SetBusGpioAndLastUpdate(-1, node_update_ms);
   }
 
   // Force a full rebuild + value refresh on the next DisplayLoop().
   g_layout_dirty = true;
   g_values_dirty = true;
 }
+
 
 // Placeholder buzzer.
 void BuzzerBeepOnce() {
@@ -2274,6 +2384,11 @@ static void RoomMapRebuild(uint32_t now_ms) {
 
 // Update colors, labels and flash flags for each room based on current
 // MeshNode state and the Room/Underbelly selector.
+//
+// NEW: we now evaluate BOTH "Room" and "Underbelly" sensors for limits and
+// stale/missing, regardless of which one is currently displayed. Flashing
+// is triggered if EITHER sensor is in alert/warning or has stale/missing
+// data. The numeric label still shows only the currently selected source.
 static void RoomMapRefresh(uint32_t now_ms) {
   if (g_ui_map_container == nullptr) {
     return;
@@ -2297,6 +2412,17 @@ static void RoomMapRefresh(uint32_t now_ms) {
 
   const char *kRoomLabel = "Room";
   const char *kUnderbellyLabel = "Underbelly";
+
+  // Per-sensor summary for this refresh.
+  struct SensorState {
+    bool present = false;        // sensor with that label exists
+    bool has_value = false;      // has a valid numeric reading
+    bool missing_data = false;   // label exists but no valid value
+    bool stale = false;          // value too old by g_stale_minutes_threshold
+    bool alert = false;          // over/under alert limits (respecting mute)
+    bool warn = false;           // over/under warn limits (respecting mute)
+    float temp_c = NAN;          // last value (if has_value)
+  };
 
   for (auto &widget : g_room_widgets) {
     widget.temp_c = NAN;
@@ -2340,24 +2466,53 @@ static void RoomMapRefresh(uint32_t now_ms) {
     const bool seq_stuck = node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
     widget.sequence_stuck = seq_stuck;
 
-    const char *wanted_label =
-        g_map_use_underbelly ? kUnderbellyLabel : kRoomLabel;
+    const uint8_t node_mute = node->mute_mask() & 0x3u;
 
-    const MeshNode::Sensor *sensor =
-        node->FindSensorByLabel(String(wanted_label));
+    // Helper to evaluate one sensor ("Room" or "Underbelly").
+    auto EvalSensor = [&](const MeshNode::Sensor *sensor,
+                          SensorState &state) {
+      if (sensor == nullptr) {
+        // No such sensor label on this node: treat as neutral.
+        state.present = false;
+        state.has_value = false;
+        state.missing_data = false;
+        state.stale = false;
+        state.alert = false;
+        state.warn = false;
+        state.temp_c = NAN;
+        return;
+      }
 
-    if (sensor == nullptr || !sensor->has_value || isnan(sensor->temp_c)) {
-      widget.has_value = false;
-      widget.temp_c = NAN;
-      widget.is_alert = node_missing;
-      widget.is_warning = (!node_missing) && (node_stale || seq_stuck);
-    } else {
-      widget.has_value = true;
-      widget.temp_c = sensor->temp_c;
+      state.present = true;
+      state.temp_c = sensor->temp_c;
+
+      const bool has_val =
+          sensor->has_value && !isnan(sensor->temp_c);
+      state.has_value = has_val;
+      state.missing_data = !has_val;
+
+      // Per-sensor staleness (uses sensor->last_ms, not just node age).
+      state.stale = false;
+      if (has_val && sensor->last_ms != 0U && now_ms >= sensor->last_ms &&
+          g_stale_minutes_threshold > 0U) {
+        const uint32_t age_sensor_min =
+            (now_ms - sensor->last_ms) / 60000U;
+        if (age_sensor_min >= g_stale_minutes_threshold) {
+          state.stale = true;
+        }
+      }
+
+      state.alert = false;
+      state.warn = false;
+
+      if (!has_val) {
+        // No numeric value → no limit comparison, just missing_data/stale.
+        return;
+      }
 
       const float t = sensor->temp_c;
-      const uint8_t node_mute = node->mute_mask() & 0x3u;
 
+      // Alert limits.
       bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
       bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
       if (low_alert && (node_mute & kMuteLow)) {
@@ -2366,30 +2521,73 @@ static void RoomMapRefresh(uint32_t now_ms) {
       if (high_alert && (node_mute & kMuteHigh)) {
         high_alert = false;
       }
-      widget.is_alert = (low_alert || high_alert);
+      state.alert = (low_alert || high_alert);
 
-      bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
-      bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
-      if (low_warn && (node_mute & kMuteLow)) {
-        low_warn = false;
+      // Warn limits (only if not already alert).
+      if (!state.alert) {
+        bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
+        bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
+        if (low_warn && (node_mute & kMuteLow)) {
+          low_warn = false;
+        }
+        if (high_warn && (node_mute & kMuteHigh)) {
+          high_warn = false;
+        }
+        state.warn = (low_warn || high_warn);
       }
-      if (high_warn && (node_mute & kMuteHigh)) {
-        high_warn = false;
-      }
-      widget.is_warning = (!widget.is_alert) && (low_warn || high_warn);
+    };
 
-      if (seq_stuck && !widget.is_alert) {
-        widget.is_warning = true;
-      }
-      if (node_missing && !widget.is_alert) {
-        // Treat a disappeared node as an alert for the map view:
-        // room flashes but remains grey (no valid reading).
-        widget.is_alert = true;
-        widget.has_value = false;
-        widget.temp_c = NAN;
-      } else if (node_stale && !widget.is_alert) {
-        widget.is_warning = true;
-      }
+    // Evaluate both sensors, regardless of which one we are displaying.
+    SensorState room_state;
+    SensorState belly_state;
+
+    const MeshNode::Sensor *room_sensor =
+        node->FindSensorByLabel(String(kRoomLabel));
+    const MeshNode::Sensor *belly_sensor =
+        node->FindSensorByLabel(String(kUnderbellyLabel));
+
+    EvalSensor(room_sensor, room_state);
+    EvalSensor(belly_sensor, belly_state);
+
+    // Aggregate severity across both sensors + node health.
+    const bool any_thresh_alert = room_state.alert || belly_state.alert;
+    const bool any_thresh_warn = room_state.warn || belly_state.warn;
+    const bool any_sensor_missing =
+        room_state.missing_data || belly_state.missing_data;
+    const bool any_sensor_stale =
+        room_state.stale || belly_state.stale;
+
+    widget.is_missing = node_missing || any_sensor_missing;
+
+    widget.is_alert = false;
+    widget.is_warning = false;
+
+    if (node_missing) {
+      // Node disappeared entirely → treat as hard alert.
+      widget.is_alert = true;
+    } else if (any_thresh_alert) {
+      // Either Room or Underbelly outside alert limits.
+      widget.is_alert = true;
+    } else if (any_sensor_missing) {
+      // We *should* have data (sensor label exists) but don't.
+      widget.is_alert = true;
+    } else if (any_thresh_warn || node_stale || seq_stuck ||
+               any_sensor_stale) {
+      // Anything in warning/stale territory → warning flash.
+      widget.is_warning = true;
+    }
+
+    // Decide which sensor to *display* (but flashing is already based on BOTH).
+    const bool use_belly = g_map_use_underbelly;
+    const SensorState &display_state =
+        use_belly ? belly_state : room_state;
+
+    if (!node_missing && display_state.present && display_state.has_value) {
+      widget.has_value = true;
+      widget.temp_c = display_state.temp_c;
+    } else {
+      widget.has_value = false;
+      widget.temp_c = NAN;
     }
 
     widget.flash_enabled = (widget.is_alert || widget.is_warning);
@@ -2436,6 +2634,7 @@ static void RoomMapRefresh(uint32_t now_ms) {
     }
   }
 }
+
 
 // Per-frame flashing for map rooms, sharing the global flash interval.
 static void RoomMapLoop(uint32_t now_ms) {
@@ -2554,11 +2753,18 @@ static void RoomMapSetViewMode(UiViewMode mode) {
     }
   }
 
+  // NEW: keep the map/tile button label in sync with current mode
+  if (g_ui_button_map_label != nullptr) {
+    lv_label_set_text(g_ui_button_map_label,
+                      (g_ui_view_mode == kUiViewModeMap) ? "Map" : "Tiles");
+  }
+
   lvgl_port_unlock();
 
   g_layout_dirty = true;
   g_values_dirty = true;
 }
+
 
 static void BellyButtonEvent(lv_event_t *e) {
   (void)e;
@@ -2575,27 +2781,18 @@ static void BellyButtonEvent(lv_event_t *e) {
 
 static void ViewButtonEvent(lv_event_t *e) {
   (void)e;
-  bool current_view = g_ui_view_mode;
 
   switch (g_ui_view_mode) {
-  case kUiViewModeMap:
-    RoomMapSetViewMode(kUiViewModeTiles);
-    break;
-
-  case kUiViewModeTiles:
-    RoomMapSetViewMode(kUiViewModeMap);
-    g_map_use_underbelly = false;
-    break;
+    case kUiViewModeMap:
+      RoomMapSetViewMode(kUiViewModeTiles);
+      break;
+    case kUiViewModeTiles:
+      RoomMapSetViewMode(kUiViewModeMap);
+      g_map_use_underbelly = false;
+      break;
   }
-
-  if (g_ui_button_map_label != nullptr) {
-    lv_label_set_text(g_ui_button_map_label,
-                      (g_ui_view_mode == kUiViewModeMap) ? "Map" : "Tiles");
-  }
-
-  g_layout_dirty = true;
-  g_values_dirty = true;
 }
+
 
 // -----------------------------------------------------------------------------
 // GUI helpers callable from elsewhere
@@ -4042,11 +4239,13 @@ void setup() {
 
   RootInitStorage();
 
-  // NEW: pre-populate tiles from persisted topology
-  // LoadKnownTopology();
-
   DisplayInit();
   GuiInit();
+
+  // Make the house map with ROOM sensors the default view on boot.
+  g_map_use_underbelly = false;                  // ensure we show Room sensors
+  RoomMapSetViewMode(kUiViewModeMap);            // switch LVGL to map view
+
   GuiUpdateNetwork(0);
   GuiRequestRender();
 
