@@ -11,16 +11,17 @@
 //   MESH_IS_ROOT, MESH_PREFIX, MESH_PASSWORD, MESH_PORT,
 //   ONEWIRE_PIN, SEND_PERIOD_MS, ROOT_ANNOUNCE_MS,
 //   addrToHex(const uint8_t*).
-
-#include <Arduino.h>
-#include <ArduinoJson.h>
-#include <math.h>
-#include <painlessMesh.h>
-
 #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
 #include "serial_console.h"
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <Preferences.h>
+#include "Config.h" // Mesh / IO configuration, addrToHex()
 
 #include <array>
+#include <cstring> // for memcmp in NVS verification
+#include <math.h>
+#include <painlessMesh.h>
 #include <vector>
 
 using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
@@ -38,8 +39,6 @@ enum CalStage {
   kCalIce,
   kCalBoil,
 };
-
-#include "Config.h" // Mesh / IO configuration, addrToHex()
 
 // -----------------------------------------------------------------------------
 // Shared mesh and logging
@@ -110,13 +109,153 @@ static void PrintJsonStats(Print &out, const char *name,
 }
 
 // -----------------------------------------------------------------------------
+// Shared NVS write-then-read verification helpers (root + leaf)
+// -----------------------------------------------------------------------------
+// These helpers assume Preferences.begin() has already been called on the
+// correct namespace and that Preferences.end() will be called by the caller.
+
+static void NvsLogVerifyFailure(const char *key, const char *reason) {
+  Serial.printf("[NVS VERIFY] key=\"%s\" FAILED: %s\n", key, reason);
+}
+
+static bool NvsPutBytesVerified(Preferences &preferences, const char *key,
+                                const void *data, size_t length_bytes) {
+  if (data == nullptr || length_bytes == 0) {
+    NvsLogVerifyFailure(key, "null pointer or zero length");
+    return false;
+  }
+
+  const size_t written =
+      preferences.putBytes(key, data, static_cast<size_t>(length_bytes));
+  if (written != length_bytes) {
+    NvsLogVerifyFailure(key, "putBytes wrote wrong length");
+    return false;
+  }
+
+  if (!preferences.isKey(key)) {
+    NvsLogVerifyFailure(key, "key missing after putBytes");
+    return false;
+  }
+
+  const size_t stored_length = preferences.getBytesLength(key);
+  if (stored_length != length_bytes) {
+    NvsLogVerifyFailure(key, "getBytesLength mismatch");
+    return false;
+  }
+
+  std::vector<uint8_t> verify_buffer(length_bytes);
+  const size_t read_back = preferences.getBytes(
+      key, verify_buffer.data(), static_cast<size_t>(length_bytes));
+  if (read_back != length_bytes) {
+    NvsLogVerifyFailure(key, "getBytes read wrong length");
+    return false;
+  }
+
+  if (memcmp(data, verify_buffer.data(), length_bytes) != 0) {
+    NvsLogVerifyFailure(key, "content mismatch after read-back");
+    return false;
+  }
+  return true;
+}
+
+static bool NvsPutIntVerified(Preferences &preferences, const char *key,
+                              int32_t value) {
+  const size_t written = preferences.putInt(key, value);
+  if (written != sizeof(int32_t)) {
+    NvsLogVerifyFailure(key, "putInt wrote wrong length");
+    return false;
+  }
+
+  if (!preferences.isKey(key)) {
+    NvsLogVerifyFailure(key, "key missing after putInt");
+    return false;
+  }
+
+  const int32_t read_back = preferences.getInt(key, 0);
+  if (read_back != value) {
+    NvsLogVerifyFailure(key, "value mismatch after read-back");
+    return false;
+  }
+  return true;
+}
+
+static bool NvsPutULongVerified(Preferences &preferences, const char *key,
+                                uint32_t value) {
+  const size_t written = preferences.putULong(key, value);
+  if (written != sizeof(uint32_t)) {
+    NvsLogVerifyFailure(key, "putULong wrote wrong length");
+    return false;
+  }
+
+  if (!preferences.isKey(key)) {
+    NvsLogVerifyFailure(key, "key missing after putULong");
+    return false;
+  }
+
+  const uint32_t read_back = preferences.getULong(key, 0);
+  if (read_back != value) {
+    NvsLogVerifyFailure(key, "value mismatch after read-back");
+    return false;
+  }
+  return true;
+}
+
+static bool NvsPutFloatVerified(Preferences &preferences, const char *key,
+                                float value) {
+  const size_t written = preferences.putFloat(key, value);
+  if (written != sizeof(float)) {
+    NvsLogVerifyFailure(key, "putFloat wrote wrong length");
+    return false;
+  }
+
+  if (!preferences.isKey(key)) {
+    NvsLogVerifyFailure(key, "key missing after putFloat");
+    return false;
+  }
+
+  const float read_back = preferences.getFloat(key, NAN);
+  if (!isfinite(read_back) || read_back != value) {
+    NvsLogVerifyFailure(key, "value mismatch after read-back");
+    return false;
+  }
+  return true;
+}
+
+static bool NvsPutStringVerified(Preferences &preferences, const char *key,
+                                 const String &value) {
+  // putString may return length including terminator, so just rely on
+  // read-back comparison instead of byte-count.
+  (void)preferences.putString(key, value);
+
+  if (!preferences.isKey(key)) {
+    NvsLogVerifyFailure(key, "key missing after putString");
+    return false;
+  }
+
+  const String read_back = preferences.getString(key, "");
+  if (read_back != value) {
+    NvsLogVerifyFailure(key, "string mismatch after read-back");
+    return false;
+  }
+  return true;
+}
+
+static bool NvsRemoveKeyVerified(Preferences &preferences, const char *key) {
+  preferences.remove(key);
+  if (preferences.isKey(key)) {
+    NvsLogVerifyFailure(key, "remove() did not clear key");
+    return false;
+  }
+  return true;
+}
+
+// -----------------------------------------------------------------------------
 // ROOT BUILD
 // -----------------------------------------------------------------------------
 #if MESH_IS_ROOT
 
 #include "esp_panel_board_custom_conf.h"
 #include "lvgl_v8_port.h"
-#include <Preferences.h>
 #include <algorithm> // for std::sort
 #include <esp_display_panel.hpp>
 #include <limits>
@@ -170,19 +309,18 @@ static const RoomDef kRoomDefs[] = {
     // id,             display_name,     is_outside, rect_count, {{x1,y1,x2,y2},
     // ...}
     // Done
-    {"frontroom", 
-      "Front Room", 
-      false, 
-      1, 
-      {{418, 498, 764, 1000}, {0, 0, 0, 0}}},
+    {"frontroom",
+     "Front Room",
+     false,
+     1,
+     {{418, 498, 764, 1000}, {0, 0, 0, 0}}},
 
     // Done
     {"livingroom",
      "Living Room",
      false,
      2,
-     {{156, 0, 418, 498},
-     {156, 0, 233, 671}}},
+     {{156, 0, 418, 498}, {156, 0, 233, 671}}},
 
     // Done
     {"masterbedroom",
@@ -196,43 +334,26 @@ static const RoomDef kRoomDefs[] = {
      "Master Bath",
      false,
      2,
-     {{764, 288, 1000, 498},
-      {880, 0, 1000, 498}}},
+     {{764, 288, 1000, 498}, {880, 0, 1000, 498}}},
 
     // Done
-    {"bath", "Bath", 
-      false, 
-      1, 
-      {{156, 670, 233, 1000}, {0, 0, 0, 0}}},
+    {"bath", "Bath", false, 1, {{156, 670, 233, 1000}, {0, 0, 0, 0}}},
 
     // Done
-    {"corner",
-     "Corner",
-     false,
-     1,
-     {{0, 498, 156, 1000}, {0, 0, 0, 0}}},
+    {"corner", "Corner", false, 1, {{0, 498, 156, 1000}, {0, 0, 0, 0}}},
 
     // Done
-    {"kidsroom", 
-      "Kids Room", 
-      false, 
-      1, 
-      {{233, 498, 418, 1000}, {0, 0, 0, 0}}},
+    {"kidsroom", "Kids Room", false, 1, {{233, 498, 418, 1000}, {0, 0, 0, 0}}},
 
     // Done
-    {"nathans",
-     "Nathan's",
-     false,
-     1,
-     {{0, 0, 156, 498}, {0, 0, 0, 0}}},
+    {"nathans", "Nathan's", false, 1, {{0, 0, 156, 498}, {0, 0, 0, 0}}},
 
     // Kitchen as an L-shape: main body + leg.
     {"kitchen",
      "Kitchen",
      false,
      2,
-     {{418, 0, 764, 498},
-      {418, 0, 880, 288}}}, // leg
+     {{418, 0, 764, 498}, {418, 0, 880, 288}}}, // leg
 
     // Outdoor zone: drawn outside the house, in map-container space.
     {"outside", "Outside", true, 1, {{0, 0, 250, 250}, {0, 0, 0, 0}}},
@@ -285,11 +406,10 @@ struct RoomWidget {
   bool sequence_stuck = false;
   bool node_present = false;
 
-  lv_color_t base_color;       // normal background color (temp-mapped)
-  lv_color_t base_text_color;  // normal text color (typically white)
+  lv_color_t base_color;      // normal background color (temp-mapped)
+  lv_color_t base_text_color; // normal text color (typically white)
   bool flash_enabled = false;
 };
-
 
 std::vector<RoomWidget> g_room_widgets;
 
@@ -522,23 +642,33 @@ static void SaveNodeMetaToNVSIfChanged() {
   }
 
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
+  bool is_successful = true;
   if (!cur.empty()) {
     Serial.println(F("Saving node meta data..."));
-    g_root_preferences.putBytes("node_meta", cur.data(),
-                                cur.size() * sizeof(NodeMetaRecord));
+    is_successful =
+        NvsPutBytesVerified(g_root_preferences, "node_meta", cur.data(),
+                            cur.size() * sizeof(NodeMetaRecord));
   } else {
-    g_root_preferences.remove("node_meta");
+    is_successful = NvsRemoveKeyVerified(g_root_preferences, "node_meta");
   }
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveNodeMetaToNVSIfChanged failed"));
+  }
 }
 
-// NEW (helpers, near other Save*/Load* helpers)
 static void SaveTopoPersistFlag() {
   Serial.println(F("Saving Topology Persist Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putInt("topo_persist", g_topology_persist_enabled ? 1 : 0);
+  const bool is_successful = NvsPutIntVerified(
+      g_root_preferences, "topo_persist", g_topology_persist_enabled ? 1 : 0);
   g_root_preferences.end();
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveTopoPersistFlag failed"));
+  }
 }
+
 static void LoadTopoPersistFlag() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   g_topology_persist_enabled =
@@ -704,8 +834,13 @@ void SaveLabels() {
 
   Serial.println(F("Saving Labels..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putString("labels", json);
+  const bool is_successful =
+      NvsPutStringVerified(g_root_preferences, "labels", json);
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveLabels failed"));
+  }
 }
 
 void EraseLabels() {
@@ -727,18 +862,37 @@ void EraseLabels() {
 
   // Wipe persisted labels.
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.remove("labels");
+  const bool is_successful = NvsRemoveKeyVerified(g_root_preferences, "labels");
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] EraseLabels failed"));
+  }
 }
 
 void SaveLimits() {
   Serial.println(F("Saving Limit Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putFloat("warn_low_c", g_warn_low_c);
-  g_root_preferences.putFloat("warn_high_c", g_warn_high_c);
-  g_root_preferences.putFloat("alert_low_c", g_alert_low_c);
-  g_root_preferences.putFloat("alert_high_c", g_alert_high_c);
+
+  bool is_successful = true;
+  is_successful =
+      NvsPutFloatVerified(g_root_preferences, "warn_low_c", g_warn_low_c) &&
+      is_successful;
+  is_successful =
+      NvsPutFloatVerified(g_root_preferences, "warn_high_c", g_warn_high_c) &&
+      is_successful;
+  is_successful =
+      NvsPutFloatVerified(g_root_preferences, "alert_low_c", g_alert_low_c) &&
+      is_successful;
+  is_successful =
+      NvsPutFloatVerified(g_root_preferences, "alert_high_c", g_alert_high_c) &&
+      is_successful;
+
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveLimits failed"));
+  }
 }
 
 void LoadLimits() {
@@ -771,8 +925,12 @@ void LoadDisplayUnits() {
 void SaveDisplayUnits() {
   Serial.println(F("Saving Unit Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putInt("units", g_display_fahrenheit ? 1 : 0);
+  const bool is_successful = NvsPutIntVerified(g_root_preferences, "units",
+                                               g_display_fahrenheit ? 1 : 0);
   g_root_preferences.end();
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveDisplayUnits failed"));
+  }
 }
 
 void LoadHighlightSettings() {
@@ -788,10 +946,21 @@ void LoadHighlightSettings() {
 void SaveHighlightSettings() {
   Serial.println(F("Saving Highlight Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putInt("hl_missing", g_highlight_missing_nodes ? 1 : 0);
-  g_root_preferences.putInt("hl_stale_min",
-                            static_cast<int>(g_stale_minutes_threshold));
+
+  bool is_successful = true;
+  is_successful = NvsPutIntVerified(g_root_preferences, "hl_missing",
+                                    g_highlight_missing_nodes ? 1 : 0) &&
+                  is_successful;
+  is_successful =
+      NvsPutIntVerified(g_root_preferences, "hl_stale_min",
+                        static_cast<int32_t>(g_stale_minutes_threshold)) &&
+      is_successful;
+
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveHighlightSettings failed"));
+  }
 }
 
 void LoadTileDisplaySettings() {
@@ -807,18 +976,42 @@ void LoadTileDisplaySettings() {
 void SaveTileDisplaySettings() {
   Serial.println(F("Saving Tile Display Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putInt("show_labels", g_show_sensor_labels ? 1 : 0);
-  g_root_preferences.putInt("show_age", g_show_age_label ? 1 : 0);
+
+  bool is_successful = true;
+  is_successful = NvsPutIntVerified(g_root_preferences, "show_labels",
+                                    g_show_sensor_labels ? 1 : 0) &&
+                  is_successful;
+  is_successful = NvsPutIntVerified(g_root_preferences, "show_age",
+                                    g_show_age_label ? 1 : 0) &&
+                  is_successful;
+
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveTileDisplaySettings failed"));
+  }
 }
 
 void SaveBuzzerSettings() {
   Serial.println(F("Saving Buzzer Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putULong("beep_len_ms", g_beep_len_ms);
-  g_root_preferences.putULong("beep_gap_warn_ms", g_beep_gap_warn_ms);
-  g_root_preferences.putULong("beep_gap_alert_ms", g_beep_gap_alert_ms);
+
+  bool is_successful = true;
+  is_successful =
+      NvsPutULongVerified(g_root_preferences, "beep_len_ms", g_beep_len_ms) &&
+      is_successful;
+  is_successful = NvsPutULongVerified(g_root_preferences, "beep_gap_warn_ms",
+                                      g_beep_gap_warn_ms) &&
+                  is_successful;
+  is_successful = NvsPutULongVerified(g_root_preferences, "beep_gap_alert_ms",
+                                      g_beep_gap_alert_ms) &&
+                  is_successful;
+
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveBuzzerSettings failed"));
+  }
 }
 
 void LoadBuzzerSettings() {
@@ -839,8 +1032,13 @@ void LoadBuzzerSettings() {
 void SaveFlashSettings() {
   Serial.println(F("Saving Flash Interval Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.putULong("flash_interval_ms", g_flash_interval_ms);
+  const bool is_successful = NvsPutULongVerified(
+      g_root_preferences, "flash_interval_ms", g_flash_interval_ms);
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveFlashSettings failed"));
+  }
 }
 
 void LoadFlashSettings() {
@@ -897,14 +1095,26 @@ static void WriteKnownToNVS(const std::vector<uint32_t> &ids_sorted_unique) {
 
   Serial.println(F("[NVS] Saving Known IDs to meshroot/known_bin"));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
+
+  bool is_successful = true;
+
   if (count > 0) {
-    (void)g_root_preferences.putBytes("known_bin", ids_sorted_unique.data(),
-                                      count * sizeof(uint32_t));
+    is_successful =
+        NvsPutBytesVerified(g_root_preferences, "known_bin",
+                            ids_sorted_unique.data(), count * sizeof(uint32_t));
   } else {
-    g_root_preferences.remove("known_bin");
+    is_successful = NvsRemoveKeyVerified(g_root_preferences, "known_bin");
   }
-  g_root_preferences.remove("known"); // legacy
+
+  // Legacy key should be gone.
+  is_successful =
+      NvsRemoveKeyVerified(g_root_preferences, "known") && is_successful;
+
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] WriteKnownToNVS failed"));
+  }
 }
 
 // Add id to the persisted set (sorted/unique, clamped to kMaxKnownNodes).
@@ -992,17 +1202,26 @@ void LoadKnownTopology() {
 // Remove persisted topology and clear in-memory nodes/tiles.
 void EraseKnownTopology() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
-  g_root_preferences.remove("known_bin");
-  g_root_preferences.remove("known");     // legacy
-  g_root_preferences.remove("node_meta"); // also drop rank/mute snapshot
+  bool is_successful = true;
+  is_successful =
+      NvsRemoveKeyVerified(g_root_preferences, "known_bin") && is_successful;
+  is_successful =
+      NvsRemoveKeyVerified(g_root_preferences, "known") && is_successful;
+  is_successful =
+      NvsRemoveKeyVerified(g_root_preferences, "node_meta") && is_successful;
   g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] EraseKnownTopology failed"));
+  }
 
   ClearAllMeshNodes();
   MeshTile::DestroyAll();
 }
 
 // Minimal root storage initialization:
-//   - runtime settings (units, highlight, limits, buzzer, flash, tile display)
+//   - runtime settings (units, highlight, limits, buzzer, flash, tile
+//   display)
 //   - topology persist flag + known topology
 //   - per-node metadata (rank, mute, node labels)
 //   - sensor/node labels + ranks loaded directly into MeshNode instances
@@ -1068,8 +1287,8 @@ static void FormatNodeKey(uint32_t node_id, char *out, size_t out_len) {
 }
 
 // Helper: try reading a value by hex key, then legacy decimal key.
-// NOTE: avoid templates here; Arduino's auto-prototype pass doesn't handle them
-// well.
+// NOTE: avoid templates here; Arduino's auto-prototype pass doesn't handle
+// them well.
 static JsonVariant GetByNodeKeyWithLegacyFallback(JsonObject obj,
                                                   const String &node_key_hex8) {
   // New behaviour: hex only, no decimal fallbacks.
@@ -1294,8 +1513,8 @@ static String SanitizePrintable(const String &in) {
   return out;
 }
 
-// Extract label text after the 2nd token (command + id/addr), handling optional
-// quotes. Examples accepted:
+// Extract label text after the 2nd token (command + id/addr), handling
+// optional quotes. Examples accepted:
 //   node 1234 Main Floor South
 //   node 1234 "Main Floor \"South\""
 //   name A1B2C3D4E5F6A7B8 Rack\ 1\ Inlet   (backslashes are preserved except
@@ -1594,7 +1813,7 @@ static void BuildDummyData() {
 
   // Snapshot current limits so dummy behavior tracks whatever the user
   // configured via "limits" commands.
-  const float warn_low  = g_warn_low_c;
+  const float warn_low = g_warn_low_c;
   const float warn_high = g_warn_high_c;
   const float alert_low = g_alert_low_c;
   const float alert_high = g_alert_high_c;
@@ -1603,7 +1822,7 @@ static void BuildDummyData() {
     if (!isnan(warn_low) && !isnan(warn_high) && warn_high > warn_low) {
       return (warn_low + warn_high) * 0.5f;
     }
-    return 21.0f;  // fallback
+    return 21.0f; // fallback
   };
 
   auto WarnHighTemp = [&]() -> float {
@@ -1640,11 +1859,11 @@ static void BuildDummyData() {
     return WarnLowTemp() - 3.0f;
   };
 
-  const float t_normal    = NormalTemp();
-  const float t_warn_hi   = WarnHighTemp();
-  const float t_alert_hi  = AlertHighTemp();
-  const float t_warn_lo   = WarnLowTemp();
-  const float t_alert_lo  = AlertLowTemp();
+  const float t_normal = NormalTemp();
+  const float t_warn_hi = WarnHighTemp();
+  const float t_alert_hi = AlertHighTemp();
+  const float t_warn_lo = WarnLowTemp();
+  const float t_alert_lo = AlertLowTemp();
 
   // Underbelly baseline: generally cooler than room.
   const float belly_normal = t_normal - 10.0f;
@@ -1654,7 +1873,7 @@ static void BuildDummyData() {
       (g_stale_minutes_threshold > 0U) ? (g_stale_minutes_threshold + 1U) : 6U;
   const uint32_t stale_age_ms = stale_minutes * 60000UL;
 
-  unsigned long addr_counter = 1;  // simple unique address generator
+  unsigned long addr_counter = 1; // simple unique address generator
 
   auto AddSensor = [&](MeshNode *node, const char *label, bool has_value,
                        float temp_c, bool make_stale) {
@@ -1664,8 +1883,7 @@ static void BuildDummyData() {
     char addr[17];
     snprintf(addr, sizeof(addr), "%016lu",
              static_cast<unsigned long>(addr_counter++));
-    MeshNode::Sensor *sensor =
-        node->GetOrCreateSensor(String(addr));
+    MeshNode::Sensor *sensor = node->GetOrCreateSensor(String(addr));
     if (sensor == nullptr) {
       return;
     }
@@ -1706,58 +1924,58 @@ static void BuildDummyData() {
     // Scenario assignment by RoomDef::id:
     if (strcmp(def.id, "frontroom") == 0) {
       // Completely normal.
-      AddSensor(node_model, "Room",       true, t_normal,      false);
-      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+      AddSensor(node_model, "Room", true, t_normal, false);
+      AddSensor(node_model, "Underbelly", true, belly_normal, false);
 
     } else if (strcmp(def.id, "livingroom") == 0) {
       // High warning (above warn_high, below alert_high) on Room.
-      AddSensor(node_model, "Room",       true, t_warn_hi,     false);
-      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+      AddSensor(node_model, "Room", true, t_warn_hi, false);
+      AddSensor(node_model, "Underbelly", true, belly_normal, false);
 
     } else if (strcmp(def.id, "masterbedroom") == 0) {
       // High alert on Room.
-      AddSensor(node_model, "Room",       true, t_alert_hi,    false);
-      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+      AddSensor(node_model, "Room", true, t_alert_hi, false);
+      AddSensor(node_model, "Underbelly", true, belly_normal, false);
 
     } else if (strcmp(def.id, "masterbath") == 0) {
       // Low warning on Room, stale Underbelly sensor.
-      AddSensor(node_model, "Room",       true, t_warn_lo,     false);
-      AddSensor(node_model, "Underbelly", true, belly_normal,  true);
+      AddSensor(node_model, "Room", true, t_warn_lo, false);
+      AddSensor(node_model, "Underbelly", true, belly_normal, true);
 
     } else if (strcmp(def.id, "bath") == 0) {
       // Low alert on Room.
-      AddSensor(node_model, "Room",       true, t_alert_lo,    false);
-      AddSensor(node_model, "Underbelly", true, belly_normal,  false);
+      AddSensor(node_model, "Room", true, t_alert_lo, false);
+      AddSensor(node_model, "Underbelly", true, belly_normal, false);
 
     } else if (strcmp(def.id, "corner") == 0) {
       // Missing data: sensor exists but has no value.
-      AddSensor(node_model, "Room",       false, NAN,          false);
-      AddSensor(node_model, "Underbelly", true,  belly_normal, false);
+      AddSensor(node_model, "Room", false, NAN, false);
+      AddSensor(node_model, "Underbelly", true, belly_normal, false);
 
     } else if (strcmp(def.id, "kidsroom") == 0) {
       // Node that looks "missing": last_update_ms is far in the past.
       node_update_ms = now_ms - stale_age_ms;
-      AddSensor(node_model, "Room",       true, t_normal,      true);
-      AddSensor(node_model, "Underbelly", true, belly_normal,  true);
+      AddSensor(node_model, "Room", true, t_normal, true);
+      AddSensor(node_model, "Underbelly", true, belly_normal, true);
 
     } else if (strcmp(def.id, "nathans") == 0) {
       // Underbelly high alert, Room normal.
-      AddSensor(node_model, "Room",       true, t_normal,      false);
-      AddSensor(node_model, "Underbelly", true, t_alert_hi,    false);
+      AddSensor(node_model, "Room", true, t_normal, false);
+      AddSensor(node_model, "Underbelly", true, t_alert_hi, false);
 
     } else if (strcmp(def.id, "kitchen") == 0) {
       // Underbelly low warning, Room normal.
-      AddSensor(node_model, "Room",       true, t_normal,      false);
-      AddSensor(node_model, "Underbelly", true, t_warn_lo,     false);
+      AddSensor(node_model, "Room", true, t_normal, false);
+      AddSensor(node_model, "Underbelly", true, t_warn_lo, false);
 
     } else if (strcmp(def.id, "outside") == 0) {
       // Outside: cooler but normal Room, missing Underbelly data.
-      AddSensor(node_model, "Room",       true, t_normal - 5.0f, false);
-      AddSensor(node_model, "Underbelly", false, NAN,            false);
+      AddSensor(node_model, "Room", true, t_normal - 5.0f, false);
+      AddSensor(node_model, "Underbelly", false, NAN, false);
 
     } else {
       // Fallback: treat as normal.
-      AddSensor(node_model, "Room",       true, t_normal,     false);
+      AddSensor(node_model, "Room", true, t_normal, false);
       AddSensor(node_model, "Underbelly", true, belly_normal, false);
     }
 
@@ -1769,7 +1987,6 @@ static void BuildDummyData() {
   g_layout_dirty = true;
   g_values_dirty = true;
 }
-
 
 // Placeholder buzzer.
 void BuzzerBeepOnce() {
@@ -2003,7 +2220,8 @@ static String CanonicalRoomId(const String &input) {
     if (c >= 'A' && c <= 'Z') {
       c = static_cast<char>(c - 'A' + 'a');
     }
-    // Keep only letters and digits; drop spaces, apostrophes, punctuation, etc.
+    // Keep only letters and digits; drop spaces, apostrophes, punctuation,
+    // etc.
     const bool is_alpha = (c >= 'a' && c <= 'z');
     const bool is_digit = (c >= '0' && c <= '9');
     if (!(is_alpha || is_digit)) {
@@ -2013,7 +2231,6 @@ static String CanonicalRoomId(const String &input) {
   }
   return out;
 }
-
 
 // Find the MeshNode whose label maps to this room, if any.
 static MeshNode *FindNodeForRoom(const RoomDef &def) {
@@ -2147,7 +2364,6 @@ static void RoomMapBuildWidgets() {
     lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, 0);
     lv_obj_clear_flag(rect, LV_OBJ_FLAG_SCROLLABLE);
 
-
     // "Outside" label anchored near the top-left of the map.
     outside_label_obj = lv_label_create(g_ui_map_container);
     outside_widget.label_obj = outside_label_obj;
@@ -2225,7 +2441,8 @@ static void RoomMapBuildWidgets() {
     house_h = inner_h - (margin_top + margin_bottom);
     if (house_h < 16) {
       house_h = 16;
-      // if this happens, margins were huge; but bottom will still not overflow
+      // if this happens, margins were huge; but bottom will still not
+      // overflow
     }
   }
 
@@ -2415,13 +2632,13 @@ static void RoomMapRefresh(uint32_t now_ms) {
 
   // Per-sensor summary for this refresh.
   struct SensorState {
-    bool present = false;        // sensor with that label exists
-    bool has_value = false;      // has a valid numeric reading
-    bool missing_data = false;   // label exists but no valid value
-    bool stale = false;          // value too old by g_stale_minutes_threshold
-    bool alert = false;          // over/under alert limits (respecting mute)
-    bool warn = false;           // over/under warn limits (respecting mute)
-    float temp_c = NAN;          // last value (if has_value)
+    bool present = false;      // sensor with that label exists
+    bool has_value = false;    // has a valid numeric reading
+    bool missing_data = false; // label exists but no valid value
+    bool stale = false;        // value too old by g_stale_minutes_threshold
+    bool alert = false;        // over/under alert limits (respecting mute)
+    bool warn = false;         // over/under warn limits (respecting mute)
+    float temp_c = NAN;        // last value (if has_value)
   };
 
   for (auto &widget : g_room_widgets) {
@@ -2469,8 +2686,7 @@ static void RoomMapRefresh(uint32_t now_ms) {
     const uint8_t node_mute = node->mute_mask() & 0x3u;
 
     // Helper to evaluate one sensor ("Room" or "Underbelly").
-    auto EvalSensor = [&](const MeshNode::Sensor *sensor,
-                          SensorState &state) {
+    auto EvalSensor = [&](const MeshNode::Sensor *sensor, SensorState &state) {
       if (sensor == nullptr) {
         // No such sensor label on this node: treat as neutral.
         state.present = false;
@@ -2486,8 +2702,7 @@ static void RoomMapRefresh(uint32_t now_ms) {
       state.present = true;
       state.temp_c = sensor->temp_c;
 
-      const bool has_val =
-          sensor->has_value && !isnan(sensor->temp_c);
+      const bool has_val = sensor->has_value && !isnan(sensor->temp_c);
       state.has_value = has_val;
       state.missing_data = !has_val;
 
@@ -2495,8 +2710,7 @@ static void RoomMapRefresh(uint32_t now_ms) {
       state.stale = false;
       if (has_val && sensor->last_ms != 0U && now_ms >= sensor->last_ms &&
           g_stale_minutes_threshold > 0U) {
-        const uint32_t age_sensor_min =
-            (now_ms - sensor->last_ms) / 60000U;
+        const uint32_t age_sensor_min = (now_ms - sensor->last_ms) / 60000U;
         if (age_sensor_min >= g_stale_minutes_threshold) {
           state.stale = true;
         }
@@ -2554,8 +2768,7 @@ static void RoomMapRefresh(uint32_t now_ms) {
     const bool any_thresh_warn = room_state.warn || belly_state.warn;
     const bool any_sensor_missing =
         room_state.missing_data || belly_state.missing_data;
-    const bool any_sensor_stale =
-        room_state.stale || belly_state.stale;
+    const bool any_sensor_stale = room_state.stale || belly_state.stale;
 
     widget.is_missing = node_missing || any_sensor_missing;
 
@@ -2571,16 +2784,15 @@ static void RoomMapRefresh(uint32_t now_ms) {
     } else if (any_sensor_missing) {
       // We *should* have data (sensor label exists) but don't.
       widget.is_alert = true;
-    } else if (any_thresh_warn || node_stale || seq_stuck ||
-               any_sensor_stale) {
+    } else if (any_thresh_warn || node_stale || seq_stuck || any_sensor_stale) {
       // Anything in warning/stale territory → warning flash.
       widget.is_warning = true;
     }
 
-    // Decide which sensor to *display* (but flashing is already based on BOTH).
+    // Decide which sensor to *display* (but flashing is already based on
+    // BOTH).
     const bool use_belly = g_map_use_underbelly;
-    const SensorState &display_state =
-        use_belly ? belly_state : room_state;
+    const SensorState &display_state = use_belly ? belly_state : room_state;
 
     if (!node_missing && display_state.present && display_state.has_value) {
       widget.has_value = true;
@@ -2635,7 +2847,6 @@ static void RoomMapRefresh(uint32_t now_ms) {
   }
 }
 
-
 // Per-frame flashing for map rooms, sharing the global flash interval.
 static void RoomMapLoop(uint32_t now_ms) {
   if (g_ui_map_container == nullptr || g_room_widgets.empty()) {
@@ -2652,8 +2863,8 @@ static void RoomMapLoop(uint32_t now_ms) {
         }
       }
       if (widget.label_obj != nullptr) {
-        lv_obj_set_style_text_color(widget.label_obj,
-                                    widget.base_text_color, 0);
+        lv_obj_set_style_text_color(widget.label_obj, widget.base_text_color,
+                                    0);
       }
     }
     return;
@@ -2677,8 +2888,8 @@ static void RoomMapLoop(uint32_t now_ms) {
         }
       }
       if (widget.label_obj != nullptr) {
-        lv_obj_set_style_text_color(widget.label_obj,
-                                    widget.base_text_color, 0);
+        lv_obj_set_style_text_color(widget.label_obj, widget.base_text_color,
+                                    0);
       }
     }
     return;
@@ -2717,7 +2928,6 @@ static void RoomMapLoop(uint32_t now_ms) {
     }
   }
 }
-
 
 static void RoomMapSetViewMode(UiViewMode mode) {
   if (g_ui_view_mode == mode) {
@@ -2765,7 +2975,6 @@ static void RoomMapSetViewMode(UiViewMode mode) {
   g_values_dirty = true;
 }
 
-
 static void BellyButtonEvent(lv_event_t *e) {
   (void)e;
   g_map_use_underbelly = !g_map_use_underbelly;
@@ -2783,16 +2992,15 @@ static void ViewButtonEvent(lv_event_t *e) {
   (void)e;
 
   switch (g_ui_view_mode) {
-    case kUiViewModeMap:
-      RoomMapSetViewMode(kUiViewModeTiles);
-      break;
-    case kUiViewModeTiles:
-      RoomMapSetViewMode(kUiViewModeMap);
-      g_map_use_underbelly = false;
-      break;
+  case kUiViewModeMap:
+    RoomMapSetViewMode(kUiViewModeTiles);
+    break;
+  case kUiViewModeTiles:
+    RoomMapSetViewMode(kUiViewModeMap);
+    g_map_use_underbelly = false;
+    break;
   }
 }
-
 
 // -----------------------------------------------------------------------------
 // GUI helpers callable from elsewhere
@@ -2925,12 +3133,21 @@ static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
 
   if (argc >= 2 && argv[1] == "erase") {
     g_root_preferences.begin("meshroot", false);
-    g_root_preferences.remove("known_bin");
-    g_root_preferences.remove("known"); // legacy
+    bool is_successful = true;
+    is_successful =
+        NvsRemoveKeyVerified(g_root_preferences, "known_bin") && is_successful;
+    is_successful =
+        NvsRemoveKeyVerified(g_root_preferences, "known") && is_successful;
     g_root_preferences.end();
-    out.println(F("known erased"));
+
+    if (!is_successful) {
+      out.println(F("[NVS VERIFY] CmdKnown erase failed"));
+    } else {
+      out.println(F("known erased"));
+    }
     return;
   }
+
   std::vector<uint32_t> ids;
   (void)ReadKnownFromNVS(&ids);
   if (ids.empty()) {
@@ -4243,8 +4460,8 @@ void setup() {
   GuiInit();
 
   // Make the house map with ROOM sensors the default view on boot.
-  g_map_use_underbelly = false;                  // ensure we show Room sensors
-  RoomMapSetViewMode(kUiViewModeMap);            // switch LVGL to map view
+  g_map_use_underbelly = false;       // ensure we show Room sensors
+  RoomMapSetViewMode(kUiViewModeMap); // switch LVGL to map view
 
   GuiUpdateNetwork(0);
   GuiRequestRender();
@@ -4319,7 +4536,6 @@ void loop() {
 
 #include <DallasTemperature.h>
 #include <OneWire.h>
-#include <Preferences.h>
 #include <map>
 
 std::vector<Address> g_devices;
@@ -4429,73 +4645,128 @@ float ApplyCorrection(float temp_raw_c, const String &addr16,
   return temp_corr;
 }
 
-// Persistence (leaf).
+// Save all calibration coefficients into a single JSON blob under key "cal".
+// Now uses:
+//   - NVS read-before-write compare (skip write if unchanged)
+//   - NvsPutStringVerified() for write + read-back verification.
 void SaveAllCalibration() {
-  g_leaf_prefs.begin("leafcal", /*readOnly=*/false);
-
-  JsonDocument index_doc;
-  JsonArray index_array = index_doc.to<JsonArray>();
-  for (const auto &entry : g_cal_entries) {
-    index_array.add(entry.addr);
+  // Open NVS namespace for write.
+  if (!g_leaf_prefs.begin("leafcal", /*readOnly=*/false)) {
+    Serial.println(F("CAL NVS: begin(\"leafcal\", false) FAILED"));
+    return;
   }
 
-  String index_json;
-  serializeJson(index_doc, index_json);
-  g_leaf_prefs.putString("index", index_json);
+  // Build JSON array from current RAM entries.
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
 
   for (const auto &entry : g_cal_entries) {
-    char key[32];
-    snprintf(key, sizeof(key), "c_%s", entry.addr.c_str());
-
-    const Coeff &c = entry.coeff;
-    char value[64];
-    snprintf(value, sizeof(value), "%.8f,%.8f", static_cast<double>(c.a1),
-             static_cast<double>(c.a0));
-    g_leaf_prefs.putString(key, value);
+    JsonObject obj = arr.add<JsonObject>();
+    obj["addr"] = entry.addr;
+    obj["a1"] = entry.coeff.a1;
+    obj["a0"] = entry.coeff.a0;
   }
+
+  String json;
+  serializeJson(doc, json);
+
+  const size_t entry_count = g_cal_entries.size();
+
+  // If there are no entries, clear the key instead of writing "[]".
+  if (entry_count == 0) {
+    // Remove existing key (if any) and verify.
+    if (!NvsRemoveKeyVerified(g_leaf_prefs, "cal")) {
+      Serial.println(F("CAL NVS: remove(\"cal\") FAILED"));
+    } else {
+      Serial.println(F("CAL NVS: cleared 'cal' key (0 entries)"));
+    }
+    g_leaf_prefs.end();
+    return;
+  }
+
+  // Read current stored value so we can skip redundant writes.
+  const String existing = g_leaf_prefs.getString("cal", "");
+
+  if (existing == json) {
+    Serial.printf("CAL NVS: no change (%u entr%s, %u bytes) – skipping write\n",
+                  static_cast<unsigned>(entry_count),
+                  (entry_count == 1) ? "y" : "ies",
+                  static_cast<unsigned>(json.length()));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  // Write + verify using shared helper.
+  if (!NvsPutStringVerified(g_leaf_prefs, "cal", json)) {
+    Serial.printf("CAL NVS: NvsPutStringVerified(\"cal\") FAILED "
+                  "(%u entr%s, %u bytes)\n",
+                  static_cast<unsigned>(entry_count),
+                  (entry_count == 1) ? "y" : "ies",
+                  static_cast<unsigned>(json.length()));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  Serial.printf("CAL NVS: saved %u entr%s (%u bytes) to NVS\n",
+                static_cast<unsigned>(entry_count),
+                (entry_count == 1) ? "y" : "ies",
+                static_cast<unsigned>(json.length()));
 
   g_leaf_prefs.end();
 }
 
+// Load all calibration coefficients from the single "cal" JSON blob.
 void LoadAllCalibration() {
   g_cal_entries.clear();
 
-  g_leaf_prefs.begin("leafcal", /*readOnly=*/true);
-  const String index_json = g_leaf_prefs.getString("index", "");
-
-  if (!index_json.isEmpty()) {
-    JsonDocument index_doc;
-    if (deserializeJson(index_doc, index_json) == DeserializationError::Ok) {
-      for (JsonVariant value : index_doc.as<JsonArray>()) {
-        const String addr = value.as<const char *>();
-
-        char key[32];
-        snprintf(key, sizeof(key), "c_%s", addr.c_str());
-
-        const String cal_str = g_leaf_prefs.getString(key, "");
-        if (!cal_str.isEmpty()) {
-          Coeff coeff{1.0f, 0.0f};
-          float a1 = 1.0f;
-          float a0 = 0.0f;
-          float legacy_a2 = 0.0f;
-
-          int parsed = sscanf(cal_str.c_str(), "%f,%f", &a1, &a0);
-          if (parsed != 2) {
-            parsed = sscanf(cal_str.c_str(), "%f,%f,%f", &legacy_a2, &a1, &a0);
-          }
-          if (parsed >= 2) {
-            coeff.a1 = a1;
-            coeff.a0 = a0;
-            SetCal(addr, coeff);
-          }
-        }
-      }
-    }
+  if (!g_leaf_prefs.begin("leafcal", /*readOnly=*/true)) {
+    Serial.println(F("CAL NVS: begin(\"leafcal\", true) FAILED"));
+    return;
   }
+
+  const String json = g_leaf_prefs.getString("cal", "");
+
+  if (json.isEmpty()) {
+    Serial.println(F("CAL NVS: no 'cal' blob found (key missing or empty); "
+                     "node running uncalibrated until you solve+save"));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  Serial.printf("CAL NVS: found 'cal' blob (%u bytes), parsing...\n",
+                static_cast<unsigned>(json.length()));
+
+  JsonDocument doc;
+  const auto err = deserializeJson(doc, json);
+  if (err != DeserializationError::Ok) {
+    Serial.printf("CAL load: JSON parse error: %s\n", err.c_str());
+    g_leaf_prefs.end();
+    return;
+  }
+
+  JsonArray arr = doc.as<JsonArray>();
+  for (JsonObject obj : arr) {
+    const char *addr_cstr = obj["addr"] | nullptr;
+    if (addr_cstr == nullptr || strlen(addr_cstr) != 16) {
+      Serial.println(F("CAL load: skipping entry with invalid addr"));
+      continue;
+    }
+
+    Coeff coeff;
+    coeff.a1 = obj["a1"] | 1.0f;
+    coeff.a0 = obj["a0"] | 0.0f;
+
+    SetCal(String(addr_cstr), coeff);
+  }
+
+  const size_t count = g_cal_entries.size();
+  Serial.printf("CAL load: loaded %u calibration entr%s from NVS\n",
+                static_cast<unsigned>(count), (count == 1) ? "y" : "ies");
 
   g_leaf_prefs.end();
 }
 
+// Clear one sensor's calibration and resave the blob.
 void ClearCalibration(const String &addr) {
   const int index = FindCalIndex(addr);
   if (index >= 0) {
@@ -4968,9 +5239,11 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
                   "  cal list\n"
                   "  cal show [addr16]\n"
                   "  cal clear <addr16>\n"
-                  "  cal save | cal load"));
+                  "  cal save | cal load\n"
+                  "  cal status"));
     return;
   }
+
   const String sub = argv[1];
 
   if (sub == "ice") {
@@ -5014,29 +5287,41 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   if (sub == "list") {
+    if (g_cal_entries.empty()) {
+      out.println(F("cal list: no calibration entries in RAM "
+                    "(calibrate or run 'cal load')"));
+      return;
+    }
+
     for (const auto &e : g_cal_entries) {
       const Coeff &c = e.coeff;
-      out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(), (double)c.a1,
-                 (double)c.a0);
+      out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(),
+                 static_cast<double>(c.a1), static_cast<double>(c.a0));
     }
     return;
   }
 
   if (sub == "show") {
+    if (g_cal_entries.empty()) {
+      out.println(F("cal show: no calibration entries in RAM "
+                    "(calibrate or run 'cal load')"));
+      return;
+    }
+
     if (argc >= 3) {
       const int idx = FindCalIndex(argv[2]);
       if (idx >= 0) {
-        const Coeff &c = g_cal_entries[(size_t)idx].coeff;
-        out.printf("%s : a1=%.6f a0=%.6f\n", argv[2].c_str(), (double)c.a1,
-                   (double)c.a0);
+        const Coeff &c = g_cal_entries[static_cast<size_t>(idx)].coeff;
+        out.printf("%s : a1=%.6f a0=%.6f\n", argv[2].c_str(),
+                   static_cast<double>(c.a1), static_cast<double>(c.a0));
       } else {
         out.printf("cal show %s: not found\n", argv[2].c_str());
       }
     } else {
       for (const auto &e : g_cal_entries) {
         const Coeff &c = e.coeff;
-        out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(), (double)c.a1,
-                   (double)c.a0);
+        out.printf("%s : a1=%.6f a0=%.6f\n", e.addr.c_str(),
+                   static_cast<double>(c.a1), static_cast<double>(c.a0));
       }
     }
     return;
@@ -5054,13 +5339,79 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
 
   if (sub == "save") {
     SaveAllCalibration();
-    out.println(F("cal save: all calibration coefficients persisted to NVS"));
+    const size_t count = g_cal_entries.size();
+    out.printf("cal save: persisted %u calibration entr%s to NVS\n",
+               static_cast<unsigned>(count), (count == 1) ? "y" : "ies");
     return;
   }
 
   if (sub == "load") {
     LoadAllCalibration();
-    out.println(F("cal load: calibration coefficients loaded from NVS"));
+    const size_t count = g_cal_entries.size();
+    out.printf("cal load: loaded %u calibration entr%s from NVS\n",
+               static_cast<unsigned>(count), (count == 1) ? "y" : "ies");
+    if (count == 0) {
+      out.println(
+          F("  (no stored calibration found; node is running uncalibrated)"));
+    }
+    return;
+  }
+
+  if (sub == "status") {
+    out.println(F("cal status:"));
+
+    // 1) Attached sensors and their calibration state.
+    if (g_devices.empty()) {
+      out.println(F("  attached sensors: (none)"));
+    } else {
+      out.println(F("  attached sensors:"));
+      for (const auto &addr : g_devices) {
+        const String addr16 = addrToHex(addr.data());
+        const int idx = FindCalIndex(addr16);
+        if (idx >= 0) {
+          const Coeff &c = g_cal_entries[static_cast<size_t>(idx)].coeff;
+          const bool ident = IsIdentity(c);
+          out.printf("    %s : CAL a1=%.6f a0=%.6f%s\n", addr16.c_str(),
+                     static_cast<double>(c.a1), static_cast<double>(c.a0),
+                     ident ? " (identity)" : "");
+        } else {
+          out.printf("    %s : NO CAL\n", addr16.c_str());
+        }
+      }
+    }
+
+    // 2) Calibration entries whose sensor is not currently attached.
+    bool have_orphans = false;
+    for (const auto &e : g_cal_entries) {
+      bool attached = false;
+      for (const auto &addr : g_devices) {
+        const String addr16 = addrToHex(addr.data());
+        if (e.addr.equalsIgnoreCase(addr16)) {
+          attached = true;
+          break;
+        }
+      }
+      if (!attached) {
+        if (!have_orphans) {
+          out.println(F("  stored-only entries (no attached sensor):"));
+          have_orphans = true;
+        }
+        const Coeff &c = e.coeff;
+        out.printf("    %s : CAL a1=%.6f a0=%.6f\n", e.addr.c_str(),
+                   static_cast<double>(c.a1), static_cast<double>(c.a0));
+      }
+    }
+
+    if (!have_orphans && !g_cal_entries.empty()) {
+      out.println(F("  (no stored-only entries; all calibration entries match "
+                    "attached sensors)"));
+    }
+
+    if (g_devices.empty() && g_cal_entries.empty()) {
+      out.println(
+          F("  (no sensors and no calibration entries; node is uncalibrated)"));
+    }
+
     return;
   }
 
