@@ -9,12 +9,6 @@
 #define DBG_LED_PIN -1
 #endif
 
-// ===== ROLE (compile-time) =====
-// Set to 1 for the display node (always ROOT). All others: 0 (LEAF).
-#ifndef MESH_IS_ROOT
-#define MESH_IS_ROOT 0
-#endif
-
 // ===== Mesh credentials (routerless) =====
 #define MESH_PREFIX "MeshTemps"
 #define MESH_PASSWORD "mesh-pass-1234" // >= 8 chars
