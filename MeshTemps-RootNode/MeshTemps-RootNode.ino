@@ -327,6 +327,68 @@ enum NodeMuteMask : uint8_t {
   kMuteBoth = kMuteLow | kMuteHigh
 };
 
+// ============================================================================
+// History configuration: NVS persistence
+// ============================================================================
+
+constexpr const char* kHistoryPrefsNamespace   = "mesh_hist";   // adjust if needed
+constexpr const char* kHistoryKeyIntervalMs    = "histIntMs";
+constexpr const char* kHistoryKeyRetentionDays = "histRetDays";
+
+// Load history logging configuration (interval + retention) from NVS and
+// apply it to MeshNode static configuration.
+void LoadHistoryConfigFromNvs() {
+  Preferences preferences;
+
+  if (!preferences.begin(kHistoryPrefsNamespace, /*readOnly=*/true)) {
+    // If this fails we just keep the compiled-in defaults.
+    Serial.println(F("History NVS: begin() failed, using defaults."));
+    return;
+  }
+
+  const uint32_t default_interval_ms =
+      MeshNode::history_interval_ms();
+  const uint32_t default_retention_days =
+      MeshNode::history_retention_days();
+
+  const uint32_t interval_ms = preferences.getULong(
+      kHistoryKeyIntervalMs, default_interval_ms);
+  const uint32_t retention_days = preferences.getUInt(
+      kHistoryKeyRetentionDays, default_retention_days);
+
+  preferences.end();
+
+  MeshNode::SetHistoryConfig(interval_ms, retention_days);
+
+  Serial.print(F("History NVS: interval_ms="));
+  Serial.print(interval_ms);
+  Serial.print(F(" ms, retention_days="));
+  Serial.println(retention_days);
+}
+
+// Save current MeshNode history configuration back to NVS.
+void SaveHistoryConfigToNvs() {
+  Preferences preferences;
+
+  if (!preferences.begin(kHistoryPrefsNamespace, /*readOnly=*/false)) {
+    Serial.println(F("History NVS: begin() failed, NOT saving."));
+    return;
+  }
+
+  const uint32_t interval_ms = MeshNode::history_interval_ms();
+  const uint32_t retention_days = MeshNode::history_retention_days();
+
+  preferences.putULong(kHistoryKeyIntervalMs, interval_ms);
+  preferences.putUInt(kHistoryKeyRetentionDays, retention_days);
+
+  preferences.end();
+
+  Serial.print(F("History NVS: saved interval_ms="));
+  Serial.print(interval_ms);
+  Serial.print(F(" ms, retention_days="));
+  Serial.println(retention_days);
+}
+
 // -----------------------------------------------------------------------------
 // Shared mesh and logging
 // -----------------------------------------------------------------------------
@@ -617,7 +679,8 @@ static bool EnsureMeshStationConfigApplied(Print &out,
     // Abort any ongoing association / retries and clear driver state.
     WiFi.disconnect(true, true); // (wifioff = true, eraseCfg = true)
     delay(100);
-    WiFi.mode(WIFI_AP_STA);
+    // WiFi.mode(WIFI_AP_STA); // WILL NOT CONNECT TO AP AND NTP
+    WiFi.mode(WIFI_STA);
 
     mesh.setRoot(true);
     mesh.setContainsRoot(true);
@@ -675,7 +738,8 @@ static bool EnsureWifiConnected(Print &out) {
 
   // Abort any background retries that might keep hitting the AP.
   WiFi.disconnect(true, true);
-  WiFi.mode(WIFI_AP_STA);
+  // WiFi.mode(WIFI_AP_STA);  // WILL NOT CONNECT TO AP AND NTP
+  WiFi.mode(WIFI_STA);
 
   return false;
 }
@@ -1527,6 +1591,8 @@ static void RootInitStorage() {
   LoadBuzzerSettings();
   LoadFlashSettings();
   LoadTileDisplaySettings();
+
+  LoadHistoryConfigFromNvs();
 
   // Topology persistence.
   LoadTopoPersistFlag();
@@ -4897,6 +4963,281 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
       F("ERR wifi (use: wifi status|scan|connect|ssid|password|clear)"));
 }
 
+// Helper: find the first sensor with a given 16-char address across all nodes.
+static bool FindSensorByAddressAcrossNodes(
+    const String& address16,
+    MeshNode** out_node,
+    MeshNode::Sensor** out_sensor) {
+  if (out_node != nullptr) {
+    *out_node = nullptr;
+  }
+  if (out_sensor != nullptr) {
+    *out_sensor = nullptr;
+  }
+
+  auto node_ids = GetAllMeshNodeIds();
+  for (size_t i = 0; i < node_ids.size(); ++i) {
+    const uint32_t node_id = node_ids[i];
+    MeshNode* node = FindMeshNode(node_id);
+    if (node == nullptr) {
+      continue;
+    }
+
+    MeshNode::Sensor* sensor = node->FindSensor(address16);
+    if (sensor != nullptr) {
+      if (out_node != nullptr) {
+        *out_node = node;
+      }
+      if (out_sensor != nullptr) {
+        *out_sensor = sensor;
+      }
+      return true;
+    }
+  }
+
+  return false;
+}
+
+// ============================================================================
+// History configuration + data: serial console command
+// ============================================================================
+
+static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  // -------------------------------------------------------------------------
+  // Usage
+  // -------------------------------------------------------------------------
+  if (argc <= 1) {
+    out.println(F("usage:"));
+    out.println(F("  hist show|get"));
+    out.println(F("    - show global history logging configuration"));
+    out.println(F("  hist set <interval_s> <retention_days>"));
+    out.println(F("    - set history interval (seconds) and retention (days)"));
+    out.println(F("  hist clear"));
+    out.println(F("    - clear history for all nodes / sensors"));
+    out.println(F("  hist clear <addr16>"));
+    out.println(F("    - clear history for a specific sensor (16-char DS18B20 addr)"));
+    out.println(F("  hist view <addr16> [max_samples]"));
+    out.println(F("    - view history for a specific sensor, oldest -> newest"));
+    return;
+  }
+
+  const String sub = argv[1];
+
+  // -------------------------------------------------------------------------
+  // hist show / hist get -> show global history config
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("show") || sub.equalsIgnoreCase("get")) {
+    PrintHistoryConfig(out);
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // hist set <interval_s> <retention_days>
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("set")) {
+    if (argc < 4) {
+      out.println(
+          F("ERR hist set (usage: hist set <interval_s> <retention_days>)"));
+      return;
+    }
+
+    const long interval_seconds = argv[2].toInt();
+    const long retention_days = argv[3].toInt();
+
+    if (interval_seconds <= 0) {
+      out.println(F("ERR hist set: interval_s must be > 0"));
+      return;
+    }
+    if (retention_days <= 0) {
+      out.println(F("ERR hist set: retention_days must be > 0"));
+      return;
+    }
+
+    const uint32_t interval_ms =
+        static_cast<uint32_t>(interval_seconds) * 1000UL;
+
+    MeshNode::SetHistoryConfig(interval_ms,
+                               static_cast<uint32_t>(retention_days));
+
+    out.print(F("hist set: interval="));
+    out.print(interval_ms);
+    out.print(F(" ms, retention="));
+    out.print(retention_days);
+    out.println(F(" days"));
+
+    PrintHistoryConfig(out);
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // hist clear [addr16]
+  //   - no addr: clear history for all sensors on all nodes
+  //   - addr16 : clear history for matching sensor across all nodes
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("clear")) {
+    // No additional argument: clear all sensors.
+    if (argc == 2) {
+      auto node_ids = GetAllMeshNodeIds();
+      size_t cleared_sensors = 0;
+
+      for (size_t i = 0; i < node_ids.size(); ++i) {
+        MeshNode* node = FindMeshNode(node_ids[i]);
+        if (node == nullptr) {
+          continue;
+        }
+
+        auto& sensors = node->sensors();
+        for (size_t s = 0; s < sensors.size(); ++s) {
+          MeshNode::Sensor& sensor = sensors[s];
+          sensor.history.clear();
+          sensor.history_head_index = 0U;
+          sensor.history_size = 0U;
+          ++cleared_sensors;
+        }
+      }
+
+      out.print(F("hist clear: cleared history for "));
+      out.print(static_cast<unsigned long>(cleared_sensors));
+      out.println(F(" sensors across all nodes"));
+      return;
+    }
+
+    // hist clear <addr16>
+    if (argc == 3) {
+      const String addr16 = argv[2];
+      if (addr16.length() != 16) {
+        out.println(
+            F("ERR hist clear: addr16 must be a 16-char hex DS18B20 address"));
+        return;
+      }
+
+      MeshNode* node = nullptr;
+      MeshNode::Sensor* sensor = nullptr;
+      if (!FindSensorByAddressAcrossNodes(addr16, &node, &sensor) ||
+          node == nullptr || sensor == nullptr) {
+        out.print(F("ERR hist clear: sensor with addr="));
+        out.print(addr16);
+        out.println(F(" not found on any node"));
+        return;
+      }
+
+      sensor->history.clear();
+      sensor->history_head_index = 0U;
+      sensor->history_size = 0U;
+
+      out.print(F("hist clear: cleared history for node "));
+      out.print(node->node_id_str());
+      out.print(F(" sensor "));
+      out.println(addr16);
+      return;
+    }
+
+    out.println(F("ERR hist clear (usage: hist clear [addr16])"));
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // hist view <addr16> [max_samples]
+  //   - show up to max_samples (default 50) samples, oldest -> newest.
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("view")) {
+    if (argc < 3) {
+      out.println(
+          F("ERR hist view (usage: hist view <addr16> [max_samples])"));
+      return;
+    }
+
+    const String addr16 = argv[2];
+    if (addr16.length() != 16) {
+      out.println(
+          F("ERR hist view: addr16 must be a 16-char hex DS18B20 address"));
+      return;
+    }
+
+    long max_samples_arg = 50;
+    if (argc >= 4) {
+      max_samples_arg = argv[3].toInt();
+      if (max_samples_arg <= 0) {
+        max_samples_arg = 50;
+      }
+    }
+    const size_t max_samples = static_cast<size_t>(max_samples_arg);
+
+    MeshNode* node = nullptr;
+    MeshNode::Sensor* sensor = nullptr;
+    if (!FindSensorByAddressAcrossNodes(addr16, &node, &sensor) ||
+        node == nullptr || sensor == nullptr) {
+      out.print(F("ERR hist view: sensor with addr="));
+      out.print(addr16);
+      out.println(F(" not found on any node"));
+      return;
+    }
+
+    std::vector<MeshNode::SensorHistorySample> samples;
+    sensor->CopyHistoryInChronologicalOrder(&samples);
+
+    if (samples.empty()) {
+      out.print(F("hist view: no history samples for node "));
+      out.print(node->node_id_str());
+      out.print(F(" sensor "));
+      out.println(addr16);
+      return;
+    }
+
+    const uint32_t now_ms = millis();
+    const size_t total = samples.size();
+    const size_t start_index =
+        (total > max_samples) ? (total - max_samples) : 0U;
+    const size_t shown = total - start_index;
+
+    out.print(F("History for node "));
+    out.print(node->node_id_str());
+    out.print(F(" sensor "));
+    out.print(addr16);
+    out.print(F(" ("));
+    out.print(static_cast<unsigned long>(total));
+    out.print(F(" samples total, showing last "));
+    out.print(static_cast<unsigned long>(shown));
+    out.println(F("):"));
+
+    for (size_t i = start_index; i < total; ++i) {
+      const MeshNode::SensorHistorySample& sample = samples[i];
+      const uint32_t sample_ts = sample.timestamp_ms;
+      const uint32_t age_s =
+          (now_ms >= sample_ts) ? ((now_ms - sample_ts) / 1000U) : 0U;
+
+      out.print(F("  #"));
+      out.print(static_cast<unsigned long>(i));
+      out.print(F(": t_ms="));
+      out.print(static_cast<unsigned long>(sample_ts));
+      out.print(F(" (age="));
+      out.print(static_cast<unsigned long>(age_s));
+      out.print(F(" s) temp="));
+      out.print(sample.temp_c, 3);
+      out.print(F(" C"));
+
+      if (!sample.has_value) {
+        out.print(F(" [invalid]"));
+      }
+      if (sample.corrected) {
+        out.print(F(" [corrected]"));
+      }
+      out.println();
+    }
+
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Unknown subcommand
+  // -------------------------------------------------------------------------
+  out.println(
+      F("ERR hist (use 'hist show', 'hist set', 'hist clear', or 'hist view')"));
+}
+
 static void CmdTz(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -4960,6 +5301,38 @@ static void CmdTz(void *ctx, int argc, const String argv[], Print &out) {
 
   out.println(F("ERR tz (use 'tz show' or 'tz set <minutes> [dst on|off]')"));
 }
+
+// ============================================================================
+// History configuration: serial console command
+// ============================================================================
+
+static void PrintHistoryConfig(Print& output) {
+  const uint32_t interval_ms = MeshNode::history_interval_ms();
+  const uint32_t retention_days = MeshNode::history_retention_days();
+  const size_t capacity = MeshNode::history_capacity_per_sensor();
+
+  const float interval_seconds =
+      static_cast<float>(interval_ms) / 1000.0f;
+  const float interval_minutes = interval_seconds / 60.0f;
+
+  output.println(F("History logging configuration:"));
+  output.print(F("  Interval: "));
+  output.print(interval_ms);
+  output.print(F(" ms ("));
+  output.print(interval_seconds, 3);
+  output.print(F(" s, "));
+  output.print(interval_minutes, 3);
+  output.println(F(" min)"));
+
+  output.print(F("  Retention: "));
+  output.print(retention_days);
+  output.println(F(" days"));
+
+  output.print(F("  Per-sensor capacity: "));
+  output.print(static_cast<unsigned long>(capacity));
+  output.println(F(" samples"));
+}
+
 
 // -----------------------------------------------------------------------------
 // Root announce and console
@@ -5158,6 +5531,11 @@ void setup() {
   g_console.RegisterCommand(
       "tz", &CmdTz, "Timezone: tz show | tz set <minutes> [dst on|off]");
   g_console.RegisterCommand("time", &CmdTime, "Show or sync RTC time via NTP");
+  g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view");
+  
+
+  // This will override the compile-time defaults if keys exist in NVS.
+  LoadHistoryConfigFromNvs();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   // mesh.setDebugMsgTypes(ALL);

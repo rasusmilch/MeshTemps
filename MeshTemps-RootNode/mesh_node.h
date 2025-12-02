@@ -17,6 +17,14 @@ struct NodeMetaRecord {
 // Represents one sensor attached to a mesh node.
 class MeshNode {
  public:
+  // One time-series sample for a single sensor.
+  struct SensorHistorySample {
+    uint32_t timestamp_ms;  // monotonic millis() at time of sample
+    float temp_c;
+    bool has_value;
+    bool corrected;
+  };
+
   struct Sensor {
     String address;  // 16-char DS18B20 ROM code (as sent by leaf)
 
@@ -34,7 +42,38 @@ class MeshNode {
     bool has_value = false;
     bool corrected = false;
     uint32_t last_ms = 0;  // millis() timestamp of last update
+
+    // Time-series history for this sensor (ring buffer).
+    //
+    // We pre-size 'history' to MeshNode::history_capacity_per_sensor_ and
+    // use (history_head_index, history_size) to track the valid window.
+    std::vector<SensorHistorySample> history;
+    size_t history_head_index = 0;  // where the next sample will be written
+    size_t history_size = 0;        // number of valid entries in 'history'
+
+    // Copy history into |out| in chronological order (oldest -> newest).
+    void CopyHistoryInChronologicalOrder(
+        std::vector<SensorHistorySample>* out) const {
+      if (out == nullptr) {
+        return;
+      }
+      out->clear();
+      if (history.empty() || history_size == 0) {
+        return;
+      }
+      out->reserve(history_size);
+
+      const size_t capacity = history.size();
+      const size_t start_index =
+          (history_size == capacity) ? history_head_index : 0;
+
+      for (size_t i = 0; i < history_size; ++i) {
+        const size_t idx = (start_index + i) % capacity;
+        out->push_back(history[idx]);
+      }
+    }
   };
+
 
 
   explicit MeshNode(uint32_t node_id);
@@ -83,7 +122,7 @@ class MeshNode {
   //     "busGpio": <int>,
   //     "sensors": [
   //       { "addr": "0011223344556677", "tC": 23.5, "corr": true },
-  //       ...
+  //       etc
   //     ]
   //   }
   //
@@ -117,6 +156,18 @@ class MeshNode {
   // messages with exactly the same sequence value.
   bool SequenceStuck(uint32_t now_ms,
                      uint32_t stuck_ms_threshold) const;
+
+  // ---- History logging configuration ----
+  //
+  // interval_ms == 0 disables history logging.
+  // retention_days is used to size the per-sensor ring buffer.
+  static void SetHistoryConfig(uint32_t interval_ms, uint32_t retention_days);
+
+  static uint32_t history_interval_ms() { return history_interval_ms_; }
+  static uint32_t history_retention_days() { return history_retention_days_; }
+  static size_t history_capacity_per_sensor() {
+    return history_capacity_per_sensor_;
+  }
 
   // ---- NEW: per-node UI metadata accessors ----
   int32_t tile_rank() const { return tile_rank_; }
@@ -153,6 +204,20 @@ class MeshNode {
   int32_t tile_rank_ = std::numeric_limits<int32_t>::max();
   String label_;
   uint8_t mute_mask_ = 0;  // NodeMuteMask bits
+
+  // ---- History logging (per-node) ----
+  //
+  // Last time we logged a sample for this node (millis()).
+  uint32_t last_history_log_ms_ = 0;
+
+  // Global (static) history configuration shared by all nodes.
+  static uint32_t history_interval_ms_;
+  static uint32_t history_retention_days_;
+  static size_t history_capacity_per_sensor_;
+
+  // Internal helpers.
+  static size_t ComputeHistoryCapacityPerSensor();
+  void MaybeLogHistorySample(uint32_t now_ms);
 };
 
 // ---------------------------------------------------------------------------

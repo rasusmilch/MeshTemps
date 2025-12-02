@@ -8,6 +8,98 @@ MeshNode::MeshNode(uint32_t node_id)
       node_id_str_(FormatNodeKeyHex(node_id)),   // hex for any user-facing use
       node_key_hex_(FormatNodeKeyHex(node_id)) {}
 
+void MeshNode::SetHistoryConfig(uint32_t interval_ms,
+                                uint32_t retention_days) {
+  // interval_ms == 0 disables logging; keep previous value in that case.
+  if (interval_ms != 0U) {
+    history_interval_ms_ = interval_ms;
+  }
+
+  if (retention_days == 0U) {
+    // Do not allow zero-day retention; fall back to default 7 days.
+    history_retention_days_ = 7U;
+  } else {
+    history_retention_days_ = retention_days;
+  }
+
+  history_capacity_per_sensor_ = ComputeHistoryCapacityPerSensor();
+}
+
+size_t MeshNode::ComputeHistoryCapacityPerSensor() {
+  if (history_interval_ms_ == 0U) {
+    return 0U;
+  }
+
+  const uint64_t total_ms =
+      static_cast<uint64_t>(history_retention_days_) *
+      24ULL * 60ULL * 60ULL * 1000ULL;
+
+  size_t capacity = static_cast<size_t>(total_ms / history_interval_ms_);
+  if (capacity == 0U) {
+    capacity = 1U;
+  }
+  return capacity;
+}
+
+void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
+  // History disabled globally.
+  if (history_interval_ms_ == 0U) {
+    return;
+  }
+  if (sensors_.empty()) {
+    return;
+  }
+
+  // Enforce the global logging interval per node.
+  if (last_history_log_ms_ != 0U) {
+    const uint32_t delta_ms = now_ms - last_history_log_ms_;
+    if (delta_ms < history_interval_ms_) {
+      return;
+    }
+  }
+
+  // Ensure we have a valid capacity.
+  if (history_capacity_per_sensor_ == 0U) {
+    history_capacity_per_sensor_ = ComputeHistoryCapacityPerSensor();
+    if (history_capacity_per_sensor_ == 0U) {
+      // Still zero => logging effectively disabled.
+      return;
+    }
+  }
+
+  for (auto& sensor : sensors_) {
+    // Skip sensors that have never produced a value.
+    if (!sensor.has_value) {
+      continue;
+    }
+
+    // Allocate ring buffer if not yet sized or sized incorrectly.
+    if (sensor.history.size() != history_capacity_per_sensor_) {
+      sensor.history.clear();
+      sensor.history.resize(history_capacity_per_sensor_);
+      sensor.history_head_index = 0U;
+      sensor.history_size = 0U;
+    }
+
+    SensorHistorySample sample;
+    sample.timestamp_ms = now_ms;
+    sample.temp_c = sensor.temp_c;
+    sample.has_value = sensor.has_value;
+    sample.corrected = sensor.corrected;
+
+    // Write to ring buffer at head_index.
+    sensor.history[sensor.history_head_index] = sample;
+    sensor.history_head_index =
+        (sensor.history_head_index + 1U) % sensor.history.size();
+
+    if (sensor.history_size < sensor.history.size()) {
+      ++sensor.history_size;
+    }
+  }
+
+  last_history_log_ms_ = now_ms;
+}
+
 String MeshNode::FormatNodeKeyHex(uint32_t node_id) {
   char buf[9];
   snprintf(buf, sizeof(buf), "%08lX", static_cast<unsigned long>(node_id));
@@ -146,6 +238,9 @@ void MeshNode::UpdateFromTemps(int bus_gpio,
     sensor->corrected = sensor_in["corr"] | false;
     sensor->last_ms = now_ms;
   }
+
+  // After updating the live readings, decide whether to log a history sample.
+  MaybeLogHistorySample(now_ms);
 }
 
 
@@ -267,6 +362,14 @@ namespace {
 std::map<uint32_t, MeshNode> g_mesh_nodes;
 
 }  // namespace
+
+// Static history configuration defaults.
+//  - 1 minute logging interval
+//  - 7 days of retention
+uint32_t MeshNode::history_interval_ms_ = 60U * 1000U;
+uint32_t MeshNode::history_retention_days_ = 7U;
+size_t MeshNode::history_capacity_per_sensor_ = 0U;
+
 
 std::vector<uint32_t> GetAllMeshNodeIds() {
   std::vector<uint32_t> ids;
