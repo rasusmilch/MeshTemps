@@ -11,12 +11,12 @@
 //   MESH_IS_ROOT, MESH_PREFIX, MESH_PASSWORD, MESH_PORT,
 //   ONEWIRE_PIN, SEND_PERIOD_MS, ROOT_ANNOUNCE_MS,
 //   addrToHex(const uint8_t*).
+
 #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
 #include "serial_console.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
-#include "Config.h" // Mesh / IO configuration, addrToHex()
 
 #include <array>
 #include <cstring> // for memcmp in NVS verification
@@ -24,17 +24,19 @@
 #include <painlessMesh.h>
 #include <vector>
 
+#include "Config.h" // Mesh / IO configuration, addrToHex()
 #include "esp_panel_board_custom_conf.h"
 #include "lvgl_v8_port.h"
+#include <WiFi.h>
 #include <algorithm> // for std::sort
 #include <esp_display_panel.hpp>
+#include <esp_sntp.h>
+#include <esp_wifi.h> // for wifi_auth_mode_t and auth enums
 #include <limits>
 #include <lvgl.h>
 #include <map>
-#include <WiFi.h>
+#include <sys/time.h> // for settimeofday()
 #include <time.h>
-#include <sys/time.h>  // for settimeofday()
-#include <esp_sntp.h>
 
 using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
@@ -296,20 +298,18 @@ struct NetworkConfig {
   String password;
   // Timezone offset in minutes from UTC, e.g. -360 = UTC-6 (CST).
   int32_t timezone_minutes = 0;
-  bool dst_enabled = false;  // when true, add +60 minutes
+  bool dst_enabled = false; // when true, add +60 minutes
 };
 
 static NetworkConfig g_network_config;
 
 // NTP timing.
-constexpr uint32_t kWifiConnectTimeoutMs = 20000;  // 20 s max wait
-constexpr uint32_t kNtpSyncTimeoutMs = 15000;      // 15 s to wait for time
-constexpr uint32_t kNtpResyncPeriodMs =
-    24UL * 60UL * 60UL * 1000UL;  // 24 hours
+constexpr uint32_t kWifiConnectTimeoutMs = 20000; // 20 s max wait
+constexpr uint32_t kNtpSyncTimeoutMs = 15000;     // 15 s to wait for time
+constexpr uint32_t kNtpResyncPeriodMs = 24UL * 60UL * 60UL * 1000UL; // 24 hours
 
 // Retry faster until we have at least one successful NTP sync.
-constexpr uint32_t kNtpRetryPeriodMs = 300000UL;  // 5 minute
-
+constexpr uint32_t kNtpRetryPeriodMs = 300000UL; // 5 minute
 
 static bool g_ntp_time_valid = false;
 static uint32_t g_last_ntp_attempt_ms = 0;
@@ -347,7 +347,7 @@ bool g_debug_enabled = false;
 void GuiUpdateNetwork(size_t peers);
 void GuiRequestRender();
 
-static void DumpStringHex(const char* label, const String& value) {
+static void DumpStringHex(const char *label, const String &value) {
   Serial.printf("%s (len=%d):", label, static_cast<int>(value.length()));
   for (int i = 0; i < value.length(); ++i) {
     Serial.printf(" %02X", static_cast<uint8_t>(value[i]));
@@ -547,8 +547,7 @@ static bool NvsRemoveKeyVerified(Preferences &preferences, const char *key) {
 static void LoadNetworkConfigFromNVS() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
 
-  g_network_config.ssid =
-      g_root_preferences.getString("wifi_ssid", String());
+  g_network_config.ssid = g_root_preferences.getString("wifi_ssid", String());
   g_network_config.password =
       g_root_preferences.getString("wifi_pwd", String());
 
@@ -577,14 +576,13 @@ static void SaveNetworkConfigToNVS() {
   is_successful = NvsPutStringVerified(g_root_preferences, "wifi_pwd",
                                        g_network_config.password) &&
                   is_successful;
-  is_successful = NvsPutIntVerified(
-                      g_root_preferences, "tz_min",
-                      static_cast<int32_t>(g_network_config.timezone_minutes)) &&
+  is_successful = NvsPutIntVerified(g_root_preferences, "tz_min",
+                                    static_cast<int32_t>(
+                                        g_network_config.timezone_minutes)) &&
                   is_successful;
-  is_successful =
-      NvsPutIntVerified(g_root_preferences, "tz_dst",
-                        g_network_config.dst_enabled ? 1 : 0) &&
-      is_successful;
+  is_successful = NvsPutIntVerified(g_root_preferences, "tz_dst",
+                                    g_network_config.dst_enabled ? 1 : 0) &&
+                  is_successful;
 
   g_root_preferences.end();
 
@@ -617,9 +615,9 @@ static bool EnsureMeshStationConfigApplied(Print &out,
     WiFi.persistent(false);
 
     // Abort any ongoing association / retries and clear driver state.
-    WiFi.disconnect(true, true);  // (wifioff = true, eraseCfg = true)
+    WiFi.disconnect(true, true); // (wifioff = true, eraseCfg = true)
     delay(100);
-    WiFi.mode(WIFI_STA);
+    WiFi.mode(WIFI_AP_STA);
 
     mesh.setRoot(true);
     mesh.setContainsRoot(true);
@@ -648,7 +646,7 @@ static bool EnsureWifiConnected(Print &out) {
   wl_status_t last_status = WiFi.status();
 
   while ((millis() - start_ms) < kWifiConnectTimeoutMs) {
-    mesh.update();  // let painlessMesh drive Wi-Fi
+    mesh.update(); // let painlessMesh drive Wi-Fi
     delay(100);
 
     wl_status_t status = WiFi.status();
@@ -668,8 +666,8 @@ static bool EnsureWifiConnected(Print &out) {
 
   if (WiFi.status() == WL_CONNECTED) {
     IPAddress ip = WiFi.localIP();
-    out.printf("[WiFi] Connected; IP=%s RSSI=%d dBm\n",
-               ip.toString().c_str(), WiFi.RSSI());
+    out.printf("[WiFi] Connected; IP=%s RSSI=%d dBm\n", ip.toString().c_str(),
+               WiFi.RSSI());
     return true;
   }
 
@@ -677,19 +675,18 @@ static bool EnsureWifiConnected(Print &out) {
 
   // Abort any background retries that might keep hitting the AP.
   WiFi.disconnect(true, true);
-  WiFi.mode(WIFI_STA);
+  WiFi.mode(WIFI_AP_STA);
 
   return false;
 }
-
 
 // Set local clock to a fixed default of 2025-01-01 00:00.
 static void SetDefaultDateTime() {
   struct tm t;
   memset(&t, 0, sizeof(t));
   t.tm_year = 2025 - 1900;
-  t.tm_mon = 0;   // January
-  t.tm_mday = 1;  // 1st
+  t.tm_mon = 0;  // January
+  t.tm_mday = 1; // 1st
   t.tm_hour = 0;
   t.tm_min = 0;
   t.tm_sec = 0;
@@ -756,7 +753,7 @@ static void RootInitNetwork() {
     Serial.println(F("[WiFi] No SSID configured; skipping WiFi/NTP"));
     SetDefaultDateTime();
     g_ntp_time_valid = false;
-    g_last_ntp_attempt_ms = millis();  // so NtpLoop does not hammer
+    g_last_ntp_attempt_ms = millis(); // so NtpLoop does not hammer
     return;
   }
 
@@ -764,11 +761,11 @@ static void RootInitNetwork() {
 
   bool ntp_ok = false;
   if (EnsureWifiConnected(Serial)) {
-    g_last_ntp_attempt_ms = millis();  // record initial attempt time
+    g_last_ntp_attempt_ms = millis(); // record initial attempt time
     ntp_ok = SyncTimeFromNtp(Serial);
   } else {
     Serial.println(F("[WiFi] Initial connection failed"));
-    g_last_ntp_attempt_ms = millis();  // still record that we tried
+    g_last_ntp_attempt_ms = millis(); // still record that we tried
   }
 
   if (!ntp_ok) {
@@ -777,7 +774,6 @@ static void RootInitNetwork() {
     g_ntp_time_valid = false;
   }
 }
-
 
 // Periodic NTP resync – call from loop().
 static void NtpLoop() {
@@ -790,11 +786,11 @@ static void NtpLoop() {
 
   if (g_last_ntp_attempt_ms != 0 &&
       (now_ms - g_last_ntp_attempt_ms) < period_ms) {
-    return;  // not time yet
+    return; // not time yet
   }
 
   if (g_network_config.ssid.isEmpty()) {
-    return;  // nothing configured
+    return; // nothing configured
   }
 
   // Record that we are attempting an NTP sync now (even if WiFi fails).
@@ -811,7 +807,6 @@ static void NtpLoop() {
     SetDefaultDateTime();
   }
 }
-
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -1887,11 +1882,11 @@ static bool ExtractRawTailAfterSecondToken(const String &line,
   const int n = static_cast<int>(line.length());
   int pos = e1;
   while (pos < n &&
-         isspace(static_cast<unsigned char>(line[pos]))) {  // skip delimiter
+         isspace(static_cast<unsigned char>(line[pos]))) { // skip delimiter
     ++pos;
   }
   if (pos >= n) {
-    return false;  // nothing after subcommand
+    return false; // nothing after subcommand
   }
 
   String raw = line.substring(pos);
@@ -1908,6 +1903,33 @@ static bool ExtractRawTailAfterSecondToken(const String &line,
 
   *out_value = raw;
   return (out_value->length() > 0);
+}
+
+static const char *WifiAuthModeToString(wifi_auth_mode_t auth_mode) {
+  switch (auth_mode) {
+  case WIFI_AUTH_OPEN:
+    return "OPEN";
+  case WIFI_AUTH_WEP:
+    return "WEP";
+  case WIFI_AUTH_WPA_PSK:
+    return "WPA-PSK";
+  case WIFI_AUTH_WPA2_PSK:
+    return "WPA2-PSK";
+  case WIFI_AUTH_WPA_WPA2_PSK:
+    return "WPA/WPA2-PSK";
+#ifdef WIFI_AUTH_WPA3_PSK
+  case WIFI_AUTH_WPA3_PSK:
+    return "WPA3-PSK";
+#endif
+#ifdef WIFI_AUTH_WPA2_WPA3_PSK
+  case WIFI_AUTH_WPA2_WPA3_PSK:
+    return "WPA2/WPA3-PSK";
+#endif
+  case WIFI_AUTH_WAPI_PSK:
+    return "WAPI-PSK";
+  default:
+    return "UNKNOWN";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2031,7 +2053,7 @@ void GuiInit() {
   lv_obj_align(g_ui_label_title, LV_ALIGN_CENTER, 0, 0);
 
   g_ui_label_clock = lv_label_create(bar);
-  lv_label_set_text(g_ui_label_clock, "--:--");  // was "0:00"
+  lv_label_set_text(g_ui_label_clock, "--:--"); // was "0:00"
   lv_obj_align(g_ui_label_clock, LV_ALIGN_RIGHT_MID, -4, 0);
 
   // Small button to toggle Room / Underbelly view for the map.
@@ -4681,18 +4703,16 @@ static void CmdTime(void *ctx, int argc, const String argv[], Print &out) {
 
   if (sub.equalsIgnoreCase("sync")) {
     if (g_network_config.ssid.isEmpty()) {
-      out.println(
-          F("[TIME] SSID not configured; use 'wifi ssid ...' first"));
+      out.println(F("[TIME] SSID not configured; use 'wifi ssid ...' first"));
       return;
     }
 
     if (!EnsureWifiConnected(out)) {
-      out.println(
-          F("[TIME] WiFi not connected; cannot perform NTP sync"));
+      out.println(F("[TIME] WiFi not connected; cannot perform NTP sync"));
       return;
     }
 
-    g_last_ntp_attempt_ms = millis();  // keep scheduler in sync
+    g_last_ntp_attempt_ms = millis(); // keep scheduler in sync
     const bool ok = SyncTimeFromNtp(out);
     if (!ok && !g_ntp_time_valid) {
       SetDefaultDateTime();
@@ -4717,9 +4737,8 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   if (argc < 2) {
-    out.println(
-        F("usage: wifi status | wifi connect | wifi ssid <value...> | "
-          "wifi password <value...> | wifi clear"));
+    out.println(F("usage: wifi status | wifi connect | wifi ssid <value...> | "
+                  "wifi password <value...> | wifi clear"));
     return;
   }
 
@@ -4734,30 +4753,30 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     const wl_status_t st = WiFi.status();
     const char *st_str = "UNKNOWN";
     switch (st) {
-      case WL_IDLE_STATUS:
-        st_str = "IDLE";
-        break;
-      case WL_NO_SSID_AVAIL:
-        st_str = "NO_SSID";
-        break;
-      case WL_SCAN_COMPLETED:
-        st_str = "SCAN_DONE";
-        break;
-      case WL_CONNECTED:
-        st_str = "CONNECTED";
-        break;
-      case WL_CONNECT_FAILED:
-        st_str = "CONNECT_FAILED";
-        break;
-      case WL_CONNECTION_LOST:
-        st_str = "CONNECTION_LOST";
-        break;
-      case WL_DISCONNECTED:
-        st_str = "DISCONNECTED";
-        break;
-      default:
-        st_str = "UNKNOWN";
-        break;
+    case WL_IDLE_STATUS:
+      st_str = "IDLE";
+      break;
+    case WL_NO_SSID_AVAIL:
+      st_str = "NO_SSID";
+      break;
+    case WL_SCAN_COMPLETED:
+      st_str = "SCAN_DONE";
+      break;
+    case WL_CONNECTED:
+      st_str = "CONNECTED";
+      break;
+    case WL_CONNECT_FAILED:
+      st_str = "CONNECT_FAILED";
+      break;
+    case WL_CONNECTION_LOST:
+      st_str = "CONNECTION_LOST";
+      break;
+    case WL_DISCONNECTED:
+      st_str = "DISCONNECTED";
+      break;
+    default:
+      st_str = "UNKNOWN";
+      break;
     }
     out.printf("wifi_status=%s (%d)\n", st_str, static_cast<int>(st));
 
@@ -4770,13 +4789,54 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
+  if (sub.equalsIgnoreCase("scan")) {
+    out.println(F("[WiFi] Scanning for networks..."));
+
+    // synchronous scan, include hidden networks
+    const int16_t network_count = WiFi.scanNetworks(
+        /*async=*/false, /*show_hidden=*/true);
+
+    if (network_count < 0) {
+      out.printf("WiFi scan failed (err=%d)\n",
+                 static_cast<int>(network_count));
+      return;
+    }
+
+    out.printf("Found %d network(s)\n", static_cast<int>(network_count));
+    if (network_count == 0) {
+      WiFi.scanDelete();
+      return;
+    }
+
+    out.println(
+        F("Idx  RSSI  Chan  Auth                 BSSID              SSID"));
+    for (int i = 0; i < network_count; ++i) {
+      const int32_t rssi = WiFi.RSSI(i);
+      const int32_t channel = WiFi.channel(i);
+
+      const wifi_auth_mode_t auth_mode =
+          static_cast<wifi_auth_mode_t>(WiFi.encryptionType(i));
+      const char *auth_str = WifiAuthModeToString(auth_mode);
+
+      const String bssid = WiFi.BSSIDstr(i);
+      const String ssid = WiFi.SSID(i);
+
+      out.printf("%3d  %4d  %4d  %-20s  %17s  %s\n", i, static_cast<int>(rssi),
+                 static_cast<int>(channel), auth_str, bssid.c_str(),
+                 ssid.c_str());
+    }
+
+    WiFi.scanDelete(); // free scan results
+    return;
+  }
+
   if (sub.equalsIgnoreCase("ssid")) {
     String new_ssid;
     if (!ExtractRawTailAfterSecondToken(line, &new_ssid)) {
       out.println(F("ERR wifi ssid (use: wifi ssid <value...>)"));
       return;
     }
-    
+
     DumpStringHex("[CMD] SSID (before save)", g_network_config.ssid);
     g_network_config.ssid = new_ssid;
     DumpStringHex("[CMD] SSID (after  save)", g_network_config.ssid);
@@ -4810,7 +4870,7 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     (void)EnsureMeshStationConfigApplied(out, /*force_reapply=*/true);
 
     SaveNetworkConfigToNVS();
-    
+
     out.println(F("wifi password set (value not echoed)"));
     return;
   }
@@ -4833,7 +4893,8 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  out.println(F("ERR wifi (use: wifi status|connect|ssid|password|clear)"));
+  out.println(
+      F("ERR wifi (use: wifi status|scan|connect|ssid|password|clear)"));
 }
 
 static void CmdTz(void *ctx, int argc, const String argv[], Print &out) {
@@ -5091,12 +5152,15 @@ void setup() {
   g_console.RegisterCommand("labels", &CmdLabels,
                             "labels sensor on|off | labels age on|off");
   g_console.RegisterCommand("view", &CmdView, "view tiles | map [room|belly]");
-  g_console.RegisterCommand("wifi", &CmdWifi, "WiFi / NTP control: wifi status|connect|ssid|password|clear");
-  g_console.RegisterCommand("tz", &CmdTz, "Timezone: tz show | tz set <minutes> [dst on|off]");
+  g_console.RegisterCommand(
+      "wifi", &CmdWifi,
+      "WiFi / NTP control: wifi status|scan|connect|ssid|password|clear");
+  g_console.RegisterCommand(
+      "tz", &CmdTz, "Timezone: tz show | tz set <minutes> [dst on|off]");
   g_console.RegisterCommand("time", &CmdTime, "Show or sync RTC time via NTP");
 
-
   mesh.setDebugMsgTypes(ERROR | STARTUP);
+  // mesh.setDebugMsgTypes(ALL);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);
   mesh.setRoot(true);
   mesh.setContainsRoot(true);
@@ -5120,6 +5184,6 @@ void loop() {
   mesh.update();
   DisplayLoop();
   BuzzerLoop();
-  NtpLoop();        // NEW: periodic NTP resync (every 24h)
+  NtpLoop(); // NEW: periodic NTP resync (every 24h)
   g_console.Poll(Serial, Serial);
 }
