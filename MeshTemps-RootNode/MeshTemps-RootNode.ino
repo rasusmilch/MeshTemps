@@ -274,6 +274,9 @@ lv_obj_t *g_ui_button_belly_label = nullptr;
 lv_obj_t *g_ui_button_map = nullptr;
 lv_obj_t *g_ui_button_map_label = nullptr;
 
+lv_obj_t *g_ui_ntp_icon = nullptr;
+lv_obj_t *g_ui_ntp_popup = nullptr;
+
 volatile bool g_layout_dirty = false; // expensive: create/reflow tiles
 volatile bool g_values_dirty = false; // cheap: rewrite texts/colors only
 
@@ -311,8 +314,14 @@ constexpr uint32_t kNtpResyncPeriodMs = 24UL * 60UL * 60UL * 1000UL; // 24 hours
 // Retry faster until we have at least one successful NTP sync.
 constexpr uint32_t kNtpRetryPeriodMs = 300000UL; // 5 minute
 
+constexpr uint32_t kNtpRetryInitialMs = 5UL * 60UL * 1000UL;     // 5 min
+constexpr uint32_t kNtpRetryMaxMs = 12UL * 60UL * 60UL * 1000UL; // 12 h
+
 static bool g_ntp_time_valid = false;
 static uint32_t g_last_ntp_attempt_ms = 0;
+static uint32_t g_last_ntp_ok_ms = 0;
+static uint32_t g_ntp_retry_period_ms = kNtpRetryInitialMs;
+static bool g_ntp_sync_in_progress = false;
 
 // NTP servers.
 static const char *kNtpServer1 = "pool.ntp.org";
@@ -331,9 +340,9 @@ enum NodeMuteMask : uint8_t {
 // History configuration: NVS persistence
 // ============================================================================
 
-constexpr const char* kHistoryPrefsNamespace   = "mesh_hist";   // adjust if needed
-constexpr const char* kHistoryKeyIntervalMs    = "histIntMs";
-constexpr const char* kHistoryKeyRetentionDays = "histRetDays";
+constexpr const char *kHistoryPrefsNamespace = "mesh_hist"; // adjust if needed
+constexpr const char *kHistoryKeyIntervalMs = "histIntMs";
+constexpr const char *kHistoryKeyRetentionDays = "histRetDays";
 
 // Load history logging configuration (interval + retention) from NVS and
 // apply it to MeshNode static configuration.
@@ -346,15 +355,13 @@ void LoadHistoryConfigFromNvs() {
     return;
   }
 
-  const uint32_t default_interval_ms =
-      MeshNode::history_interval_ms();
-  const uint32_t default_retention_days =
-      MeshNode::history_retention_days();
+  const uint32_t default_interval_ms = MeshNode::history_interval_ms();
+  const uint32_t default_retention_days = MeshNode::history_retention_days();
 
-  const uint32_t interval_ms = preferences.getULong(
-      kHistoryKeyIntervalMs, default_interval_ms);
-  const uint32_t retention_days = preferences.getUInt(
-      kHistoryKeyRetentionDays, default_retention_days);
+  const uint32_t interval_ms =
+      preferences.getULong(kHistoryKeyIntervalMs, default_interval_ms);
+  const uint32_t retention_days =
+      preferences.getUInt(kHistoryKeyRetentionDays, default_retention_days);
 
   preferences.end();
 
@@ -395,6 +402,9 @@ void SaveHistoryConfigToNvs() {
 
 Scheduler user_scheduler;
 painlessMesh mesh;
+
+// Mesh channel: default from Config.h but can be overridden at runtime
+int32_t g_mesh_channel = MESH_CHANNEL;
 
 bool g_debug_enabled = false;
 
@@ -653,12 +663,74 @@ static void SaveNetworkConfigToNVS() {
   }
 }
 
+// Try to find the configured SSID (from NVS) and use its channel for the mesh.
+// Returns >0 on success, -1 on failure (no SSID, not found, etc.).
+static int32_t ScanChannelForConfiguredSsid(Print &out) {
+  if (g_network_config.ssid.isEmpty()) {
+    out.println(F("[WiFi] No SSID configured; cannot auto-pick mesh channel"));
+    return -1;
+  }
+
+  out.printf("[WiFi] Scanning for SSID \"%s\" to choose mesh channel...\n",
+             g_network_config.ssid.c_str());
+
+  // STA mode only for scanning.
+  WiFi.mode(WIFI_STA);
+  // Disconnect but keep radio on.
+  WiFi.disconnect(/*wifioff=*/false, /*eraseap=*/true);
+  delay(100);
+
+  int32_t found_channel = -1;
+  int best_rssi = -200;
+
+  const int network_count =
+      WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
+
+  if (network_count <= 0) {
+    out.println(F("[WiFi] WiFi.scanNetworks() found no APs"));
+  } else {
+    for (int i = 0; i < network_count; ++i) {
+      String ssid = WiFi.SSID(i);
+      if (ssid == g_network_config.ssid) {
+        const int chan = WiFi.channel(i);
+        const int rssi = WiFi.RSSI(i);
+        if (chan > 0 && rssi > best_rssi) {
+          best_rssi = rssi;
+          found_channel = chan;
+        }
+      }
+    }
+  }
+
+  WiFi.scanDelete();
+
+  if (found_channel > 0) {
+    out.printf("[WiFi] Chose channel %d for mesh (AP RSSI=%d dBm)\n",
+               static_cast<int>(found_channel), best_rssi);
+  } else {
+    out.println(
+        F("[WiFi] Configured SSID not found; keeping default mesh channel"));
+  }
+  return found_channel;
+}
+
+// Root-only helper to set g_mesh_channel before mesh.init().
+static void RootPickMeshChannel() {
+  // Make sure we have SSID/password in g_network_config.
+  LoadNetworkConfigFromNVS();
+
+  int32_t chan = ScanChannelForConfiguredSsid(Serial);
+  if (chan > 0) {
+    g_mesh_channel = chan;
+  } else {
+    g_mesh_channel = MESH_CHANNEL; // fallback
+  }
+}
+
 // ---------------------------------------------------------------------------
 // WiFi + NTP core helpers
 // ---------------------------------------------------------------------------
 
-// Reset WiFi station state and (re)apply mesh STA credentials.
-// If force_reapply is true we reset even if the strings are unchanged.
 static bool EnsureMeshStationConfigApplied(Print &out,
                                            bool force_reapply = false) {
   if (g_network_config.ssid.isEmpty()) {
@@ -671,17 +743,9 @@ static bool EnsureMeshStationConfigApplied(Print &out,
       (g_network_config.password != g_last_applied_password);
 
   if (force_reapply || creds_changed) {
-    out.println(F("[WiFi] Applying STA credentials"));
+    out.println(F("[WiFi] Applying STA credentials via painlessMesh"));
 
-    // Do NOT touch ESP32’s own flash Wi-Fi config.
-    WiFi.persistent(false);
-
-    // Abort any ongoing association / retries and clear driver state.
-    WiFi.disconnect(true, true); // (wifioff = true, eraseCfg = true)
-    delay(100);
-    // WiFi.mode(WIFI_AP_STA); // WILL NOT CONNECT TO AP AND NTP
-    WiFi.mode(WIFI_STA);
-
+    // Root behaviour for painlessMesh
     mesh.setRoot(true);
     mesh.setContainsRoot(true);
     mesh.stationManual(g_network_config.ssid.c_str(),
@@ -694,7 +758,6 @@ static bool EnsureMeshStationConfigApplied(Print &out,
   return true;
 }
 
-// Try to ensure WiFi is connected (via painlessMesh station).
 static bool EnsureWifiConnected(Print &out) {
   if (WiFi.status() == WL_CONNECTED) {
     return true;
@@ -709,12 +772,12 @@ static bool EnsureWifiConnected(Print &out) {
   wl_status_t last_status = WiFi.status();
 
   while ((millis() - start_ms) < kWifiConnectTimeoutMs) {
-    mesh.update(); // let painlessMesh drive Wi-Fi
+    // Let painlessMesh drive Wi-Fi & reconnect
+    mesh.update();
     delay(100);
 
     wl_status_t status = WiFi.status();
     if (status != last_status) {
-      // Optional extra debug: print status transitions.
       out.printf(" [%d]", static_cast<int>(status));
       last_status = status;
     }
@@ -722,8 +785,6 @@ static bool EnsureWifiConnected(Print &out) {
     if (status == WL_CONNECTED) {
       break;
     }
-
-    out.print('.');
   }
   out.println();
 
@@ -734,13 +795,7 @@ static bool EnsureWifiConnected(Print &out) {
     return true;
   }
 
-  out.println(F("[WiFi] Connection timeout; resetting station state"));
-
-  // Abort any background retries that might keep hitting the AP.
-  WiFi.disconnect(true, true);
-  // WiFi.mode(WIFI_AP_STA);  // WILL NOT CONNECT TO AP AND NTP
-  WiFi.mode(WIFI_STA);
-
+  out.println(F("[WiFi] Connection timeout; giving up for now"));
   return false;
 }
 
@@ -801,6 +856,8 @@ static bool SyncTimeFromNtp(Print &out) {
       strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
       out.printf("\n[NTP] Time synced: %s\n", buf);
       g_ntp_time_valid = true;
+      g_last_ntp_ok_ms = millis();
+      g_ntp_retry_period_ms = kNtpResyncPeriodMs; // switch to ~24 h
       return true;
     }
     out.print('.');
@@ -812,24 +869,27 @@ static bool SyncTimeFromNtp(Print &out) {
 static void RootInitNetwork() {
   LoadNetworkConfigFromNVS();
 
-  // If no SSID configured, just set default time and be done.
   if (g_network_config.ssid.isEmpty()) {
     Serial.println(F("[WiFi] No SSID configured; skipping WiFi/NTP"));
     SetDefaultDateTime();
     g_ntp_time_valid = false;
-    g_last_ntp_attempt_ms = millis(); // so NtpLoop does not hammer
+    g_last_ntp_attempt_ms = millis();
+    g_ntp_retry_period_ms = kNtpRetryInitialMs;
     return;
   }
 
   Serial.printf("[WiFi] Using SSID=\"%s\"\n", g_network_config.ssid.c_str());
 
+  g_ntp_retry_period_ms = kNtpRetryInitialMs;
   bool ntp_ok = false;
   if (EnsureWifiConnected(Serial)) {
-    g_last_ntp_attempt_ms = millis(); // record initial attempt time
+    g_last_ntp_attempt_ms = millis();
+    g_ntp_sync_in_progress = true;
     ntp_ok = SyncTimeFromNtp(Serial);
+    g_ntp_sync_in_progress = false;
   } else {
     Serial.println(F("[WiFi] Initial connection failed"));
-    g_last_ntp_attempt_ms = millis(); // still record that we tried
+    g_last_ntp_attempt_ms = millis();
   }
 
   if (!ntp_ok) {
@@ -843,32 +903,42 @@ static void RootInitNetwork() {
 static void NtpLoop() {
   const uint32_t now_ms = millis();
 
-  // Before first successful NTP sync, retry faster. After that, only
-  // resync about once per day.
-  const uint32_t period_ms =
-      g_ntp_time_valid ? kNtpResyncPeriodMs : kNtpRetryPeriodMs;
+  if (g_network_config.ssid.isEmpty()) {
+    return;
+  }
 
-  if (g_last_ntp_attempt_ms != 0 &&
-      (now_ms - g_last_ntp_attempt_ms) < period_ms) {
+  if ((g_last_ntp_attempt_ms != 0) &&
+      ((now_ms - g_last_ntp_attempt_ms) < g_ntp_retry_period_ms)) {
     return; // not time yet
   }
 
-  if (g_network_config.ssid.isEmpty()) {
-    return; // nothing configured
-  }
-
-  // Record that we are attempting an NTP sync now (even if WiFi fails).
   g_last_ntp_attempt_ms = now_ms;
+  g_ntp_sync_in_progress = true;
 
   if (!EnsureWifiConnected(Serial)) {
     Serial.println(F("[NTP] Skipping resync; WiFi not connected"));
+
+    // Before first valid fix, back off exponentially up to 12 h
+    if (!g_ntp_time_valid) {
+      if (g_ntp_retry_period_ms < kNtpRetryMaxMs) {
+        g_ntp_retry_period_ms =
+            std::min(g_ntp_retry_period_ms * 2U, kNtpRetryMaxMs);
+      }
+    }
+    g_ntp_sync_in_progress = false;
     return;
   }
 
   const bool ntp_ok = SyncTimeFromNtp(Serial);
+  g_ntp_sync_in_progress = false;
+
   if (!ntp_ok && !g_ntp_time_valid) {
-    // We still have never had a valid NTP sync; keep the clock sane.
+    // No valid time yet: keep clock sane
     SetDefaultDateTime();
+    if (g_ntp_retry_period_ms < kNtpRetryMaxMs) {
+      g_ntp_retry_period_ms =
+          std::min(g_ntp_retry_period_ms * 2U, kNtpRetryMaxMs);
+    }
   }
 }
 
@@ -2080,6 +2150,32 @@ void DisplayInit() {
   Serial.println(F("[Display] Ready"));
 }
 
+static void GuiUpdateNtpStatusIcon() {
+  if (g_ui_ntp_icon == nullptr || g_ui_ntp_popup == nullptr) {
+    return;
+  }
+
+  const uint32_t now_ms = millis();
+  const bool recent_ok = g_ntp_time_valid && (now_ms - g_last_ntp_ok_ms <=
+                                              24UL * 60UL * 60UL * 1000UL);
+
+  const char *icon = nullptr;
+  if (g_ntp_sync_in_progress) {
+    icon = LV_SYMBOL_REFRESH; // spinning arrows
+  } else if (recent_ok) {
+    icon = LV_SYMBOL_OK; // checkmark
+  } else {
+    icon = LV_SYMBOL_CLOSE; // X
+  }
+  lv_label_set_text(g_ui_ntp_icon, icon);
+
+  if (g_ntp_sync_in_progress) {
+    lv_obj_clear_flag(g_ui_ntp_popup, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(g_ui_ntp_popup, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 void GuiInit() {
   if (!lvgl_port_lock(-1)) {
     return;
@@ -2143,6 +2239,21 @@ void GuiInit() {
   g_ui_button_map_label = lv_label_create(g_ui_button_map);
   lv_label_set_text(g_ui_button_map_label, "Tiles");
   lv_obj_center(g_ui_button_map_label);
+
+  // NTP status icon near the clock.
+  g_ui_ntp_icon = lv_label_create(bar);
+  lv_label_set_text(g_ui_ntp_icon, LV_SYMBOL_CLOSE); // "no valid sync yet"
+  lv_obj_align(g_ui_ntp_icon, LV_ALIGN_LEFT_MID, 80, 0);
+
+  // Simple popup text for "syncing" state (hidden by default).
+  g_ui_ntp_popup = lv_label_create(screen);
+  lv_label_set_text(g_ui_ntp_popup, "Syncing time...");
+  lv_obj_set_style_bg_color(g_ui_ntp_popup, lv_color_make(0x20, 0x20, 0x20), 0);
+  lv_obj_set_style_bg_opa(g_ui_ntp_popup, LV_OPA_COVER, 0);
+  lv_obj_set_style_text_color(g_ui_ntp_popup, lv_color_white(), 0);
+  lv_obj_set_style_pad_all(g_ui_ntp_popup, 4, 0);
+  lv_obj_align(g_ui_ntp_popup, LV_ALIGN_TOP_MID, 0, kTopBarHeightPx + 4);
+  lv_obj_add_flag(g_ui_ntp_popup, LV_OBJ_FLAG_HIDDEN);
 
   // Tile container below the bar.
   g_ui_tile_container = lv_obj_create(screen);
@@ -3502,6 +3613,7 @@ void DisplayLoop() {
   RoomMapLoop(now_ms);
 
   UpdateUptimeLabel();
+  GuiUpdateNtpStatusIcon();
   lvgl_port_unlock();
 }
 
@@ -4846,9 +4958,18 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     }
     out.printf("wifi_status=%s (%d)\n", st_str, static_cast<int>(st));
 
+    // Always print the physical channel the radio is on.
+    const int32_t phy_channel = WiFi.channel();
+    if (phy_channel > 0) {
+      out.printf("radio_channel=%d\n", static_cast<int>(phy_channel));
+    }
+
+    // STA-specific info only if actually connected to an infrastructure AP.
     if (st == WL_CONNECTED) {
       IPAddress ip = WiFi.localIP();
       out.printf("ip=%s rssi=%d dBm\n", ip.toString().c_str(), WiFi.RSSI());
+    } else {
+      out.println(F("ip=(no STA connection)"));
     }
 
     PrintCurrentLocalTime(out);
@@ -4964,10 +5085,9 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
 }
 
 // Helper: find the first sensor with a given 16-char address across all nodes.
-static bool FindSensorByAddressAcrossNodes(
-    const String& address16,
-    MeshNode** out_node,
-    MeshNode::Sensor** out_sensor) {
+static bool FindSensorByAddressAcrossNodes(const String &address16,
+                                           MeshNode **out_node,
+                                           MeshNode::Sensor **out_sensor) {
   if (out_node != nullptr) {
     *out_node = nullptr;
   }
@@ -4978,12 +5098,12 @@ static bool FindSensorByAddressAcrossNodes(
   auto node_ids = GetAllMeshNodeIds();
   for (size_t i = 0; i < node_ids.size(); ++i) {
     const uint32_t node_id = node_ids[i];
-    MeshNode* node = FindMeshNode(node_id);
+    MeshNode *node = FindMeshNode(node_id);
     if (node == nullptr) {
       continue;
     }
 
-    MeshNode::Sensor* sensor = node->FindSensor(address16);
+    MeshNode::Sensor *sensor = node->FindSensor(address16);
     if (sensor != nullptr) {
       if (out_node != nullptr) {
         *out_node = node;
@@ -5002,7 +5122,7 @@ static bool FindSensorByAddressAcrossNodes(
 // History configuration + data: serial console command
 // ============================================================================
 
-static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
+static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
 
@@ -5018,9 +5138,11 @@ static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
     out.println(F("  hist clear"));
     out.println(F("    - clear history for all nodes / sensors"));
     out.println(F("  hist clear <addr16>"));
-    out.println(F("    - clear history for a specific sensor (16-char DS18B20 addr)"));
+    out.println(
+        F("    - clear history for a specific sensor (16-char DS18B20 addr)"));
     out.println(F("  hist view <addr16> [max_samples]"));
-    out.println(F("    - view history for a specific sensor, oldest -> newest"));
+    out.println(
+        F("    - view history for a specific sensor, oldest -> newest"));
     return;
   }
 
@@ -5084,14 +5206,14 @@ static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
       size_t cleared_sensors = 0;
 
       for (size_t i = 0; i < node_ids.size(); ++i) {
-        MeshNode* node = FindMeshNode(node_ids[i]);
+        MeshNode *node = FindMeshNode(node_ids[i]);
         if (node == nullptr) {
           continue;
         }
 
-        auto& sensors = node->sensors();
+        auto &sensors = node->sensors();
         for (size_t s = 0; s < sensors.size(); ++s) {
-          MeshNode::Sensor& sensor = sensors[s];
+          MeshNode::Sensor &sensor = sensors[s];
           sensor.history.clear();
           sensor.history_head_index = 0U;
           sensor.history_size = 0U;
@@ -5114,8 +5236,8 @@ static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
         return;
       }
 
-      MeshNode* node = nullptr;
-      MeshNode::Sensor* sensor = nullptr;
+      MeshNode *node = nullptr;
+      MeshNode::Sensor *sensor = nullptr;
       if (!FindSensorByAddressAcrossNodes(addr16, &node, &sensor) ||
           node == nullptr || sensor == nullptr) {
         out.print(F("ERR hist clear: sensor with addr="));
@@ -5145,8 +5267,7 @@ static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
   // -------------------------------------------------------------------------
   if (sub.equalsIgnoreCase("view")) {
     if (argc < 3) {
-      out.println(
-          F("ERR hist view (usage: hist view <addr16> [max_samples])"));
+      out.println(F("ERR hist view (usage: hist view <addr16> [max_samples])"));
       return;
     }
 
@@ -5166,8 +5287,8 @@ static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
     }
     const size_t max_samples = static_cast<size_t>(max_samples_arg);
 
-    MeshNode* node = nullptr;
-    MeshNode::Sensor* sensor = nullptr;
+    MeshNode *node = nullptr;
+    MeshNode::Sensor *sensor = nullptr;
     if (!FindSensorByAddressAcrossNodes(addr16, &node, &sensor) ||
         node == nullptr || sensor == nullptr) {
       out.print(F("ERR hist view: sensor with addr="));
@@ -5204,7 +5325,7 @@ static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
     out.println(F("):"));
 
     for (size_t i = start_index; i < total; ++i) {
-      const MeshNode::SensorHistorySample& sample = samples[i];
+      const MeshNode::SensorHistorySample &sample = samples[i];
       const uint32_t sample_ts = sample.timestamp_ms;
       const uint32_t age_s =
           (now_ms >= sample_ts) ? ((now_ms - sample_ts) / 1000U) : 0U;
@@ -5234,8 +5355,8 @@ static void CmdHist(void* ctx, int argc, const String argv[], Print& out) {
   // -------------------------------------------------------------------------
   // Unknown subcommand
   // -------------------------------------------------------------------------
-  out.println(
-      F("ERR hist (use 'hist show', 'hist set', 'hist clear', or 'hist view')"));
+  out.println(F(
+      "ERR hist (use 'hist show', 'hist set', 'hist clear', or 'hist view')"));
 }
 
 static void CmdTz(void *ctx, int argc, const String argv[], Print &out) {
@@ -5306,13 +5427,12 @@ static void CmdTz(void *ctx, int argc, const String argv[], Print &out) {
 // History configuration: serial console command
 // ============================================================================
 
-static void PrintHistoryConfig(Print& output) {
+static void PrintHistoryConfig(Print &output) {
   const uint32_t interval_ms = MeshNode::history_interval_ms();
   const uint32_t retention_days = MeshNode::history_retention_days();
   const size_t capacity = MeshNode::history_capacity_per_sensor();
 
-  const float interval_seconds =
-      static_cast<float>(interval_ms) / 1000.0f;
+  const float interval_seconds = static_cast<float>(interval_ms) / 1000.0f;
   const float interval_minutes = interval_seconds / 60.0f;
 
   output.println(F("History logging configuration:"));
@@ -5332,7 +5452,6 @@ static void PrintHistoryConfig(Print& output) {
   output.print(static_cast<unsigned long>(capacity));
   output.println(F(" samples"));
 }
-
 
 // -----------------------------------------------------------------------------
 // Root announce and console
@@ -5532,14 +5651,16 @@ void setup() {
       "tz", &CmdTz, "Timezone: tz show | tz set <minutes> [dst on|off]");
   g_console.RegisterCommand("time", &CmdTime, "Show or sync RTC time via NTP");
   g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view");
-  
 
   // This will override the compile-time defaults if keys exist in NVS.
   LoadHistoryConfigFromNvs();
 
+  // RootPickMeshChannel(); // NEW: choose mesh channel based on AP
+
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   // mesh.setDebugMsgTypes(ALL);
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
+            g_mesh_channel, MESH_HIDDEN);
   mesh.setRoot(true);
   mesh.setContainsRoot(true);
   mesh.onReceive(&OnReceiveRoot);

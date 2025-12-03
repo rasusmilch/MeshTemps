@@ -11,12 +11,12 @@
 //   MESH_IS_ROOT, MESH_PREFIX, MESH_PASSWORD, MESH_PORT,
 //   ONEWIRE_PIN, SEND_PERIOD_MS, ROOT_ANNOUNCE_MS,
 //   addrToHex(const uint8_t*).
-// #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
+// #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before
+// auto-prototypes
 #include "serial_console.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
-#include "Config.h" // Mesh / IO configuration, addrToHex()
 
 #include <array>
 #include <cstring> // for memcmp in NVS verification
@@ -24,6 +24,7 @@
 #include <painlessMesh.h>
 #include <vector>
 
+#include "Config.h" // Mesh / IO configuration, addrToHex()
 #include <DallasTemperature.h>
 #include <OneWire.h>
 #include <map>
@@ -63,7 +64,6 @@ bool g_debug_enabled = false;
 void LogConnections() {
   const size_t peer_count = mesh.getNodeList().size();
   DLOG("Peers: %u\n", static_cast<unsigned int>(peer_count));
-
 }
 
 // Join argv[start..argc-1] with spaces.
@@ -242,8 +242,6 @@ static bool NvsRemoveKeyVerified(Preferences &preferences, const char *key) {
   }
   return true;
 }
-
-
 
 std::vector<Address> g_devices;
 
@@ -1160,7 +1158,8 @@ void setup() {
   ScanSensors();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
+            MESH_CHANNEL, MESH_HIDDEN);
   mesh.setContainsRoot(true);
   mesh.onReceive(&OnReceiveLeaf);
   mesh.onChangedConnections(&OnConnectionsChangedLeaf);
