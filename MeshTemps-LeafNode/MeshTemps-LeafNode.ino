@@ -1123,6 +1123,111 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ERR cal (type just 'cal' for help)"));
 }
 
+// Discover mesh channel before mesh.init().
+//
+// Strategy:
+//   1) Scan all channels for SSID == MESH_PREFIX.
+//   2) If found, use that channel.
+//   3) Else, fall back to last-saved channel in NVS.
+//   4) Else, fall back to a compile-time default.
+//
+// Returns a channel in [1, 11].
+static uint8_t DiscoverMeshChannel(Print &out) {
+  constexpr uint8_t kDefaultMeshChannel = 1;
+  const char *mesh_ssid = MESH_PREFIX;
+
+  uint8_t discovered_channel = 0;
+
+  // Open NVS once (RW) for read + optional write.
+  Preferences prefs;
+  const bool prefs_ok = prefs.begin("meshcfg", /*readOnly=*/false);
+  uint8_t stored_channel = 0;
+  bool have_stored = false;
+
+  if (!prefs_ok) {
+    Serial.println(F("[mesh] NVS: begin(\"meshcfg\") FAILED; skipping NVS"));
+  } else {
+    if (prefs.isKey("channel")) {
+      stored_channel = prefs.getUChar("channel", 0);
+      if (stored_channel >= 1 && stored_channel <= 11) {
+        have_stored = true;
+      }
+    }
+  }
+
+  // Do an active scan over all channels.
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(/*wifioff=*/false, /*eraseap=*/true);
+  delay(100);
+
+  out.printf("[mesh] scanning for \"%s\"...\n", mesh_ssid);
+
+  // channel = 0 => scan all channels; show_hidden = true in case you
+  // ever decide to make the mesh AP hidden later.
+  const int16_t network_count =
+      WiFi.scanNetworks(/*async=*/false,
+                        /*show_hidden=*/true,
+                        /*passive=*/false,
+                        /*max_ms_per_channel=*/200,
+                        /*channel=*/0);
+
+  if (network_count > 0) {
+    for (int i = 0; i < network_count; ++i) {
+      const String ssid = WiFi.SSID(i);
+      const int32_t channel = WiFi.channel(i);
+
+      if (ssid == mesh_ssid) {
+        discovered_channel = static_cast<uint8_t>(channel);
+        out.printf("[mesh] found \"%s\" on channel %d (RSSI=%d dBm)\n",
+                   mesh_ssid,
+                   static_cast<int>(channel),
+                   static_cast<int>(WiFi.RSSI(i)));
+        break;
+      }
+    }
+  } else {
+    out.printf("[mesh] scan failed or found no networks (err=%d)\n",
+               static_cast<int>(network_count));
+  }
+
+  WiFi.scanDelete();
+
+  // Fallback logic if we did not see the mesh SSID in the scan.
+  if (discovered_channel == 0) {
+    if (have_stored) {
+      discovered_channel = stored_channel;
+      out.printf("[mesh] using stored channel %u\n",
+                 static_cast<unsigned>(discovered_channel));
+    } else {
+      discovered_channel = kDefaultMeshChannel;
+      out.printf("[mesh] using default channel %u\n",
+                 static_cast<unsigned>(discovered_channel));
+    }
+  }
+
+  // Persist for next boot, but ONLY if the value actually changed
+  // (or was never stored).
+  if (prefs_ok) {
+    if (!have_stored || stored_channel != discovered_channel) {
+      const uint8_t value = discovered_channel;
+      if (!NvsPutBytesVerified(prefs, "channel", &value, sizeof(value))) {
+        Serial.println(
+            F("[mesh] NVS: NvsPutBytesVerified(\"channel\") FAILED"));
+      } else {
+        Serial.printf("[mesh] NVS: saved channel=%u\n",
+                      static_cast<unsigned>(discovered_channel));
+      }
+    } else {
+      Serial.printf("[mesh] NVS: channel unchanged (%u); skipping write\n",
+                    static_cast<unsigned>(discovered_channel));
+    }
+    prefs.end();
+  }
+
+  return discovered_channel;
+}
+
+
 // painlessMesh callbacks (leaf).
 void OnReceiveLeaf(uint32_t from, String &msg) {
   DLOG("[LEAF RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
@@ -1158,8 +1263,10 @@ void setup() {
   ScanSensors();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
-            MESH_CHANNEL, MESH_HIDDEN);
+
+  const uint8_t mesh_channel = DiscoverMeshChannel(Serial);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, mesh_channel, MESH_HIDDEN);
+
   mesh.setContainsRoot(true);
   mesh.onReceive(&OnReceiveLeaf);
   mesh.onChangedConnections(&OnConnectionsChangedLeaf);

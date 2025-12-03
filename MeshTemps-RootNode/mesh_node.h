@@ -105,6 +105,24 @@ class MeshNode {
   Sensor* FindSensorByLabel(const String& label);
   const Sensor* FindSensorByLabel(const String& label) const;
 
+  // Returns the history for the first sensor whose label matches
+  // (case-insensitive), in chronological order (oldest -> newest).
+  //
+  // Returns true if history was found and written into |out|.
+  // On failure, |out| is cleared and false is returned.
+  bool GetSensorHistoryByLabel(
+      const String& label,
+      std::vector<SensorHistorySample>* out) const;
+
+  // Returns the history for the sensor with the given 16-char address
+  // (ROM code) in chronological order (oldest -> newest).
+  //
+  // Returns true if history was found and written into |out|.
+  // On failure, |out| is cleared and false is returned.
+  bool GetSensorHistoryByAddress(
+      const String& address,
+      std::vector<SensorHistorySample>* out) const;
+
   // Helpers for callers that want to populate nodes without going through a
   // full JSON "temps" document (e.g. dummy data, tests).
   void SetBusGpioAndLastUpdate(int bus_gpio, uint32_t now_ms);

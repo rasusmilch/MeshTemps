@@ -144,6 +144,53 @@ const MeshNode::Sensor* MeshNode::FindSensorByLabel(
   return nullptr;
 }
 
+const MeshNode::Sensor* MeshNode::FindSensorByLabel(
+    const String& label) const {
+  for (const auto& sensor : sensors_) {
+    if (sensor.label.equalsIgnoreCase(label)) {
+      return &sensor;
+    }
+  }
+  return nullptr;
+}
+
+bool MeshNode::GetSensorHistoryByLabel(
+    const String& label,
+    std::vector<SensorHistorySample>* out) const {
+  if (out == nullptr) {
+    // Caller is not interested in the actual data; just indicate presence.
+    const Sensor* sensor = FindSensorByLabel(label);
+    return (sensor != nullptr && sensor->history_size > 0U);
+  }
+
+  out->clear();
+  const Sensor* sensor = FindSensorByLabel(label);
+  if (sensor == nullptr) {
+    return false;
+  }
+
+  sensor->CopyHistoryInChronologicalOrder(out);
+  return !out->empty();
+}
+
+bool MeshNode::GetSensorHistoryByAddress(
+    const String& address,
+    std::vector<SensorHistorySample>* out) const {
+  if (out == nullptr) {
+    const Sensor* sensor = FindSensor(address);
+    return (sensor != nullptr && sensor->history_size > 0U);
+  }
+
+  out->clear();
+  const Sensor* sensor = FindSensor(address);
+  if (sensor == nullptr) {
+    return false;
+  }
+
+  sensor->CopyHistoryInChronologicalOrder(out);
+  return !out->empty();
+}
+
 bool MeshNode::SetSensorLabel(const String& address, const String& label) {
   Sensor* sensor = FindSensor(address);
   if (sensor == nullptr) {
