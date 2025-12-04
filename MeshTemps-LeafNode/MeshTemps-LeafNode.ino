@@ -57,16 +57,127 @@ bool g_debug_enabled = false;
 uint32_t g_root_id = 0;
 uint32_t g_root_last_seen_ms = 0;
 
-// NEW: mesh watchdog
-Task g_task_mesh_watchdog;
+// -----------------------------------------------------------------------------
+// Mesh discovery / root tracking (LEAF)
+// -----------------------------------------------------------------------------
 
-// Root timeout: no root_announce for this long -> assume root lost.
-constexpr uint32_t kRootTimeoutMs = 60000; // 60 s
+// Root timeout: if we don't see root for this long, we assume it's gone.
+constexpr uint32_t kRootAnnounceMs       = ROOT_ANNOUNCE_MS; // must match ROOT_ANNOUNCE_MS on root
+constexpr uint32_t kRootUnicastWindowMs  = 3 * kRootAnnounceMs; // 60 s
+constexpr uint32_t kRootTimeoutMs        = 3 * kRootAnnounceMs; // 60 s (as you have now)
+
+// How long we consider a root presence "fresh" (for success in discovery).
+constexpr uint32_t kRootPresenceWindowMs = 30000; // 30 s
+
+// Root probe attempts per channel.
+constexpr uint8_t kMaxProbesPerChannel = 3;
+
+// Base delay between probes on a given channel (will exponential-backoff).
+constexpr uint32_t kProbeBaseDelayMs = 2000; // 2 s
+
+// When there is *no* mesh with a root on any channel, wait 5–10 minutes
+// before doing another discovery scan, randomized to avoid stampedes.
+constexpr uint32_t kRescanMinDelayMs = 5UL * 60UL * 1000UL;  // 5 minutes
+constexpr uint32_t kRescanJitterMs   = 5UL * 60UL * 1000UL;  // + up to 5 min
+
+// At most 11 channels (1–11). We keep a compact list of channels where
+// we saw MESH_PREFIX.
+constexpr uint8_t kMaxMeshChannels = 11;
+
+struct MeshDiscoveryState {
+  bool ongoing = false;                    // true while discovery is active
+  uint8_t channels[kMaxMeshChannels] = {}; // unique channel list
+  uint8_t channel_count = 0;               // how many entries are valid
+  uint8_t channel_index = 0;               // current index into channels[]
+
+  uint8_t probes_sent_on_this_channel = 0;
+  uint32_t last_probe_ms = 0;
+};
+
+MeshDiscoveryState g_discovery;
+
+// Next time we are allowed to start a new discovery (ms since boot).
+uint32_t g_next_discovery_allowed_ms = 0;
+
+// Watchdog task (already declared in your code).
+Task g_task_mesh_watchdog;
 
 // Minimum spacing between mesh restarts (avoid thrashing).
 constexpr uint32_t kMeshRestartMinIntervalMs = 30000; // 30 s
 
 uint32_t g_last_mesh_restart_ms = 0;
+
+std::vector<Address> g_devices;
+
+OneWire g_one_wire(ONEWIRE_PIN);
+DallasTemperature g_ds18(&g_one_wire);
+
+// Per-node transmit sequence number (increments on every temps send).
+uint32_t g_send_seq = 0;
+
+Task g_task_send;
+
+// Calibration storage (NVS).
+struct CalEntry {
+  String addr;
+  Coeff coeff;
+};
+
+std::vector<CalEntry> g_cal_entries;
+Preferences g_leaf_prefs;
+
+// Per-sensor work-in-progress (raw locks while calibrating).
+struct CalPoint {
+  float last_raw = NAN; // last live reading during an active stage
+  bool ice_locked = false;
+  float raw_ice = 0.0f;
+  float act_ice = 0.0f;
+  bool boil_locked = false;
+  float raw_boil = 0.0f;
+  float act_boil = 0.0f;
+
+  // NEW: stability tracking (per active calibration session)
+  uint32_t last_change_ms = 0; // when the reading last changed
+  bool steady = false;         // true if unchanged for >= kSteadyMs
+};
+
+// All WIP points keyed by sensor address (hex16)
+std::map<String, CalPoint> g_cal_work;
+
+// Live calibration session: a stage plus a set of active sensors.
+struct CalSession {
+  CalStage stage = kCalIdle;        // kCalIdle, kCalIce, kCalBoil
+  std::vector<String> active_addrs; // hex16 addresses currently being tracked
+};
+
+CalSession g_cal_session;
+Task g_task_cal;
+
+// Steady-state detection: unchanged reading for >=30s at 0.001 C tolerance.
+constexpr uint32_t kSteadyMs = 30000; // ms
+constexpr float kSteadyEpsC = 0.001f; // °C
+
+// -----------------------------------------------------------------------------
+// Calibration NVS binary blob format (header + entries + CRC32)
+// -----------------------------------------------------------------------------
+
+static constexpr uint32_t kCalMagic = 0x43414C31u; // "CAL1"
+static constexpr uint16_t kCalBlobVersion = 1;
+
+#pragma pack(push, 1)
+struct CalBlobHeader {
+  uint32_t magic;       // kCalMagic
+  uint16_t version;     // kCalBlobVersion
+  uint16_t entry_count; // number of CalBlobEntry records that follow
+  uint32_t crc32;       // CRC32 over the entries array only
+};
+
+struct CalBlobEntry {
+  uint8_t addr[8]; // DS18B20 ROM code bytes
+  float a1;
+  float a0;
+};
+#pragma pack(pop)
 
 #define DLOG(fmt, ...)                                                         \
   do {                                                                         \
@@ -256,81 +367,6 @@ static bool NvsRemoveKeyVerified(Preferences &preferences, const char *key) {
   }
   return true;
 }
-
-std::vector<Address> g_devices;
-
-OneWire g_one_wire(ONEWIRE_PIN);
-DallasTemperature g_ds18(&g_one_wire);
-
-uint32_t g_root_id = 0;
-uint32_t g_root_last_seen_ms = 0;
-
-// NEW: per-node transmit sequence number (increments on every temps send).
-uint32_t g_send_seq = 0;
-
-Task g_task_send;
-
-// Calibration storage (NVS).
-struct CalEntry {
-  String addr;
-  Coeff coeff;
-};
-
-std::vector<CalEntry> g_cal_entries;
-Preferences g_leaf_prefs;
-
-// Per-sensor work-in-progress (raw locks while calibrating).
-struct CalPoint {
-  float last_raw = NAN; // last live reading during an active stage
-  bool ice_locked = false;
-  float raw_ice = 0.0f;
-  float act_ice = 0.0f;
-  bool boil_locked = false;
-  float raw_boil = 0.0f;
-  float act_boil = 0.0f;
-
-  // NEW: stability tracking (per active calibration session)
-  uint32_t last_change_ms = 0; // when the reading last changed
-  bool steady = false;         // true if unchanged for >= kSteadyMs
-};
-
-// All WIP points keyed by sensor address (hex16)
-std::map<String, CalPoint> g_cal_work;
-
-// Live calibration session: a stage plus a set of active sensors.
-struct CalSession {
-  CalStage stage = kCalIdle;        // kCalIdle, kCalIce, kCalBoil
-  std::vector<String> active_addrs; // hex16 addresses currently being tracked
-};
-
-CalSession g_cal_session;
-Task g_task_cal;
-
-// Steady-state detection: unchanged reading for >=30s at 0.001 C tolerance.
-constexpr uint32_t kSteadyMs = 30000; // ms
-constexpr float kSteadyEpsC = 0.001f; // °C
-
-// -----------------------------------------------------------------------------
-// Calibration NVS binary blob format (header + entries + CRC32)
-// -----------------------------------------------------------------------------
-
-static constexpr uint32_t kCalMagic = 0x43414C31u; // "CAL1"
-static constexpr uint16_t kCalBlobVersion = 1;
-
-#pragma pack(push, 1)
-struct CalBlobHeader {
-  uint32_t magic;       // kCalMagic
-  uint16_t version;     // kCalBlobVersion
-  uint16_t entry_count; // number of CalBlobEntry records that follow
-  uint32_t crc32;       // CRC32 over the entries array only
-};
-
-struct CalBlobEntry {
-  uint8_t addr[8]; // DS18B20 ROM code bytes
-  float a1;
-  float a0;
-};
-#pragma pack(pop)
 
 // Simple bitwise CRC32 (polynomial 0xEDB88320, initial 0xFFFFFFFF, final ~crc).
 static uint32_t Crc32(const uint8_t *data, size_t length) {
@@ -935,7 +971,7 @@ void SendTemperatures() {
   serializeJson(doc, message);
 
   const bool use_unicast =
-      (g_root_id != 0U) && ((millis() - g_root_last_seen_ms) < 15000U);
+      (g_root_id != 0U) && ((millis() - g_root_last_seen_ms) < kRootUnicastWindowMs);
 
   DLOG("[LEAF TX %s] %s\n", use_unicast ? "unicast" : "bcast", message.c_str());
 
@@ -1270,107 +1306,139 @@ static void CmdCal(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ERR cal (type just 'cal' for help)"));
 }
 
-// Discover mesh channel before mesh.init().
-//
-// Strategy:
-//   1) Scan all channels for SSID == MESH_PREFIX.
-//   2) If found, use that channel.
-//   3) Else, fall back to last-saved channel in NVS.
-//   4) Else, fall back to a compile-time default.
-//
-// Returns a channel in [1, 11].
-static uint8_t DiscoverMeshChannel(Print &out) {
-  constexpr uint8_t kDefaultMeshChannel = 1;
-  const char *mesh_ssid = MESH_PREFIX;
+static void SendRootProbe() {
+  JsonDocument doc;
+  doc["type"] = "root_probe";
+  doc["nodeId"] = mesh.getNodeId();
+  doc["uptimeMs"] = static_cast<uint32_t>(millis());
 
-  uint8_t discovered_channel = 0;
+  String message;
+  serializeJson(doc, message);
 
-  // Open NVS once (RW) for read + optional write.
-  Preferences prefs;
-  const bool prefs_ok = prefs.begin("meshcfg", /*readOnly=*/false);
-  uint8_t stored_channel = 0;
-  bool have_stored = false;
+  DLOG("[LEAF TX probe] %s\n", message.c_str());
+  mesh.sendBroadcast(message);
 
-  if (!prefs_ok) {
-    Serial.println(F("[mesh] NVS: begin(\"meshcfg\") FAILED; skipping NVS"));
-  } else {
-    if (prefs.isKey("channel")) {
-      stored_channel = prefs.getUChar("channel", 0);
-      if (stored_channel >= 1 && stored_channel <= 11) {
-        have_stored = true;
-      }
-    }
+  g_discovery.probes_sent_on_this_channel++;
+  g_discovery.last_probe_ms = millis();
+}
+
+static void InitMeshOnCurrentDiscoveryChannel(Print &out) {
+  if (g_discovery.channel_index >= g_discovery.channel_count) {
+    out.println("[mesh] discovery: InitMeshOnCurrentDiscoveryChannel out of range");
+    return;
   }
 
-  // Do an active scan over all channels.
+  const uint8_t mesh_channel = g_discovery.channels[g_discovery.channel_index];
+
+  out.printf("[mesh] discovery: starting mesh on channel %u\n",
+             static_cast<unsigned>(mesh_channel));
+
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT,
+            WIFI_AP_STA, mesh_channel, MESH_HIDDEN);
+
+  mesh.setContainsRoot(true);
+  mesh.onReceive(&OnReceiveLeaf);
+  mesh.onChangedConnections(&OnConnectionsChangedLeaf);
+
+  // Reset root tracking for this attempt.
+  g_root_id = 0;
+  g_root_last_seen_ms = 0;
+
+  // Reset probe counters and immediately send the first probe.
+  g_discovery.probes_sent_on_this_channel = 0;
+  g_discovery.last_probe_ms = 0;
+  SendRootProbe();
+}
+
+static bool RootRecentlyPresent(uint32_t now_ms) {
+  if (g_root_id == 0U) {
+    return false;
+  }
+  return (now_ms - g_root_last_seen_ms) < kRootPresenceWindowMs;
+}
+
+static uint32_t RandomRescanDelayMs() {
+  // Arduino random(min, max) returns [min, max).
+  const uint32_t jitter = static_cast<uint32_t>(
+      random(static_cast<long>(0), static_cast<long>(kRescanJitterMs)));
+  return kRescanMinDelayMs + jitter;
+}
+
+// Fill g_discovery.channels[] with all channels where we see MESH_PREFIX.
+// Returns number of channels found.
+static uint8_t ScanMeshChannels(Print &out) {
+  const char *mesh_ssid = MESH_PREFIX;
+
+  g_discovery.channel_count = 0;
+  g_discovery.channel_index = 0;
+
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(/*wifioff=*/false, /*eraseap=*/true);
   delay(100);
 
-  out.printf("[mesh] scanning for \"%s\"...\n", mesh_ssid);
+  out.printf("[mesh] discovery: scanning for \"%s\" on all channels...\n",
+             mesh_ssid);
 
-  // channel = 0 => scan all channels; show_hidden = true in case you
-  // ever decide to make the mesh AP hidden later.
-  const int16_t network_count = WiFi.scanNetworks(/*async=*/false,
-                                                  /*show_hidden=*/true,
-                                                  /*passive=*/false,
-                                                  /*max_ms_per_channel=*/200,
-                                                  /*channel=*/0);
+  const int16_t network_count = WiFi.scanNetworks(
+      /*async=*/false,
+      /*show_hidden=*/true,
+      /*passive=*/false,
+      /*max_ms_per_channel=*/200,
+      /*channel=*/0);
 
-  if (network_count > 0) {
-    for (int i = 0; i < network_count; ++i) {
-      const String ssid = WiFi.SSID(i);
-      const int32_t channel = WiFi.channel(i);
+  if (network_count <= 0) {
+    out.printf("[mesh] discovery: scan found no networks (err=%d)\n",
+               static_cast<int>(network_count));
+    WiFi.scanDelete();
+    return 0;
+  }
 
-      if (ssid == mesh_ssid) {
-        discovered_channel = static_cast<uint8_t>(channel);
-        out.printf("[mesh] found \"%s\" on channel %d (RSSI=%d dBm)\n",
-                   mesh_ssid, static_cast<int>(channel),
-                   static_cast<int>(WiFi.RSSI(i)));
+  for (int i = 0; i < network_count; ++i) {
+    const String ssid = WiFi.SSID(i);
+    const int32_t channel = WiFi.channel(i);
+
+    if (ssid != mesh_ssid) {
+      continue;
+    }
+    if (channel < 1 || channel > 11) {
+      continue;
+    }
+
+    const uint8_t ch = static_cast<uint8_t>(channel);
+
+    // Ensure uniqueness.
+    bool already_present = false;
+    for (uint8_t j = 0; j < g_discovery.channel_count; ++j) {
+      if (g_discovery.channels[j] == ch) {
+        already_present = true;
         break;
       }
     }
-  } else {
-    out.printf("[mesh] scan failed or found no networks (err=%d)\n",
-               static_cast<int>(network_count));
+    if (already_present) {
+      continue;
+    }
+
+    if (g_discovery.channel_count < kMaxMeshChannels) {
+      g_discovery.channels[g_discovery.channel_count++] = ch;
+      out.printf("[mesh] discovery: saw \"%s\" on channel %d (RSSI=%d dBm)\n",
+                 mesh_ssid,
+                 static_cast<int>(ch),
+                 static_cast<int>(WiFi.RSSI(i)));
+    }
   }
 
   WiFi.scanDelete();
 
-  // Fallback logic if we did not see the mesh SSID in the scan.
-  if (discovered_channel == 0) {
-    if (have_stored) {
-      discovered_channel = stored_channel;
-      out.printf("[mesh] using stored channel %u\n",
-                 static_cast<unsigned>(discovered_channel));
-    } else {
-      discovered_channel = kDefaultMeshChannel;
-      out.printf("[mesh] using default channel %u\n",
-                 static_cast<unsigned>(discovered_channel));
-    }
+  if (g_discovery.channel_count == 0) {
+    out.println("[mesh] discovery: no channels with mesh SSID found");
+  } else {
+    out.printf("[mesh] discovery: %u candidate channel(s)\n",
+               static_cast<unsigned>(g_discovery.channel_count));
   }
 
-  // Persist for next boot, but ONLY if the value actually changed
-  // (or was never stored).
-  if (prefs_ok) {
-    if (!have_stored || stored_channel != discovered_channel) {
-      const uint8_t value = discovered_channel;
-      if (!NvsPutBytesVerified(prefs, "channel", &value, sizeof(value))) {
-        Serial.println(
-            F("[mesh] NVS: NvsPutBytesVerified(\"channel\") FAILED"));
-      } else {
-        Serial.printf("[mesh] NVS: saved channel=%u\n",
-                      static_cast<unsigned>(discovered_channel));
-      }
-    } else {
-      Serial.printf("[mesh] NVS: channel unchanged (%u); skipping write\n",
-                    static_cast<unsigned>(discovered_channel));
-    }
-    prefs.end();
-  }
-
-  return discovered_channel;
+  return g_discovery.channel_count;
 }
+
 
 // painlessMesh callbacks (leaf).
 void OnReceiveLeaf(uint32_t from, String &msg) {
@@ -1392,6 +1460,20 @@ void OnReceiveLeaf(uint32_t from, String &msg) {
       DLOG("  root_announce: rootId=0x%08lX\n",
            static_cast<unsigned long>(g_root_id));
     }
+
+    return;
+  }
+
+  if (strcmp(type, "root_ack") == 0) {
+    // Future: root replies specifically to probes; treat it as a presence ping.
+    const uint32_t root_id = doc["rootId"] | 0U;
+    if (root_id != 0U) {
+      g_root_id = root_id;
+      g_root_last_seen_ms = millis();
+      DLOG("  root_ack: rootId=0x%08lX\n",
+           static_cast<unsigned long>(g_root_id));
+    }
+    return;
   }
 }
 
@@ -1400,76 +1482,148 @@ void OnConnectionsChangedLeaf() { LogConnections(); }
 // Forward declaration so we can use this in the watchdog task.
 void MeshWatchdogTaskFn();
 
-// Initialize or re-initialize the mesh on the leaf:
-//  - Scan for the mesh SSID to pick a channel
-//  - Call mesh.init()
-//  - Re-register callbacks
-static void InitMesh(Print &out) {
-  const uint8_t mesh_channel = DiscoverMeshChannel(out);
+static void StartDiscovery(Print &out) {
+  const uint32_t now = millis();
 
-  out.printf("[mesh] InitMesh: starting mesh on channel %u\n",
-             static_cast<unsigned>(mesh_channel));
+  if (now < g_next_discovery_allowed_ms) {
+    const uint32_t remaining_ms = g_next_discovery_allowed_ms - now;
+    out.printf("[mesh] discovery: not yet allowed, retry in %u s\n",
+               static_cast<unsigned>(remaining_ms / 1000U));
+    return;
+  }
 
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
-            mesh_channel, MESH_HIDDEN);
+  out.println("[mesh] discovery: starting discovery phase");
 
-  mesh.setContainsRoot(true);
-  mesh.onReceive(&OnReceiveLeaf);
-  mesh.onChangedConnections(&OnConnectionsChangedLeaf);
+  // Stop any existing mesh instance cleanly.
+  mesh.stop();
+
+  g_root_id = 0;
+  g_root_last_seen_ms = 0;
+
+  const uint8_t count = ScanMeshChannels(out);
+  if (count == 0) {
+    // Nobody with our SSID is on the air; back off for 5–10 minutes.
+    const uint32_t backoff = RandomRescanDelayMs();
+    g_next_discovery_allowed_ms = now + backoff;
+    out.printf("[mesh] discovery: no candidate channels; rescan in %u s\n",
+               static_cast<unsigned>(backoff / 1000U));
+    g_discovery.ongoing = false;
+    return;
+  }
+
+  g_discovery.ongoing = true;
+  g_discovery.channel_index = 0;
+  g_discovery.probes_sent_on_this_channel = 0;
+  g_discovery.last_probe_ms = 0;
+
+  InitMeshOnCurrentDiscoveryChannel(out);
 }
 
 // Mesh watchdog: if we clearly lost the root for a while, restart the mesh.
 void MeshWatchdogTaskFn() {
   const uint32_t now_ms = millis();
 
-  // Condition A: we once had a root, but haven't heard from it in a while.
-  const bool root_expired =
-      (g_root_id != 0U) && ((now_ms - g_root_last_seen_ms) >= kRootTimeoutMs);
+  // If we are in normal mode (no discovery ongoing) and root is present
+  // within the timeout window, we do nothing except re-check later.
+  if (!g_discovery.ongoing) {
+    if (RootRecentlyPresent(now_ms)) {
+      g_task_mesh_watchdog.delay(10000); // 10 s
+      return;
+    }
 
-  // Condition B: we have no peers at all in the mesh.
-  const bool mesh_empty = mesh.getNodeList().empty();
+    // Root missing or never seen. Time to consider discovery if allowed.
+    if (now_ms >= g_next_discovery_allowed_ms) {
+      Serial.println(
+          F("[mesh] watchdog: root missing; starting discovery phase"));
+      StartDiscovery(Serial);
+    } else {
+      const uint32_t remaining_ms = g_next_discovery_allowed_ms - now_ms;
+      Serial.printf("[mesh] watchdog: root missing; discovery blocked for "
+                    "%u more s\n",
+                    static_cast<unsigned>(remaining_ms / 1000U));
+    }
 
-  if (!root_expired && !mesh_empty) {
-    // Mesh looks healthy enough; check again later.
+    g_task_mesh_watchdog.delay(5000); // 5 s
+    return;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Discovery is ongoing: we are trying some channel from g_discovery.channels[]
+  // ---------------------------------------------------------------------------
+
+  // Success path: if we see root on this channel, we stop discovery and stay.
+  if (RootRecentlyPresent(now_ms)) {
+    const uint8_t ch = g_discovery.channels[g_discovery.channel_index];
+    Serial.printf("[mesh] discovery: root found on channel %u, "
+                  "locking onto this mesh\n",
+                  static_cast<unsigned>(ch));
+    g_discovery.ongoing = false;
+    // After success, we can allow immediate future discovery if root is lost.
+    g_next_discovery_allowed_ms = now_ms;
     g_task_mesh_watchdog.delay(10000); // 10 s
     return;
   }
 
-  // Avoid thrashing restarts.
-  if ((now_ms - g_last_mesh_restart_ms) < kMeshRestartMinIntervalMs) {
-    g_task_mesh_watchdog.delay(10000); // 10 s
+  // No root yet on this channel; decide whether to send another probe or move on.
+  if (g_discovery.probes_sent_on_this_channel < kMaxProbesPerChannel) {
+    const uint32_t delay_ms =
+        kProbeBaseDelayMs << g_discovery.probes_sent_on_this_channel; // 2^n
+
+    if ((now_ms - g_discovery.last_probe_ms) >= delay_ms) {
+      Serial.println("[mesh] discovery: sending another root probe");
+      SendRootProbe();
+    }
+
+    g_task_mesh_watchdog.delay(1000); // check again in ~1 s
     return;
   }
 
+  // We have exhausted probes on this channel with no root.
   Serial.println(
-      F("[mesh] watchdog: mesh appears stale (root lost or no peers); "
-        "restarting mesh and rescanning channel"));
+      F("[mesh] discovery: no root on this channel after retries; "
+        "tearing down and trying next channel"));
 
-  // Tear down old mesh instance.
   mesh.stop();
-
-  // Drop any notion of a known root; we'll rediscover it via root_announce.
   g_root_id = 0;
   g_root_last_seen_ms = 0;
 
-  // Bring mesh back up (fresh scan, fresh init).
-  InitMesh(Serial);
+  g_discovery.channel_index++;
+  g_discovery.probes_sent_on_this_channel = 0;
+  g_discovery.last_probe_ms = 0;
 
-  g_last_mesh_restart_ms = now_ms;
-  g_task_mesh_watchdog.delay(10000); // 10 s
+  if (g_discovery.channel_index < g_discovery.channel_count) {
+    // Try the next channel in the candidate list.
+    InitMeshOnCurrentDiscoveryChannel(Serial);
+    g_task_mesh_watchdog.delay(1000);
+    return;
+  }
+
+  // No more channels left to try; schedule another full scan after a long, random backoff.
+  const uint32_t backoff = RandomRescanDelayMs();
+  g_next_discovery_allowed_ms = now_ms + backoff;
+
+  Serial.printf("[mesh] discovery: no root found on any channel; "
+                "will rescan in %u s\n",
+                static_cast<unsigned>(backoff / 1000U));
+
+  g_discovery.ongoing = false;
+  g_task_mesh_watchdog.delay(10000); // periodically check until backoff expires
 }
+
 
 // Arduino entry points (leaf)
 void setup() {
   Serial.begin(DBG_BAUD);
   delay(1000);
 
+  randomSeed(esp_random());
+
   g_ds18.begin();
   LoadAllCalibration();
   ScanSensors();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
-  InitMesh(Serial);
+  StartDiscovery(Serial);
 
   g_console.RegisterCommand("help", &CmdHelp, "show help");
   g_console.RegisterCommand("debug", &CmdDebug, "debug on|off");

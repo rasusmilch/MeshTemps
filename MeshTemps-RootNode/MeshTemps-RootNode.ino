@@ -5469,6 +5469,35 @@ void RootAnnounce() {
   mesh.sendBroadcast(message);
 }
 
+// Respond to a leaf's root_probe with a unicast root_ack.
+// This lets the leaf confirm "this channel actually has the real root".
+static void HandleRootProbe(uint32_t from, const JsonDocument &probe_doc) {
+  const uint32_t now_ms = millis();
+
+  // Leaf may include its view of nodeId; default to 'from' if missing.
+  const uint32_t leaf_node_id = probe_doc["nodeId"] | from;
+
+  DLOG("[ROOT PROBE] from=0x%08lX leafNodeId=0x%08lX\n",
+       static_cast<unsigned long>(from),
+       static_cast<unsigned long>(leaf_node_id));
+
+  JsonDocument reply;
+  reply["type"] = "root_ack";
+  reply["rootId"] = mesh.getNodeId();
+  reply["uptimeMs"] = static_cast<uint32_t>(now_ms);
+  reply["toNodeId"] = leaf_node_id;  // for debugging on the leaf side
+
+  String out;
+  serializeJson(reply, out);
+
+  DLOG("[ROOT TX ack] to=0x%08lX: %s\n",
+       static_cast<unsigned long>(from),
+       out.c_str());
+
+  // Unicast back to the probing leaf.
+  mesh.sendSingle(from, out);
+}
+
 // -----------------------------------------------------------------------------
 // Mesh callbacks (root)
 // -----------------------------------------------------------------------------
@@ -5476,11 +5505,13 @@ void RootAnnounce() {
 void OnReceiveRoot(uint32_t from, String &msg) {
   bool structure_changed = false;
 
-  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
-       static_cast<unsigned>(msg.length()), msg.c_str());
+  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n",
+       static_cast<unsigned long>(from),
+       static_cast<unsigned>(msg.length()),
+       msg.c_str());
 
   if (g_use_dummy_data) {
-    // In dummy mode, ignore real traffic.
+    // In dummy mode, ignore real traffic (including probes).
     return;
   }
 
@@ -5491,6 +5522,14 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   }
 
   const char *type = doc["type"] | "temps";
+
+  // --- NEW: handle root_probe first ----------------------------------------
+  if (strcmp(type, "root_probe") == 0) {
+    HandleRootProbe(from, doc);
+    return;
+  }
+  // -------------------------------------------------------------------------
+
   if (strcmp(type, "temps") != 0) {
     DLOG("  ! ignoring type '%s'\n", type);
     return;
@@ -5524,7 +5563,8 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   }
 
   DLOG("  nodeId=0x%08lX busGpio=%d sensors=%u\n",
-       static_cast<unsigned long>(node_id), bus_gpio,
+       static_cast<unsigned long>(node_id),
+       bus_gpio,
        static_cast<unsigned>(new_sensor_count));
 
   // Topology persistence: add/update known IDs.
