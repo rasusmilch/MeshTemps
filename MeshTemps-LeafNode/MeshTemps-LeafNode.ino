@@ -296,6 +296,67 @@ Task g_task_cal;
 constexpr uint32_t kSteadyMs = 30000; // ms
 constexpr float kSteadyEpsC = 0.001f; // °C
 
+// -----------------------------------------------------------------------------
+// Calibration NVS binary blob format (header + entries + CRC32)
+// -----------------------------------------------------------------------------
+
+static constexpr uint32_t kCalMagic = 0x43414C31u; // "CAL1"
+static constexpr uint16_t kCalBlobVersion = 1;
+
+#pragma pack(push, 1)
+struct CalBlobHeader {
+  uint32_t magic;       // kCalMagic
+  uint16_t version;     // kCalBlobVersion
+  uint16_t entry_count; // number of CalBlobEntry records that follow
+  uint32_t crc32;       // CRC32 over the entries array only
+};
+
+struct CalBlobEntry {
+  uint8_t addr[8]; // DS18B20 ROM code bytes
+  float a1;
+  float a0;
+};
+#pragma pack(pop)
+
+// Simple bitwise CRC32 (polynomial 0xEDB88320, initial 0xFFFFFFFF, final ~crc).
+static uint32_t Crc32(const uint8_t *data, size_t length) {
+  uint32_t crc = 0xFFFFFFFFu;
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= static_cast<uint32_t>(data[i]);
+    for (int bit = 0; bit < 8; ++bit) {
+      const uint32_t mask = -(crc & 1u);
+      crc = (crc >> 1) ^ (0xEDB88320u & mask);
+    }
+  }
+  return ~crc;
+}
+
+// Parse a 16-char hex address string (e.g. "28175E57000000A9") into 8 bytes.
+static int HexNibble(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return 10 + (c - 'a');
+  if (c >= 'A' && c <= 'F')
+    return 10 + (c - 'A');
+  return -1;
+}
+
+static bool ParseAddrHex16(const String &hex16, uint8_t out[8]) {
+  if (hex16.length() != 16) {
+    return false;
+  }
+  for (int i = 0; i < 8; ++i) {
+    const int hi = HexNibble(hex16[2 * i + 0]);
+    const int lo = HexNibble(hex16[2 * i + 1]);
+    if (hi < 0 || lo < 0) {
+      return false;
+    }
+    out[i] = static_cast<uint8_t>((hi << 4) | lo);
+  }
+  return true;
+}
+
 bool FindDeviceByAddr(const String &addr16, Address *out_addr) {
   if (addr16.length() != 16) {
     return false;
@@ -350,10 +411,9 @@ float ApplyCorrection(float temp_raw_c, const String &addr16,
   return temp_corr;
 }
 
-// Save all calibration coefficients into a single JSON blob under key "cal".
-// Now uses:
-//   - NVS read-before-write compare (skip write if unchanged)
-//   - NvsPutStringVerified() for write + read-back verification.
+// Save all calibration coefficients into a single binary blob under key "cal".
+// Layout: [CalBlobHeader][CalBlobEntry x N], CRC32 over the entries array.
+// Uses NvsPutBytesVerified() for write + read-back verification.
 void SaveAllCalibration() {
   // Open NVS namespace for write.
   if (!g_leaf_prefs.begin("leafcal", /*readOnly=*/false)) {
@@ -361,25 +421,10 @@ void SaveAllCalibration() {
     return;
   }
 
-  // Build JSON array from current RAM entries.
-  JsonDocument doc;
-  JsonArray arr = doc.to<JsonArray>();
-
-  for (const auto &entry : g_cal_entries) {
-    JsonObject obj = arr.add<JsonObject>();
-    obj["addr"] = entry.addr;
-    obj["a1"] = entry.coeff.a1;
-    obj["a0"] = entry.coeff.a0;
-  }
-
-  String json;
-  serializeJson(doc, json);
-
   const size_t entry_count = g_cal_entries.size();
 
-  // If there are no entries, clear the key instead of writing "[]".
   if (entry_count == 0) {
-    // Remove existing key (if any) and verify.
+    // No entries -> clear key.
     if (!NvsRemoveKeyVerified(g_leaf_prefs, "cal")) {
       Serial.println(F("CAL NVS: remove(\"cal\") FAILED"));
     } else {
@@ -389,38 +434,77 @@ void SaveAllCalibration() {
     return;
   }
 
-  // Read current stored value so we can skip redundant writes.
-  const String existing = g_leaf_prefs.getString("cal", "");
+  // Build binary blob in RAM.
+  const size_t payload_size = entry_count * sizeof(CalBlobEntry);
+  const size_t total_size = sizeof(CalBlobHeader) + payload_size;
 
-  if (existing == json) {
-    Serial.printf("CAL NVS: no change (%u entr%s, %u bytes) – skipping write\n",
-                  static_cast<unsigned>(entry_count),
-                  (entry_count == 1) ? "y" : "ies",
-                  static_cast<unsigned>(json.length()));
+  std::vector<uint8_t> buffer(total_size);
+  auto *header = reinterpret_cast<CalBlobHeader *>(buffer.data());
+  auto *entries =
+      reinterpret_cast<CalBlobEntry *>(buffer.data() + sizeof(CalBlobHeader));
+
+  header->magic = kCalMagic;
+  header->version = kCalBlobVersion;
+  header->entry_count = static_cast<uint16_t>(entry_count);
+  header->crc32 = 0u; // filled after entries are populated
+
+  // Populate entries from g_cal_entries (String hex16 -> 8-byte ROM).
+  size_t filled = 0;
+  for (const auto &e : g_cal_entries) {
+    CalBlobEntry &be = entries[filled];
+
+    if (!ParseAddrHex16(e.addr, be.addr)) {
+      Serial.printf("CAL NVS: skipping entry with invalid addr=\"%s\"\n",
+                    e.addr.c_str());
+      continue;
+    }
+
+    be.a1 = e.coeff.a1;
+    be.a0 = e.coeff.a0;
+    ++filled;
+  }
+
+  if (filled == 0) {
+    Serial.println(F("CAL NVS: no valid entries to save (all addrs invalid?)"));
     g_leaf_prefs.end();
     return;
   }
 
-  // Write + verify using shared helper.
-  if (!NvsPutStringVerified(g_leaf_prefs, "cal", json)) {
-    Serial.printf("CAL NVS: NvsPutStringVerified(\"cal\") FAILED "
+  // If we skipped some invalid entries, shrink the blob to only valid ones.
+  if (filled != entry_count) {
+    header->entry_count = static_cast<uint16_t>(filled);
+  }
+
+  const size_t final_payload_size =
+      static_cast<size_t>(header->entry_count) * sizeof(CalBlobEntry);
+  const size_t final_total_size = sizeof(CalBlobHeader) + final_payload_size;
+
+  // Compute CRC over entries region only.
+  header->crc32 =
+      Crc32(reinterpret_cast<const uint8_t *>(entries), final_payload_size);
+
+  // Write + verify to NVS under key "cal".
+  if (!NvsPutBytesVerified(g_leaf_prefs, "cal", buffer.data(),
+                           final_total_size)) {
+    Serial.printf("CAL NVS: NvsPutBytesVerified(\"cal\") FAILED "
                   "(%u entr%s, %u bytes)\n",
-                  static_cast<unsigned>(entry_count),
-                  (entry_count == 1) ? "y" : "ies",
-                  static_cast<unsigned>(json.length()));
+                  static_cast<unsigned>(header->entry_count),
+                  (header->entry_count == 1) ? "y" : "ies",
+                  static_cast<unsigned>(final_total_size));
     g_leaf_prefs.end();
     return;
   }
 
   Serial.printf("CAL NVS: saved %u entr%s (%u bytes) to NVS\n",
-                static_cast<unsigned>(entry_count),
-                (entry_count == 1) ? "y" : "ies",
-                static_cast<unsigned>(json.length()));
+                static_cast<unsigned>(header->entry_count),
+                (header->entry_count == 1) ? "y" : "ies",
+                static_cast<unsigned>(final_total_size));
 
   g_leaf_prefs.end();
 }
 
-// Load all calibration coefficients from the single "cal" JSON blob.
+// Load all calibration coefficients from the binary "cal" blob.
+// Validates magic, version, size, and CRC32.
 void LoadAllCalibration() {
   g_cal_entries.clear();
 
@@ -429,39 +513,88 @@ void LoadAllCalibration() {
     return;
   }
 
-  const String json = g_leaf_prefs.getString("cal", "");
-
-  if (json.isEmpty()) {
-    Serial.println(F("CAL NVS: no 'cal' blob found (key missing or empty); "
-                     "node running uncalibrated until you solve+save"));
+  const size_t blob_length = g_leaf_prefs.getBytesLength("cal");
+  if (blob_length == 0) {
+    Serial.println(F("CAL NVS: no 'cal' blob found; node running uncalibrated "
+                     "until you solve+save"));
     g_leaf_prefs.end();
     return;
   }
 
-  Serial.printf("CAL NVS: found 'cal' blob (%u bytes), parsing...\n",
-                static_cast<unsigned>(json.length()));
-
-  JsonDocument doc;
-  const auto err = deserializeJson(doc, json);
-  if (err != DeserializationError::Ok) {
-    Serial.printf("CAL load: JSON parse error: %s\n", err.c_str());
+  if (blob_length < sizeof(CalBlobHeader)) {
+    Serial.printf("CAL NVS: 'cal' blob too small (%u bytes); ignoring\n",
+                  static_cast<unsigned>(blob_length));
     g_leaf_prefs.end();
     return;
   }
 
-  JsonArray arr = doc.as<JsonArray>();
-  for (JsonObject obj : arr) {
-    const char *addr_cstr = obj["addr"] | nullptr;
-    if (addr_cstr == nullptr || strlen(addr_cstr) != 16) {
-      Serial.println(F("CAL load: skipping entry with invalid addr"));
-      continue;
-    }
+  std::vector<uint8_t> buffer(blob_length);
+  const size_t read_back =
+      g_leaf_prefs.getBytes("cal", buffer.data(), blob_length);
+  if (read_back != blob_length) {
+    Serial.printf("CAL NVS: getBytes(\"cal\") read %u/%u bytes; ignoring\n",
+                  static_cast<unsigned>(read_back),
+                  static_cast<unsigned>(blob_length));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  const auto *header = reinterpret_cast<const CalBlobHeader *>(buffer.data());
+
+  if (header->magic != kCalMagic) {
+    Serial.println(F("CAL NVS: 'cal' blob has wrong magic (old format?); "
+                     "ignoring"));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  if (header->version != kCalBlobVersion) {
+    Serial.printf("CAL NVS: unsupported cal blob version %u (expected %u); "
+                  "ignoring\n",
+                  static_cast<unsigned>(header->version),
+                  static_cast<unsigned>(kCalBlobVersion));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  const size_t expected_payload_size =
+      static_cast<size_t>(header->entry_count) * sizeof(CalBlobEntry);
+  const size_t actual_payload_size = blob_length - sizeof(CalBlobHeader);
+
+  if (actual_payload_size != expected_payload_size) {
+    Serial.printf("CAL NVS: size mismatch (entries=%u, expected_payload=%u, "
+                  "actual_payload=%u); ignoring\n",
+                  static_cast<unsigned>(header->entry_count),
+                  static_cast<unsigned>(expected_payload_size),
+                  static_cast<unsigned>(actual_payload_size));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  const uint8_t *payload = buffer.data() + sizeof(CalBlobHeader);
+  const uint32_t crc_calc = Crc32(payload, actual_payload_size);
+
+  if (crc_calc != header->crc32) {
+    Serial.printf("CAL NVS: CRC mismatch (stored=0x%08lX calc=0x%08lX); "
+                  "ignoring\n",
+                  static_cast<unsigned long>(header->crc32),
+                  static_cast<unsigned long>(crc_calc));
+    g_leaf_prefs.end();
+    return;
+  }
+
+  const auto *entries = reinterpret_cast<const CalBlobEntry *>(payload);
+
+  for (uint16_t i = 0; i < header->entry_count; ++i) {
+    const CalBlobEntry &be = entries[i];
 
     Coeff coeff;
-    coeff.a1 = obj["a1"] | 1.0f;
-    coeff.a0 = obj["a0"] | 0.0f;
+    coeff.a1 = be.a1;
+    coeff.a0 = be.a0;
 
-    SetCal(String(addr_cstr), coeff);
+    // Convert back to the same 16-char hex form used everywhere else.
+    const String addr16 = addrToHex(be.addr);
+    SetCal(addr16, coeff);
   }
 
   const size_t count = g_cal_entries.size();
@@ -1164,12 +1297,11 @@ static uint8_t DiscoverMeshChannel(Print &out) {
 
   // channel = 0 => scan all channels; show_hidden = true in case you
   // ever decide to make the mesh AP hidden later.
-  const int16_t network_count =
-      WiFi.scanNetworks(/*async=*/false,
-                        /*show_hidden=*/true,
-                        /*passive=*/false,
-                        /*max_ms_per_channel=*/200,
-                        /*channel=*/0);
+  const int16_t network_count = WiFi.scanNetworks(/*async=*/false,
+                                                  /*show_hidden=*/true,
+                                                  /*passive=*/false,
+                                                  /*max_ms_per_channel=*/200,
+                                                  /*channel=*/0);
 
   if (network_count > 0) {
     for (int i = 0; i < network_count; ++i) {
@@ -1179,8 +1311,7 @@ static uint8_t DiscoverMeshChannel(Print &out) {
       if (ssid == mesh_ssid) {
         discovered_channel = static_cast<uint8_t>(channel);
         out.printf("[mesh] found \"%s\" on channel %d (RSSI=%d dBm)\n",
-                   mesh_ssid,
-                   static_cast<int>(channel),
+                   mesh_ssid, static_cast<int>(channel),
                    static_cast<int>(WiFi.RSSI(i)));
         break;
       }
@@ -1227,7 +1358,6 @@ static uint8_t DiscoverMeshChannel(Print &out) {
   return discovered_channel;
 }
 
-
 // painlessMesh callbacks (leaf).
 void OnReceiveLeaf(uint32_t from, String &msg) {
   DLOG("[LEAF RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
@@ -1265,7 +1395,8 @@ void setup() {
   mesh.setDebugMsgTypes(ERROR | STARTUP);
 
   const uint8_t mesh_channel = DiscoverMeshChannel(Serial);
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, mesh_channel, MESH_HIDDEN);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
+            mesh_channel, MESH_HIDDEN);
 
   mesh.setContainsRoot(true);
   mesh.onReceive(&OnReceiveLeaf);

@@ -5655,7 +5655,7 @@ void setup() {
   // This will override the compile-time defaults if keys exist in NVS.
   LoadHistoryConfigFromNvs();
 
-  // RootPickMeshChannel(); // NEW: choose mesh channel based on AP
+  RootPickMeshChannel(); // NEW: choose mesh channel based on AP
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   // mesh.setDebugMsgTypes(ALL);

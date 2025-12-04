@@ -144,16 +144,6 @@ const MeshNode::Sensor* MeshNode::FindSensorByLabel(
   return nullptr;
 }
 
-const MeshNode::Sensor* MeshNode::FindSensorByLabel(
-    const String& label) const {
-  for (const auto& sensor : sensors_) {
-    if (sensor.label.equalsIgnoreCase(label)) {
-      return &sensor;
-    }
-  }
-  return nullptr;
-}
-
 bool MeshNode::GetSensorHistoryByLabel(
     const String& label,
     std::vector<SensorHistorySample>* out) const {

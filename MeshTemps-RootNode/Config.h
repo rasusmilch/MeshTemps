@@ -13,7 +13,7 @@
 #define MESH_PREFIX "MeshTemps"
 #define MESH_PASSWORD "mesh-pass-1234" // >= 8 chars
 #define MESH_PORT 5555
-#define MESH_CHANNEL 1
+#define MESH_CHANNEL 6
 #define MESH_HIDDEN false
 
 // ===== Leaf DS18B20 settings =====
