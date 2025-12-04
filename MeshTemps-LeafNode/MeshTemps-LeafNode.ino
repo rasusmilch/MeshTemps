@@ -54,6 +54,20 @@ painlessMesh mesh;
 
 bool g_debug_enabled = false;
 
+uint32_t g_root_id = 0;
+uint32_t g_root_last_seen_ms = 0;
+
+// NEW: mesh watchdog
+Task g_task_mesh_watchdog;
+
+// Root timeout: no root_announce for this long -> assume root lost.
+constexpr uint32_t kRootTimeoutMs = 60000; // 60 s
+
+// Minimum spacing between mesh restarts (avoid thrashing).
+constexpr uint32_t kMeshRestartMinIntervalMs = 30000; // 30 s
+
+uint32_t g_last_mesh_restart_ms = 0;
+
 #define DLOG(fmt, ...)                                                         \
   do {                                                                         \
     if (g_debug_enabled) {                                                     \
@@ -1383,6 +1397,68 @@ void OnReceiveLeaf(uint32_t from, String &msg) {
 
 void OnConnectionsChangedLeaf() { LogConnections(); }
 
+// Forward declaration so we can use this in the watchdog task.
+void MeshWatchdogTaskFn();
+
+// Initialize or re-initialize the mesh on the leaf:
+//  - Scan for the mesh SSID to pick a channel
+//  - Call mesh.init()
+//  - Re-register callbacks
+static void InitMesh(Print &out) {
+  const uint8_t mesh_channel = DiscoverMeshChannel(out);
+
+  out.printf("[mesh] InitMesh: starting mesh on channel %u\n",
+             static_cast<unsigned>(mesh_channel));
+
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
+            mesh_channel, MESH_HIDDEN);
+
+  mesh.setContainsRoot(true);
+  mesh.onReceive(&OnReceiveLeaf);
+  mesh.onChangedConnections(&OnConnectionsChangedLeaf);
+}
+
+// Mesh watchdog: if we clearly lost the root for a while, restart the mesh.
+void MeshWatchdogTaskFn() {
+  const uint32_t now_ms = millis();
+
+  // Condition A: we once had a root, but haven't heard from it in a while.
+  const bool root_expired =
+      (g_root_id != 0U) && ((now_ms - g_root_last_seen_ms) >= kRootTimeoutMs);
+
+  // Condition B: we have no peers at all in the mesh.
+  const bool mesh_empty = mesh.getNodeList().empty();
+
+  if (!root_expired && !mesh_empty) {
+    // Mesh looks healthy enough; check again later.
+    g_task_mesh_watchdog.delay(10000); // 10 s
+    return;
+  }
+
+  // Avoid thrashing restarts.
+  if ((now_ms - g_last_mesh_restart_ms) < kMeshRestartMinIntervalMs) {
+    g_task_mesh_watchdog.delay(10000); // 10 s
+    return;
+  }
+
+  Serial.println(
+      F("[mesh] watchdog: mesh appears stale (root lost or no peers); "
+        "restarting mesh and rescanning channel"));
+
+  // Tear down old mesh instance.
+  mesh.stop();
+
+  // Drop any notion of a known root; we'll rediscover it via root_announce.
+  g_root_id = 0;
+  g_root_last_seen_ms = 0;
+
+  // Bring mesh back up (fresh scan, fresh init).
+  InitMesh(Serial);
+
+  g_last_mesh_restart_ms = now_ms;
+  g_task_mesh_watchdog.delay(10000); // 10 s
+}
+
 // Arduino entry points (leaf)
 void setup() {
   Serial.begin(DBG_BAUD);
@@ -1393,14 +1469,7 @@ void setup() {
   ScanSensors();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
-
-  const uint8_t mesh_channel = DiscoverMeshChannel(Serial);
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
-            mesh_channel, MESH_HIDDEN);
-
-  mesh.setContainsRoot(true);
-  mesh.onReceive(&OnReceiveLeaf);
-  mesh.onChangedConnections(&OnConnectionsChangedLeaf);
+  InitMesh(Serial);
 
   g_console.RegisterCommand("help", &CmdHelp, "show help");
   g_console.RegisterCommand("debug", &CmdDebug, "debug on|off");
@@ -1420,6 +1489,10 @@ void setup() {
   g_task_cal.set(TASK_IMMEDIATE, TASK_FOREVER, CalibrationTaskFn);
   user_scheduler.addTask(g_task_cal);
   g_task_cal.disable(); // Enabled by CalibrationStart().
+
+  g_task_mesh_watchdog.set(TASK_IMMEDIATE, TASK_FOREVER, MeshWatchdogTaskFn);
+  user_scheduler.addTask(g_task_mesh_watchdog);
+  g_task_mesh_watchdog.enable();
 
   Serial.println(F("LEAF ready. Type 'help'."));
 }
