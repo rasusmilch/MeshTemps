@@ -57,14 +57,18 @@ bool g_debug_enabled = false;
 uint32_t g_root_id = 0;
 uint32_t g_root_last_seen_ms = 0;
 
+bool g_mesh_initialized = false;
+
 // -----------------------------------------------------------------------------
 // Mesh discovery / root tracking (LEAF)
 // -----------------------------------------------------------------------------
 
 // Root timeout: if we don't see root for this long, we assume it's gone.
-constexpr uint32_t kRootAnnounceMs       = ROOT_ANNOUNCE_MS; // must match ROOT_ANNOUNCE_MS on root
-constexpr uint32_t kRootUnicastWindowMs  = 3 * kRootAnnounceMs; // 60 s
-constexpr uint32_t kRootTimeoutMs        = 3 * kRootAnnounceMs; // 60 s (as you have now)
+constexpr uint32_t kRootAnnounceMs =
+    ROOT_ANNOUNCE_MS; // must match ROOT_ANNOUNCE_MS on root
+constexpr uint32_t kRootUnicastWindowMs = 3 * kRootAnnounceMs; // 60 s
+constexpr uint32_t kRootTimeoutMs =
+    3 * kRootAnnounceMs; // 60 s (as you have now)
 
 // How long we consider a root presence "fresh" (for success in discovery).
 constexpr uint32_t kRootPresenceWindowMs = 30000; // 30 s
@@ -77,8 +81,8 @@ constexpr uint32_t kProbeBaseDelayMs = 2000; // 2 s
 
 // When there is *no* mesh with a root on any channel, wait 5–10 minutes
 // before doing another discovery scan, randomized to avoid stampedes.
-constexpr uint32_t kRescanMinDelayMs = 5UL * 60UL * 1000UL;  // 5 minutes
-constexpr uint32_t kRescanJitterMs   = 5UL * 60UL * 1000UL;  // + up to 5 min
+constexpr uint32_t kRescanMinDelayMs = 5UL * 60UL * 1000UL; // 5 minutes
+constexpr uint32_t kRescanJitterMs = 5UL * 60UL * 1000UL;   // + up to 5 min
 
 // At most 11 channels (1–11). We keep a compact list of channels where
 // we saw MESH_PREFIX.
@@ -971,7 +975,8 @@ void SendTemperatures() {
   serializeJson(doc, message);
 
   const bool use_unicast =
-      (g_root_id != 0U) && ((millis() - g_root_last_seen_ms) < kRootUnicastWindowMs);
+      (g_root_id != 0U) &&
+      ((millis() - g_root_last_seen_ms) < kRootUnicastWindowMs);
 
   DLOG("[LEAF TX %s] %s\n", use_unicast ? "unicast" : "bcast", message.c_str());
 
@@ -1324,7 +1329,8 @@ static void SendRootProbe() {
 
 static void InitMeshOnCurrentDiscoveryChannel(Print &out) {
   if (g_discovery.channel_index >= g_discovery.channel_count) {
-    out.println("[mesh] discovery: InitMeshOnCurrentDiscoveryChannel out of range");
+    out.println(
+        "[mesh] discovery: InitMeshOnCurrentDiscoveryChannel out of range");
     return;
   }
 
@@ -1333,18 +1339,18 @@ static void InitMeshOnCurrentDiscoveryChannel(Print &out) {
   out.printf("[mesh] discovery: starting mesh on channel %u\n",
              static_cast<unsigned>(mesh_channel));
 
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT,
-            WIFI_AP_STA, mesh_channel, MESH_HIDDEN);
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
+            mesh_channel, MESH_HIDDEN);
+
+  g_mesh_initialized = true; // <-- mark as initialized
 
   mesh.setContainsRoot(true);
   mesh.onReceive(&OnReceiveLeaf);
   mesh.onChangedConnections(&OnConnectionsChangedLeaf);
 
-  // Reset root tracking for this attempt.
   g_root_id = 0;
   g_root_last_seen_ms = 0;
 
-  // Reset probe counters and immediately send the first probe.
   g_discovery.probes_sent_on_this_channel = 0;
   g_discovery.last_probe_ms = 0;
   SendRootProbe();
@@ -1421,8 +1427,7 @@ static uint8_t ScanMeshChannels(Print &out) {
     if (g_discovery.channel_count < kMaxMeshChannels) {
       g_discovery.channels[g_discovery.channel_count++] = ch;
       out.printf("[mesh] discovery: saw \"%s\" on channel %d (RSSI=%d dBm)\n",
-                 mesh_ssid,
-                 static_cast<int>(ch),
+                 mesh_ssid, static_cast<int>(ch),
                  static_cast<int>(WiFi.RSSI(i)));
     }
   }
@@ -1438,7 +1443,6 @@ static uint8_t ScanMeshChannels(Print &out) {
 
   return g_discovery.channel_count;
 }
-
 
 // painlessMesh callbacks (leaf).
 void OnReceiveLeaf(uint32_t from, String &msg) {
@@ -1494,8 +1498,11 @@ static void StartDiscovery(Print &out) {
 
   out.println("[mesh] discovery: starting discovery phase");
 
-  // Stop any existing mesh instance cleanly.
-  mesh.stop();
+  // Only stop if the mesh has been initialized before.
+  if (g_mesh_initialized) {
+    mesh.stop();
+    g_mesh_initialized = false;
+  }
 
   g_root_id = 0;
   g_root_last_seen_ms = 0;
@@ -1548,7 +1555,8 @@ void MeshWatchdogTaskFn() {
   }
 
   // ---------------------------------------------------------------------------
-  // Discovery is ongoing: we are trying some channel from g_discovery.channels[]
+  // Discovery is ongoing: we are trying some channel from
+  // g_discovery.channels[]
   // ---------------------------------------------------------------------------
 
   // Success path: if we see root on this channel, we stop discovery and stay.
@@ -1564,10 +1572,11 @@ void MeshWatchdogTaskFn() {
     return;
   }
 
-  // No root yet on this channel; decide whether to send another probe or move on.
+  // No root yet on this channel; decide whether to send another probe or move
+  // on.
   if (g_discovery.probes_sent_on_this_channel < kMaxProbesPerChannel) {
-    const uint32_t delay_ms =
-        kProbeBaseDelayMs << g_discovery.probes_sent_on_this_channel; // 2^n
+    const uint32_t delay_ms = kProbeBaseDelayMs
+                              << g_discovery.probes_sent_on_this_channel; // 2^n
 
     if ((now_ms - g_discovery.last_probe_ms) >= delay_ms) {
       Serial.println("[mesh] discovery: sending another root probe");
@@ -1579,11 +1588,14 @@ void MeshWatchdogTaskFn() {
   }
 
   // We have exhausted probes on this channel with no root.
-  Serial.println(
-      F("[mesh] discovery: no root on this channel after retries; "
-        "tearing down and trying next channel"));
+  Serial.println(F("[mesh] discovery: no root on this channel after retries; "
+                   "tearing down and trying next channel"));
 
-  mesh.stop();
+  if (g_mesh_initialized) {
+    mesh.stop();
+    g_mesh_initialized = false;
+  }
+
   g_root_id = 0;
   g_root_last_seen_ms = 0;
 
@@ -1598,7 +1610,8 @@ void MeshWatchdogTaskFn() {
     return;
   }
 
-  // No more channels left to try; schedule another full scan after a long, random backoff.
+  // No more channels left to try; schedule another full scan after a long,
+  // random backoff.
   const uint32_t backoff = RandomRescanDelayMs();
   g_next_discovery_allowed_ms = now_ms + backoff;
 
@@ -1609,7 +1622,6 @@ void MeshWatchdogTaskFn() {
   g_discovery.ongoing = false;
   g_task_mesh_watchdog.delay(10000); // periodically check until backoff expires
 }
-
 
 // Arduino entry points (leaf)
 void setup() {
