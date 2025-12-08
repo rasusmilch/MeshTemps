@@ -31,6 +31,10 @@
 
 using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
 
+// Forward declaration so we can use this in the watchdog task.
+void MeshWatchdogTaskFn();
+static void AdvanceDiscoveryChannel(Print &out);
+
 static SerialConsole g_console;
 
 // Linear: T_corr = a1 * T_raw + a0
@@ -73,6 +77,12 @@ constexpr uint32_t kRootTimeoutMs =
 // How long we consider a root presence "fresh" (for success in discovery).
 constexpr uint32_t kRootPresenceWindowMs = 30000; // 30 s
 
+// Minimum time we stay on a candidate channel during discovery before we
+// declare "no root" and tear the mesh down. This should be at least as
+// long as kRootTimeoutMs so that a real root has time to send one or more
+// root_announce() frames.
+constexpr uint32_t kChannelMinDiscoveryMs = kRootTimeoutMs;
+
 // Root probe attempts per channel.
 constexpr uint8_t kMaxProbesPerChannel = 3;
 
@@ -100,8 +110,20 @@ struct MeshDiscoveryState {
 
 MeshDiscoveryState g_discovery;
 
+// Time we started the current discovery channel (for per-channel dwell).
+uint32_t g_discovery_channel_start_ms = 0;
+
+// Discovery actions that must be executed from loop(), not from
+// TaskScheduler callbacks, to avoid calling mesh.stop() while
+// Scheduler::execute() is iterating tasks.
+volatile bool g_start_discovery_pending = false;
+volatile bool g_advance_discovery_channel_pending = false;
+
 // Next time we are allowed to start a new discovery (ms since boot).
 uint32_t g_next_discovery_allowed_ms = 0;
+
+// Number of consecutive discovery cycles that ended with "no root found".
+uint8_t g_consecutive_discovery_failures = 0;
 
 // Watchdog task (already declared in your code).
 Task g_task_mesh_watchdog;
@@ -1339,35 +1361,32 @@ static void InitMeshOnCurrentDiscoveryChannel(Print &out) {
   out.printf("[mesh] discovery: starting mesh on channel %u\n",
              static_cast<unsigned>(mesh_channel));
 
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
-            mesh_channel, MESH_HIDDEN);
-
-  g_mesh_initialized = true; // <-- mark as initialized
+  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT,
+            WIFI_AP_STA, mesh_channel, MESH_HIDDEN);
+  g_mesh_initialized = true; // mark as initialized
 
   mesh.setContainsRoot(true);
   mesh.onReceive(&OnReceiveLeaf);
   mesh.onChangedConnections(&OnConnectionsChangedLeaf);
 
+  // Reset root tracking for this attempt.
   g_root_id = 0;
   g_root_last_seen_ms = 0;
 
+  // Reset probe counters and mark the time we started this channel.
   g_discovery.probes_sent_on_this_channel = 0;
   g_discovery.last_probe_ms = 0;
-  SendRootProbe();
+  g_discovery_channel_start_ms = millis();
+  // First root_probe() will be sent from OnConnectionsChangedLeaf()
+  // once we actually have at least one peer on this channel.
 }
+
 
 static bool RootRecentlyPresent(uint32_t now_ms) {
   if (g_root_id == 0U) {
     return false;
   }
   return (now_ms - g_root_last_seen_ms) < kRootPresenceWindowMs;
-}
-
-static uint32_t RandomRescanDelayMs() {
-  // Arduino random(min, max) returns [min, max).
-  const uint32_t jitter = static_cast<uint32_t>(
-      random(static_cast<long>(0), static_cast<long>(kRescanJitterMs)));
-  return kRescanMinDelayMs + jitter;
 }
 
 // Fill g_discovery.channels[] with all channels where we see MESH_PREFIX.
@@ -1481,10 +1500,21 @@ void OnReceiveLeaf(uint32_t from, String &msg) {
   }
 }
 
-void OnConnectionsChangedLeaf() { LogConnections(); }
+void OnConnectionsChangedLeaf() {
+  LogConnections();
 
-// Forward declaration so we can use this in the watchdog task.
-void MeshWatchdogTaskFn();
+  // During discovery, start probing for the root only after we actually
+  // have at least one mesh peer on this channel. This avoids sending
+  // probes into the void before the link is formed.
+  if (g_discovery.ongoing && g_mesh_initialized &&
+      g_discovery.probes_sent_on_this_channel == 0 &&
+      !mesh.getNodeList().empty()) {
+    Serial.println(
+        F("[mesh] discovery: first peer on this channel, sending initial root probe"));
+    SendRootProbe();
+  }
+}
+
 
 static void StartDiscovery(Print &out) {
   const uint32_t now = millis();
@@ -1507,16 +1537,24 @@ static void StartDiscovery(Print &out) {
   g_root_id = 0;
   g_root_last_seen_ms = 0;
 
-  const uint8_t count = ScanMeshChannels(out);
-  if (count == 0) {
-    // Nobody with our SSID is on the air; back off for 5–10 minutes.
-    const uint32_t backoff = RandomRescanDelayMs();
-    g_next_discovery_allowed_ms = now + backoff;
-    out.printf("[mesh] discovery: no candidate channels; rescan in %u s\n",
-               static_cast<unsigned>(backoff / 1000U));
-    g_discovery.ongoing = false;
-    return;
+const uint8_t count = ScanMeshChannels(out);
+if (count == 0) {
+  // Nobody with our SSID is on the air; treat this as a failed discovery
+  // cycle and use the adaptive backoff strategy.
+  if (g_consecutive_discovery_failures < 255) {
+    ++g_consecutive_discovery_failures;
   }
+
+  const uint32_t backoff = ComputeRescanDelayMs();
+  g_next_discovery_allowed_ms = now + backoff;
+  out.printf("[mesh] discovery: no candidate channels; rescan in %u s "
+             "(failures=%u)\n",
+             static_cast<unsigned>(backoff / 1000U),
+             static_cast<unsigned>(g_consecutive_discovery_failures));
+  g_discovery.ongoing = false;
+  return;
+}
+
 
   g_discovery.ongoing = true;
   g_discovery.channel_index = 0;
@@ -1526,70 +1564,42 @@ static void StartDiscovery(Print &out) {
   InitMeshOnCurrentDiscoveryChannel(out);
 }
 
-// Mesh watchdog: if we clearly lost the root for a while, restart the mesh.
-void MeshWatchdogTaskFn() {
+static uint32_t ComputeRescanDelayMs() {
+  // Base times tuned to ROOT_ANNOUNCE_MS = 20000 ms.
+  uint32_t base_ms;
+
+  if (g_consecutive_discovery_failures == 0) {
+    // First failure: retry fairly quickly (about 30 s).
+    base_ms = kRootAnnounceMs * 1.5;
+  } else if (g_consecutive_discovery_failures == 1) {
+    // Second failure: a bit longer (about 60 s).
+    base_ms = 3 * kRootAnnounceMs;
+  } else {
+    // Third and subsequent failures: long nap.
+    base_ms = kRescanMinDelayMs;  // 5 minutes
+  }
+
+  // Add ±50 % jitter so nodes do not all wake at once.
+  const uint32_t jitter = base_ms / 2;
+  const uint32_t offset =
+      static_cast<uint32_t>(random(0L, static_cast<long>(2 * jitter + 1)));
+
+  // Result is in [base_ms - jitter, base_ms + jitter].
+  return base_ms - jitter + offset;
+}
+
+// Advance to the next discovery channel (or finish discovery and schedule
+// a rescan backoff). This must be called from loop(), never from a
+// TaskScheduler callback.
+static void AdvanceDiscoveryChannel(Print &out) {
+  if (!g_discovery.ongoing) {
+    // Nothing to do.
+    return;
+  }
+
   const uint32_t now_ms = millis();
 
-  // If we are in normal mode (no discovery ongoing) and root is present
-  // within the timeout window, we do nothing except re-check later.
-  if (!g_discovery.ongoing) {
-    if (RootRecentlyPresent(now_ms)) {
-      g_task_mesh_watchdog.delay(10000); // 10 s
-      return;
-    }
-
-    // Root missing or never seen. Time to consider discovery if allowed.
-    if (now_ms >= g_next_discovery_allowed_ms) {
-      Serial.println(
-          F("[mesh] watchdog: root missing; starting discovery phase"));
-      StartDiscovery(Serial);
-    } else {
-      const uint32_t remaining_ms = g_next_discovery_allowed_ms - now_ms;
-      Serial.printf("[mesh] watchdog: root missing; discovery blocked for "
-                    "%u more s\n",
-                    static_cast<unsigned>(remaining_ms / 1000U));
-    }
-
-    g_task_mesh_watchdog.delay(5000); // 5 s
-    return;
-  }
-
-  // ---------------------------------------------------------------------------
-  // Discovery is ongoing: we are trying some channel from
-  // g_discovery.channels[]
-  // ---------------------------------------------------------------------------
-
-  // Success path: if we see root on this channel, we stop discovery and stay.
-  if (RootRecentlyPresent(now_ms)) {
-    const uint8_t ch = g_discovery.channels[g_discovery.channel_index];
-    Serial.printf("[mesh] discovery: root found on channel %u, "
-                  "locking onto this mesh\n",
-                  static_cast<unsigned>(ch));
-    g_discovery.ongoing = false;
-    // After success, we can allow immediate future discovery if root is lost.
-    g_next_discovery_allowed_ms = now_ms;
-    g_task_mesh_watchdog.delay(10000); // 10 s
-    return;
-  }
-
-  // No root yet on this channel; decide whether to send another probe or move
-  // on.
-  if (g_discovery.probes_sent_on_this_channel < kMaxProbesPerChannel) {
-    const uint32_t delay_ms = kProbeBaseDelayMs
-                              << g_discovery.probes_sent_on_this_channel; // 2^n
-
-    if ((now_ms - g_discovery.last_probe_ms) >= delay_ms) {
-      Serial.println("[mesh] discovery: sending another root probe");
-      SendRootProbe();
-    }
-
-    g_task_mesh_watchdog.delay(1000); // check again in ~1 s
-    return;
-  }
-
-  // We have exhausted probes on this channel with no root.
-  Serial.println(F("[mesh] discovery: no root on this channel after retries; "
-                   "tearing down and trying next channel"));
+  Serial.println(F("[mesh] discovery: advancing discovery channel"));
 
   if (g_mesh_initialized) {
     mesh.stop();
@@ -1605,22 +1615,120 @@ void MeshWatchdogTaskFn() {
 
   if (g_discovery.channel_index < g_discovery.channel_count) {
     // Try the next channel in the candidate list.
-    InitMeshOnCurrentDiscoveryChannel(Serial);
+    InitMeshOnCurrentDiscoveryChannel(out);
+    // We remain in discovery mode.
+    return;
+  }
+
+  // No more channels left to try; schedule another full scan after a backoff.
+  if (g_consecutive_discovery_failures < 255) {
+    ++g_consecutive_discovery_failures;
+  }
+  const uint32_t backoff = ComputeRescanDelayMs();
+  g_next_discovery_allowed_ms = now_ms + backoff;
+
+  Serial.printf("[mesh] discovery: no root found on any channel; "
+                "will rescan in %u s (failures=%u)\n",
+                static_cast<unsigned>(backoff / 1000U),
+                static_cast<unsigned>(g_consecutive_discovery_failures));
+
+  g_discovery.ongoing = false;
+}
+
+// Mesh watchdog: if we clearly lost the root for a while, drive the
+// discovery state machine. All heavy operations (mesh.stop(), changing
+// channels, re-init) are delegated to loop() via pending flags.
+void MeshWatchdogTaskFn() {
+  const uint32_t now_ms = millis();
+
+  // If we are in normal mode (no discovery ongoing) and root is present
+  // within the timeout window, we do nothing except re-check later.
+  if (!g_discovery.ongoing) {
+    if (RootRecentlyPresent(now_ms)) {
+      g_task_mesh_watchdog.delay(10000);  // 10 s
+      return;
+    }
+
+    // Root missing or never seen. Time to request discovery if allowed.
+    if (now_ms >= g_next_discovery_allowed_ms) {
+      Serial.println(
+          F("[mesh] watchdog: root missing; scheduling discovery phase"));
+      g_start_discovery_pending = true;
+    } else {
+      const uint32_t remaining_ms = g_next_discovery_allowed_ms - now_ms;
+      Serial.printf("[mesh] watchdog: root missing; discovery blocked for "
+                    "%u more s\n",
+                    static_cast<unsigned>(remaining_ms / 1000U));
+    }
+
+    g_task_mesh_watchdog.delay(5000);  // 5 s
+    return;
+  }
+
+  // --------------------------------------------------------------------
+  // Discovery is ongoing: we are trying some channel from g_discovery.channels[]
+  // --------------------------------------------------------------------
+
+  // Success path: if we see root on this channel, we stop discovery and stay.
+  if (RootRecentlyPresent(now_ms)) {
+    const uint8_t ch = g_discovery.channels[g_discovery.channel_index];
+    Serial.printf("[mesh] discovery: root found on channel %u, "
+                  "locking onto this mesh\n",
+                  static_cast<unsigned>(ch));
+    g_discovery.ongoing = false;
+    // After success, we can allow immediate future discovery if root is lost.
+    g_next_discovery_allowed_ms = now_ms;
+    g_consecutive_discovery_failures = 0;  // reset failures
+    g_task_mesh_watchdog.delay(10000);     // 10 s
+    return;
+  }
+
+  // No root yet on this channel; decide whether to send another probe or move
+  // on. (Sending probes is cheap and safe from a scheduler task.)
+  if (g_discovery.probes_sent_on_this_channel < kMaxProbesPerChannel) {
+    const uint32_t delay_ms =
+        kProbeBaseDelayMs << g_discovery.probes_sent_on_this_channel;  // 2^n
+
+    if ((now_ms - g_discovery.last_probe_ms) >= delay_ms) {
+      Serial.println(F("[mesh] discovery: sending another root probe"));
+      SendRootProbe();
+    }
+
+    g_task_mesh_watchdog.delay(1000);  // check again in ~1 s
+    return;
+  }
+
+  // Before we declare this channel dead, stay attached long enough to
+  // give any real root time to send at least one root_announce().
+  const uint32_t elapsed_ms = now_ms - g_discovery_channel_start_ms;
+  if (elapsed_ms < kChannelMinDiscoveryMs) {
     g_task_mesh_watchdog.delay(1000);
     return;
   }
 
-  // No more channels left to try; schedule another full scan after a long,
-  // random backoff.
-  const uint32_t backoff = RandomRescanDelayMs();
-  g_next_discovery_allowed_ms = now_ms + backoff;
+  // We have exhausted probes on this channel with no root. Ask loop()
+  // to tear the mesh down and advance to the next channel (or to backoff).
+  Serial.println(
+      F("[mesh] discovery: no root on this channel after retries; "
+        "will advance to next channel (deferred)"));
 
-  Serial.printf("[mesh] discovery: no root found on any channel; "
-                "will rescan in %u s\n",
-                static_cast<unsigned>(backoff / 1000U));
+  g_advance_discovery_channel_pending = true;
+  g_task_mesh_watchdog.delay(1000);  // keep checking regularly
+}
 
-  g_discovery.ongoing = false;
-  g_task_mesh_watchdog.delay(10000); // periodically check until backoff expires
+// Process any deferred mesh-discovery actions. This **must** only be called
+// from loop(), never from a TaskScheduler callback, so that mesh.stop() /
+// mesh.init() are not invoked while Scheduler::execute() is iterating tasks.
+static void ProcessPendingDiscoveryActionsFromLoop() {
+  if (g_start_discovery_pending) {
+    g_start_discovery_pending = false;
+    StartDiscovery(Serial);
+  }
+
+  if (g_advance_discovery_channel_pending) {
+    g_advance_discovery_channel_pending = false;
+    AdvanceDiscoveryChannel(Serial);
+  }
 }
 
 // Arduino entry points (leaf)
@@ -1664,6 +1772,15 @@ void setup() {
 }
 
 void loop() {
+  // Run PainlessMesh and TaskScheduler tasks (including MeshWatchdogTaskFn).
   mesh.update();
+
+  // Perform any deferred mesh stop / re-init / channel-advance actions
+  // **after** mesh.update() has returned.
+  ProcessPendingDiscoveryActionsFromLoop();
+
+  // Process console input/output.
   g_console.Poll(Serial, Serial);
 }
+
+

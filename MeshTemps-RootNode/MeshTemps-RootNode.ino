@@ -327,6 +327,11 @@ static bool g_ntp_sync_in_progress = false;
 static const char *kNtpServer1 = "pool.ntp.org";
 static const char *kNtpServer2 = "time.nist.gov";
 
+// Track completion from the SNTP callback without blocking.
+static volatile bool g_ntp_cb_pending = false;
+// Epoch at last SNTP sync (UTC seconds since 1970).
+static volatile time_t g_ntp_last_sync_epoch = 0;
+
 // Per-node alert/warning mute under g_labels["mute"][nodeId]:
 // bit0 = LOW side muted; bit1 = HIGH side muted.
 enum NodeMuteMask : uint8_t {
@@ -633,8 +638,8 @@ static void LoadNetworkConfigFromNVS() {
   g_network_config.timezone_minutes = tz_min;
   g_network_config.dst_enabled = (dst_flag != 0);
 
-  DumpStringHex("[NVS] SSID", g_network_config.ssid);
-  DumpStringHex("[NVS] PASSWORD", g_network_config.password);
+  // DumpStringHex("[NVS] SSID", g_network_config.ssid);
+  // DumpStringHex("[NVS] PASSWORD", g_network_config.password);
 }
 
 static void SaveNetworkConfigToNVS() {
@@ -759,45 +764,27 @@ static bool EnsureMeshStationConfigApplied(Print &out,
 }
 
 static bool EnsureWifiConnected(Print &out) {
-  if (WiFi.status() == WL_CONNECTED) {
-    return true;
-  }
-
+  // Ensure the mesh has the current STA credentials.
   if (!EnsureMeshStationConfigApplied(out)) {
     return false;
   }
 
-  out.print(F("[WiFi] Waiting for STA connection"));
-  const uint32_t start_ms = millis();
-  wl_status_t last_status = WiFi.status();
-
-  while ((millis() - start_ms) < kWifiConnectTimeoutMs) {
-    // Let painlessMesh drive Wi-Fi & reconnect
-    mesh.update();
-    delay(100);
-
-    wl_status_t status = WiFi.status();
-    if (status != last_status) {
-      out.printf(" [%d]", static_cast<int>(status));
-      last_status = status;
-    }
-
-    if (status == WL_CONNECTED) {
-      break;
-    }
-  }
-  out.println();
-
-  if (WiFi.status() == WL_CONNECTED) {
+  const wl_status_t status = WiFi.status();
+  if (status == WL_CONNECTED) {
     IPAddress ip = WiFi.localIP();
-    out.printf("[WiFi] Connected; IP=%s RSSI=%d dBm\n", ip.toString().c_str(),
-               WiFi.RSSI());
+    out.printf("[WiFi] Connected; IP=%s RSSI=%d dBm\n",
+               ip.toString().c_str(), WiFi.RSSI());
     return true;
   }
 
-  out.println(F("[WiFi] Connection timeout; giving up for now"));
+  // Do not block here – STA connection is managed by painlessMesh.
+  out.printf(
+      "[WiFi] STA credentials applied; current status=%d. "
+      "Root will connect via painlessMesh in the background.\n",
+      static_cast<int>(status));
   return false;
 }
+
 
 // Set local clock to a fixed default of 2025-01-01 00:00.
 static void SetDefaultDateTime() {
@@ -832,39 +819,53 @@ static void PrintCurrentLocalTime(Print &out) {
   out.printf("time: %s\n", buf);
 }
 
+// SNTP time-sync notification callback (called from the SNTP task).
+static void NtpTimeSyncNotification(struct timeval *tv) {
+  // Just record that a sync happened; do the heavier work in NtpLoop().
+  g_ntp_cb_pending = true;
+  if (tv != nullptr) {
+    g_ntp_last_sync_epoch = tv->tv_sec;
+  } else {
+    g_ntp_last_sync_epoch = time(nullptr);
+  }
+}
+
 // NTP sync using current timezone / DST settings.
+// NTP sync using current timezone / DST settings (non-blocking).
 static bool SyncTimeFromNtp(Print &out) {
   if (WiFi.status() != WL_CONNECTED) {
     out.println(F("[NTP] WiFi not connected; cannot sync time"));
     return false;
   }
 
+  // If a sync is already in progress, do not start another.
+  if (g_ntp_sync_in_progress) {
+    out.println(F("[NTP] Sync already in progress"));
+    return true;  // Request is effectively already pending.
+  }
+
   const long gmt_offset_sec =
       static_cast<long>(g_network_config.timezone_minutes) * 60L;
   const long dst_offset_sec = g_network_config.dst_enabled ? 3600L : 0L;
 
-  out.printf("[NTP] configTime offset=%ld sec dst=%ld sec\n", gmt_offset_sec,
-             dst_offset_sec);
+  out.printf("[NTP] configTime offset=%ld sec dst=%ld sec\n",
+             gmt_offset_sec, dst_offset_sec);
+
+  // Install (or re-install) the SNTP callback; this is idempotent.
+  sntp_set_time_sync_notification_cb(NtpTimeSyncNotification);
+
+  // Start / reconfigure the SNTP client. This returns immediately; SNTP will
+  // update the system time later in the background and then invoke our
+  // NtpTimeSyncNotification() callback.
   configTime(gmt_offset_sec, dst_offset_sec, kNtpServer1, kNtpServer2);
 
-  struct tm timeinfo;
-  const uint32_t start_ms = millis();
-  out.print(F("[NTP] Waiting for time"));
-  while ((millis() - start_ms) < kNtpSyncTimeoutMs) {
-    if (getLocalTime(&timeinfo, 1000)) {
-      char buf[64];
-      strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
-      out.printf("\n[NTP] Time synced: %s\n", buf);
-      g_ntp_time_valid = true;
-      g_last_ntp_ok_ms = millis();
-      g_ntp_retry_period_ms = kNtpResyncPeriodMs; // switch to ~24 h
-      return true;
-    }
-    out.print('.');
-  }
-  out.println(F("\n[NTP] Sync timeout; keeping existing time"));
-  return false;
+  g_ntp_sync_in_progress = true;
+  g_last_ntp_attempt_ms = millis();
+
+  out.println(F("[NTP] Sync requested (non-blocking)"));
+  return true;
 }
+
 
 static void RootInitNetwork() {
   LoadNetworkConfigFromNVS();
@@ -880,67 +881,110 @@ static void RootInitNetwork() {
 
   Serial.printf("[WiFi] Using SSID=\"%s\"\n", g_network_config.ssid.c_str());
 
-  g_ntp_retry_period_ms = kNtpRetryInitialMs;
-  bool ntp_ok = false;
-  if (EnsureWifiConnected(Serial)) {
-    g_last_ntp_attempt_ms = millis();
-    g_ntp_sync_in_progress = true;
-    ntp_ok = SyncTimeFromNtp(Serial);
-    g_ntp_sync_in_progress = false;
-  } else {
-    Serial.println(F("[WiFi] Initial connection failed"));
-    g_last_ntp_attempt_ms = millis();
-  }
+  // Apply STA configuration to painlessMesh. This does NOT block;
+  // the mesh will bring the STA link up when it can.
+  EnsureMeshStationConfigApplied(Serial);
+  Serial.println(F(
+      "[WiFi] STA credentials applied; root mesh node will connect to WiFi "
+      "in the background when possible."));
 
-  if (!ntp_ok) {
-    Serial.println(F("[TIME] Falling back to default time"));
-    SetDefaultDateTime();
-    g_ntp_time_valid = false;
-  }
+  // Start from a sane default local time; NTP will replace this once the
+  // first successful sync occurs.
+  SetDefaultDateTime();
+  g_ntp_time_valid = false;
+
+  // Configure initial retry period for NTP. The actual sync attempts
+  // are handled in NtpLoop().
+  g_ntp_retry_period_ms = kNtpRetryInitialMs;
+  g_last_ntp_attempt_ms = millis();
 }
 
 // Periodic NTP resync – call from loop().
+// Periodic NTP resync – call from loop(). Non-blocking.
 static void NtpLoop() {
   const uint32_t now_ms = millis();
 
+  // 1) Handle completion from the SNTP callback (if any).
+  if (g_ntp_cb_pending) {
+    g_ntp_cb_pending = false;
+
+    g_ntp_sync_in_progress = false;
+    g_ntp_time_valid = true;
+    g_last_ntp_ok_ms = now_ms;
+    g_ntp_retry_period_ms = kNtpResyncPeriodMs;  // switch to ~24 h
+
+    // Log the time we just synced to, so it matches what "time now" would show.
+    struct tm timeinfo;
+    time_t t = g_ntp_last_sync_epoch;
+    bool have_time = false;
+
+    if (t != 0 && localtime_r(&t, &timeinfo) != nullptr) {
+      have_time = true;
+    } else if (getLocalTime(&timeinfo, 0)) {
+      // Fallback: read back current local time without blocking.
+      have_time = true;
+    }
+
+    if (have_time) {
+      char buf[64];
+      strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+      Serial.printf("[NTP] Time synced: %s\n", buf);
+    } else {
+      Serial.println(F("[NTP] Time sync callback, but getLocalTime() failed"));
+    }
+  }
+
+  // If no SSID configured, nothing to do.
   if (g_network_config.ssid.isEmpty()) {
     return;
   }
 
-  if ((g_last_ntp_attempt_ms != 0) &&
-      ((now_ms - g_last_ntp_attempt_ms) < g_ntp_retry_period_ms)) {
-    return; // not time yet
+  // 2) Manage "in progress" state with a timeout, but do not block.
+  if (g_ntp_sync_in_progress) {
+    // If this attempt has run too long, treat it as a failure and backoff.
+    if (now_ms - g_last_ntp_attempt_ms >= kNtpSyncTimeoutMs) {
+      g_ntp_sync_in_progress = false;
+      Serial.println(F("[NTP] Sync attempt timed out; will retry later"));
+
+      if (!g_ntp_time_valid) {
+        if (g_ntp_retry_period_ms < kNtpRetryMaxMs) {
+          g_ntp_retry_period_ms =
+              std::min(g_ntp_retry_period_ms * 2U, kNtpRetryMaxMs);
+        }
+      }
+
+      // Record that we just finished an attempt (unsuccessfully).
+      g_last_ntp_attempt_ms = now_ms;
+    }
+    // Either way, do not start a new attempt while one is/was in progress.
+    return;
   }
 
-  g_last_ntp_attempt_ms = now_ms;
-  g_ntp_sync_in_progress = true;
+  // 3) Check if it is time to start a new attempt.
+  if ((g_last_ntp_attempt_ms != 0U) &&
+      ((now_ms - g_last_ntp_attempt_ms) < g_ntp_retry_period_ms)) {
+    return;  // not time yet
+  }
 
+  // 4) Ensure WiFi is connected before starting a new sync attempt.
   if (!EnsureWifiConnected(Serial)) {
     Serial.println(F("[NTP] Skipping resync; WiFi not connected"));
 
-    // Before first valid fix, back off exponentially up to 12 h
+    // Before first valid fix, back off exponentially up to 12 h.
     if (!g_ntp_time_valid) {
       if (g_ntp_retry_period_ms < kNtpRetryMaxMs) {
         g_ntp_retry_period_ms =
             std::min(g_ntp_retry_period_ms * 2U, kNtpRetryMaxMs);
       }
     }
-    g_ntp_sync_in_progress = false;
+    g_last_ntp_attempt_ms = now_ms;
     return;
   }
 
-  const bool ntp_ok = SyncTimeFromNtp(Serial);
-  g_ntp_sync_in_progress = false;
-
-  if (!ntp_ok && !g_ntp_time_valid) {
-    // No valid time yet: keep clock sane
-    SetDefaultDateTime();
-    if (g_ntp_retry_period_ms < kNtpRetryMaxMs) {
-      g_ntp_retry_period_ms =
-          std::min(g_ntp_retry_period_ms * 2U, kNtpRetryMaxMs);
-    }
-  }
+  // 5) Start a new non-blocking sync attempt.
+  (void)SyncTimeFromNtp(Serial);
 }
+
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -2163,7 +2207,7 @@ static void GuiUpdateNtpStatusIcon() {
   if (g_ntp_sync_in_progress) {
     icon = LV_SYMBOL_REFRESH; // spinning arrows
   } else if (recent_ok) {
-    icon = LV_SYMBOL_OK; // checkmark
+    icon = LV_SYMBOL_WIFI; // checkmark
   } else {
     icon = LV_SYMBOL_CLOSE; // X
   }
@@ -2245,14 +2289,40 @@ void GuiInit() {
   lv_label_set_text(g_ui_ntp_icon, LV_SYMBOL_CLOSE); // "no valid sync yet"
   lv_obj_align(g_ui_ntp_icon, LV_ALIGN_LEFT_MID, 80, 0);
 
-  // Simple popup text for "syncing" state (hidden by default).
-  g_ui_ntp_popup = lv_label_create(screen);
-  lv_label_set_text(g_ui_ntp_popup, "Syncing time...");
-  lv_obj_set_style_bg_color(g_ui_ntp_popup, lv_color_make(0x20, 0x20, 0x20), 0);
-  lv_obj_set_style_bg_opa(g_ui_ntp_popup, LV_OPA_COVER, 0);
-  lv_obj_set_style_text_color(g_ui_ntp_popup, lv_color_white(), 0);
-  lv_obj_set_style_pad_all(g_ui_ntp_popup, 4, 0);
-  lv_obj_align(g_ui_ntp_popup, LV_ALIGN_TOP_MID, 0, kTopBarHeightPx + 4);
+  // Prominent popup "card" for "syncing" state (hidden by default).
+  g_ui_ntp_popup = lv_obj_create(screen);
+
+  // Size: wide box across most of the screen width, auto height.
+  lv_obj_set_width(g_ui_ntp_popup, lv_pct(80));
+  lv_obj_set_height(g_ui_ntp_popup, LV_SIZE_CONTENT);
+
+  // Subtle light blue background.
+  lv_obj_set_style_bg_color(g_ui_ntp_popup,
+                            lv_color_make(0x60, 0x90, 0xC0), 0);  // light, not bright
+  lv_obj_set_style_bg_opa(g_ui_ntp_popup, LV_OPA_80, 0);
+
+  // Rounded corners, border, and padding.
+  lv_obj_set_style_radius(g_ui_ntp_popup, 8, 0);
+  lv_obj_set_style_border_width(g_ui_ntp_popup, 2, 0);
+  lv_obj_set_style_border_color(g_ui_ntp_popup,
+                                lv_color_make(0x30, 0x50, 0x80), 0);
+  lv_obj_set_style_pad_all(g_ui_ntp_popup, 12, 0);
+  lv_obj_set_style_shadow_width(g_ui_ntp_popup, 8, 0);
+  lv_obj_set_style_shadow_opa(g_ui_ntp_popup, LV_OPA_50, 0);
+
+  // Optional: make sure it does not scroll.
+  lv_obj_clear_flag(g_ui_ntp_popup, LV_OBJ_FLAG_SCROLLABLE);
+
+  // Position: centered near the top, just below the top bar.
+  lv_obj_align(g_ui_ntp_popup, LV_ALIGN_TOP_MID, 0, kTopBarHeightPx + 12);
+
+  // Create the label inside the popup.
+  lv_obj_t *ntp_label = lv_label_create(g_ui_ntp_popup);
+  lv_label_set_text(ntp_label, "Syncing time...");
+  lv_obj_set_style_text_color(ntp_label, lv_color_black(), 0);
+  lv_obj_center(ntp_label);
+
+  // Start hidden; shown/hidden by GuiUpdateNtpStatusIcon().
   lv_obj_add_flag(g_ui_ntp_popup, LV_OBJ_FLAG_HIDDEN);
 
   // Tile container below the bar.
@@ -2303,7 +2373,12 @@ void GuiInit() {
   g_ui_map_house = nullptr; // created lazily
   lv_obj_add_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
 
-  // Ensure the bar is always drawn on top of tiles/map.
+  // Ensure NTP popup is drawn above tiles/map, but below the top bar.
+  if (g_ui_ntp_popup != nullptr) {
+    lv_obj_move_foreground(g_ui_ntp_popup);
+  }
+
+  // Now ensure the bar is the topmost element.
   lv_obj_move_foreground(bar);
 
   g_layout_dirty = true; // first time needs a full build
@@ -2327,20 +2402,47 @@ void UpdateUptimeLabel() {
     return;
   }
 
-  struct tm timeinfo;
-  // Non-blocking: timeout = 0 → just read current local time if available.
-  if (!getLocalTime(&timeinfo, 0)) {
-    // No valid time yet (e.g., NTP not run and default not set).
-    lv_label_set_text(g_ui_label_clock, "--:--");
+  // Read current time in a non-blocking way.
+  time_t now = time(nullptr);
+  if (now == static_cast<time_t>(-1)) {
+    // Time not initialised yet: only show "--:--" once, then keep whatever is
+    // on screen to avoid flicker.
+    static bool clock_initialised = false;
+    if (!clock_initialised) {
+      lv_label_set_text(g_ui_label_clock, "--:--");
+      clock_initialised = true;
+    }
     return;
   }
 
+  struct tm local_time;
+  if (localtime_r(&now, &local_time) == nullptr) {
+    // On any error, keep the previous display; do not blank.
+    return;
+  }
+
+  // Only update the label when the minute changes.
+  static int last_hour = -1;
+  static int last_minute = -1;
+
+  if (local_time.tm_hour == last_hour &&
+      local_time.tm_min == last_minute) {
+    // No visible change required.
+    return;
+  }
+
+  last_hour = local_time.tm_hour;
+  last_minute = local_time.tm_min;
+
   char buffer[16];
-  // 24-hour format HH:MM. Change to "%I:%M %p" if you ever want 12-hour time.
-  strftime(buffer, sizeof(buffer), "%H:%M", &timeinfo);
+  if (strftime(buffer, sizeof(buffer), "%H:%M", &local_time) == 0) {
+    // Formatting failed; keep previous text.
+    return;
+  }
 
   lv_label_set_text(g_ui_label_clock, buffer);
 }
+
 
 // Dummy data: one node per RoomDef with "Room" and "Underbelly" sensors.
 // This version deliberately creates at least one instance of each "issue":
@@ -4915,8 +5017,9 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   if (argc < 2) {
-    out.println(F("usage: wifi status | wifi connect | wifi ssid <value...> | "
-                  "wifi password <value...> | wifi clear"));
+    out.println(
+        F("usage: wifi status | wifi scan | wifi connect | wifi ssid <value...> | "
+          "wifi password <value...> | wifi clear"));
     return;
   }
 
@@ -4931,30 +5034,30 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     const wl_status_t st = WiFi.status();
     const char *st_str = "UNKNOWN";
     switch (st) {
-    case WL_IDLE_STATUS:
-      st_str = "IDLE";
-      break;
-    case WL_NO_SSID_AVAIL:
-      st_str = "NO_SSID";
-      break;
-    case WL_SCAN_COMPLETED:
-      st_str = "SCAN_DONE";
-      break;
-    case WL_CONNECTED:
-      st_str = "CONNECTED";
-      break;
-    case WL_CONNECT_FAILED:
-      st_str = "CONNECT_FAILED";
-      break;
-    case WL_CONNECTION_LOST:
-      st_str = "CONNECTION_LOST";
-      break;
-    case WL_DISCONNECTED:
-      st_str = "DISCONNECTED";
-      break;
-    default:
-      st_str = "UNKNOWN";
-      break;
+      case WL_IDLE_STATUS:
+        st_str = "IDLE";
+        break;
+      case WL_NO_SSID_AVAIL:
+        st_str = "NO_SSID";
+        break;
+      case WL_SCAN_COMPLETED:
+        st_str = "SCAN_DONE";
+        break;
+      case WL_CONNECTED:
+        st_str = "CONNECTED";
+        break;
+      case WL_CONNECT_FAILED:
+        st_str = "CONNECT_FAILED";
+        break;
+      case WL_CONNECTION_LOST:
+        st_str = "CONNECTION_LOST";
+        break;
+      case WL_DISCONNECTED:
+        st_str = "DISCONNECTED";
+        break;
+      default:
+        st_str = "UNKNOWN";
+        break;
     }
     out.printf("wifi_status=%s (%d)\n", st_str, static_cast<int>(st));
 
@@ -4980,8 +5083,8 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("[WiFi] Scanning for networks..."));
 
     // synchronous scan, include hidden networks
-    const int16_t network_count = WiFi.scanNetworks(
-        /*async=*/false, /*show_hidden=*/true);
+    const int16_t network_count =
+        WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
 
     if (network_count < 0) {
       out.printf("WiFi scan failed (err=%d)\n",
@@ -5008,12 +5111,15 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
       const String bssid = WiFi.BSSIDstr(i);
       const String ssid = WiFi.SSID(i);
 
-      out.printf("%3d  %4d  %4d  %-20s  %17s  %s\n", i, static_cast<int>(rssi),
-                 static_cast<int>(channel), auth_str, bssid.c_str(),
+      out.printf("%3d  %4d  %4d  %-20s  %17s  %s\n", i,
+                 static_cast<int>(rssi),
+                 static_cast<int>(channel),
+                 auth_str,
+                 bssid.c_str(),
                  ssid.c_str());
     }
 
-    WiFi.scanDelete(); // free scan results
+    WiFi.scanDelete();  // free scan results
     return;
   }
 
@@ -5030,9 +5136,13 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
 
     SaveNetworkConfigToNVS();
 
-    // Force re-apply so the next wifi connect uses the new SSID.
+    // Force re-apply so the next Wi-Fi connection uses the new SSID.
     (void)EnsureMeshStationConfigApplied(out, /*force_reapply=*/true);
-    out.printf("wifi ssid set to \"%s\"\n", g_network_config.ssid.c_str());
+    out.printf(
+        "wifi ssid set to \"%s\"\n"
+        "[WiFi] STA credentials updated; root mesh node will connect to the "
+        "AP in the background when possible.\n",
+        g_network_config.ssid.c_str());
 
     return;
   }
@@ -5044,31 +5154,40 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
       return;
     }
 
-    // Your existing debug showed "(before save)" only; keep that explicit.
-    DumpStringHex("[CMD] PASSWORD (before save)", g_network_config.password);
+    // Existing debug
+    // DumpStringHex("[CMD] PASSWORD (before save)", g_network_config.password);
 
     g_network_config.password = new_password;
 
-    // If you want to verify that what we’re about to store matches what you
-    // typed, uncomment this:
-    DumpStringHex("[CMD] PASSWORD (after  save)", g_network_config.password);
+    // Optional verification of what we are about to store.
+    // DumpStringHex("[CMD] PASSWORD (after  save)", g_network_config.password);
 
     SaveNetworkConfigToNVS();
     (void)EnsureMeshStationConfigApplied(out, /*force_reapply=*/true);
 
-    SaveNetworkConfigToNVS();
+    // (Second SaveNetworkConfigToNVS() call was redundant; removed.)
 
-    out.println(F("wifi password set (value not echoed)"));
+    out.println(
+        F("wifi password set (value not echoed)\n"
+          "[WiFi] STA credentials updated; root mesh node will reconnect in "
+          "the background when possible."));
     return;
   }
 
   if (sub.equalsIgnoreCase("connect")) {
-    if (!EnsureWifiConnected(out)) {
-      out.println(F("wifi connect: FAILED"));
-      return;
+    // With the new non-blocking EnsureWifiConnected(), this no longer waits;
+    // it reports current status and ensures credentials are applied.
+    const bool connected_now = EnsureWifiConnected(out);
+    if (connected_now) {
+      out.println(
+          F("wifi connect: already connected; attempting immediate NTP sync."));
+      (void)SyncTimeFromNtp(out);
+    } else {
+      out.println(
+          F("wifi connect: STA credentials applied; painlessMesh will bring "
+            "the STA link up in the background when possible. Use "
+            "'wifi status' later to check the connection and local time."));
     }
-    // Try to refresh time immediately when user asks for connect.
-    (void)SyncTimeFromNtp(out);
     return;
   }
 
