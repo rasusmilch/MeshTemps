@@ -107,6 +107,7 @@
 // To understand color format of RGB LCD, see:
 // https://docs.espressif.com/projects/esp-iot-solution/en/latest/display/lcd/rgb_lcd.html#color-formats
 #define ESP_PANEL_BOARD_LCD_RGB_BOUNCE_BUF_SIZE (ESP_PANEL_BOARD_WIDTH * 10)
+// #define ESP_PANEL_BOARD_LCD_RGB_BOUNCE_BUF_SIZE 0
 // Bounce buffer size in bytes. It is used to avoid screen drift
 // for ESP32-S3. Typically set to `ESP_PANEL_BOARD_WIDTH * 10`
 // The size should satisfy `size * N = LCD_width * LCD_height`,

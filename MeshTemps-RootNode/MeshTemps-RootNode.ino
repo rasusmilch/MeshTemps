@@ -208,6 +208,10 @@ static void RoomMapLoop(uint32_t now_ms);
 static void RoomMapSetViewMode(UiViewMode mode);
 static void BellyButtonEvent(lv_event_t *e);
 static void ViewButtonEvent(lv_event_t *e);
+static void SilenceButtonEvent(lv_event_t *e);
+static void UpdateSilenceButtonAppearance();
+static void BuzzerStartTestInternal(bool use_alert_profile);
+static void BuzzerStopTestInternal();
 
 bool g_topology_persist_enabled = true;
 
@@ -220,6 +224,30 @@ constexpr uint32_t kDefaultGapAlertMs = 5000; // ms between alert beeps
 uint32_t g_beep_len_ms = kDefaultBeepLenMs;
 uint32_t g_beep_gap_warn_ms = kDefaultGapWarnMs;
 uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
+
+// Global silence / cooldown for the buzzer.
+constexpr uint32_t kDefaultBuzzerCooldownMs = 5UL * 60UL * 1000UL; // 5 min
+uint32_t g_buzzer_cooldown_ms = kDefaultBuzzerCooldownMs;
+
+enum BuzzerSilenceState : uint8_t {
+  kBuzzerSilenceIdle = 0,      // normal operation, buzzer allowed
+  kBuzzerSilenceActive = 1,    // user pressed "Silence"; current alerts suppressed
+  kBuzzerSilenceCooldown = 2,  // alerts have cleared; ignore retriggers until cooldown ends
+};
+
+BuzzerSilenceState g_buzzer_silence_state = kBuzzerSilenceIdle;
+uint32_t g_buzzer_silence_rearm_at_ms = 0;  // millis when we can re-arm (0 = not scheduled)
+
+// Runtime buzzer state (moved out of BuzzerLoop so the UI handler can touch it).
+bool g_buzzer_on = false;
+uint32_t g_buzzer_beep_start_ms = 0;
+uint32_t g_buzzer_last_beep_ms = 0;
+
+// Buzzer test mode (console-controlled).
+bool g_buzzer_test_active = false;
+// true  => use alert pattern (beep_gap_alert_ms)
+// false => use warning pattern (beep_gap_warn_ms)
+bool g_buzzer_test_use_alert_pattern = true;
 
 // Flashing (root)
 constexpr uint32_t kDefaultFlashIntervalMs =
@@ -268,11 +296,15 @@ lv_obj_t *g_ui_label_title = nullptr;
 lv_obj_t *g_ui_label_peers = nullptr;
 lv_obj_t *g_ui_label_clock = nullptr;
 lv_obj_t *g_ui_tile_container = nullptr;
+
 lv_obj_t *g_ui_button_belly = nullptr;
 lv_obj_t *g_ui_button_belly_label = nullptr;
 
 lv_obj_t *g_ui_button_map = nullptr;
 lv_obj_t *g_ui_button_map_label = nullptr;
+
+lv_obj_t *g_ui_button_silence = nullptr;
+lv_obj_t *g_ui_button_silence_label = nullptr;
 
 lv_obj_t *g_ui_ntp_icon = nullptr;
 lv_obj_t *g_ui_ntp_popup = nullptr;
@@ -1478,6 +1510,10 @@ void SaveBuzzerSettings() {
   is_successful = NvsPutULongVerified(g_root_preferences, "beep_gap_alert_ms",
                                       g_beep_gap_alert_ms) &&
                   is_successful;
+  // NEW: cooldown between alert episodes
+  is_successful = NvsPutULongVerified(g_root_preferences, "beep_cooldown_ms",
+                                      g_buzzer_cooldown_ms) &&
+                  is_successful;
 
   g_root_preferences.end();
 
@@ -1485,6 +1521,7 @@ void SaveBuzzerSettings() {
     Serial.println(F("[NVS VERIFY] SaveBuzzerSettings failed"));
   }
 }
+
 
 void LoadBuzzerSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
@@ -1494,12 +1531,16 @@ void LoadBuzzerSettings() {
       g_root_preferences.getULong("beep_gap_warn_ms", kDefaultGapWarnMs);
   const uint32_t ga =
       g_root_preferences.getULong("beep_gap_alert_ms", kDefaultGapAlertMs);
+  const uint32_t cd =
+      g_root_preferences.getULong("beep_cooldown_ms", kDefaultBuzzerCooldownMs);
   g_root_preferences.end();
 
   g_beep_len_ms = (len > 0) ? len : kDefaultBeepLenMs;
   g_beep_gap_warn_ms = gw;
   g_beep_gap_alert_ms = ga;
+  g_buzzer_cooldown_ms = cd;  // allow 0 to mean "no extra cooldown"
 }
+
 
 void SaveFlashSettings() {
   Serial.println(F("Saving Flash Interval Settings..."));
@@ -2164,14 +2205,14 @@ void DisplayInit() {
     if (lcd != nullptr) {
       lcd->configFrameBufferNumber(LVGL_PORT_DISP_BUFFER_NUM);
 
-      // #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
-      //       auto *bus = lcd->getBus();
-      //       if (bus != nullptr &&
-      //           bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
-      //         static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(
-      //             lcd->getFrameWidth() * 20);
-      //       }
-      // #endif
+      #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
+            auto *bus = lcd->getBus();
+            if (bus != nullptr &&
+                bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
+              static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(
+                  lcd->getFrameWidth() * 10);
+            }
+      #endif
     }
   }
 #endif // LVGL_PORT_AVOID_TEARING_MODE
@@ -2220,6 +2261,29 @@ static void GuiUpdateNtpStatusIcon() {
   }
 }
 
+static void UpdateSilenceButtonAppearance() {
+  if (g_ui_button_silence == nullptr) {
+    return;
+  }
+
+  const bool silenced =
+      (g_buzzer_silence_state == kBuzzerSilenceActive ||
+       g_buzzer_silence_state == kBuzzerSilenceCooldown);
+
+  // Neutral dark when idle, red when silenced/cooldown.
+  lv_color_t bg_color =
+      silenced ? lv_color_make(0xC0, 0x20, 0x20)   // red
+               : lv_color_make(0x40, 0x40, 0x40);  // dark gray
+
+  lv_obj_set_style_bg_color(g_ui_button_silence, bg_color, 0);
+  lv_obj_set_style_bg_opa(g_ui_button_silence, LV_OPA_COVER, 0);
+
+  if (g_ui_button_silence_label != nullptr) {
+    lv_obj_set_style_text_color(g_ui_button_silence_label,
+                                lv_color_white(), 0);
+  }
+}
+
 void GuiInit() {
   if (!lvgl_port_lock(-1)) {
     return;
@@ -2250,17 +2314,39 @@ void GuiInit() {
   lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scrollbar_mode(bar, LV_SCROLLBAR_MODE_OFF);
 
+  // Peers label
   g_ui_label_peers = lv_label_create(bar);
   lv_label_set_text(g_ui_label_peers, "Peers: 0");
   lv_obj_align(g_ui_label_peers, LV_ALIGN_LEFT_MID, 4, 0);
 
+  // Room Temps label
   g_ui_label_title = lv_label_create(bar);
   lv_label_set_text(g_ui_label_title, "Room Temps");
   lv_obj_align(g_ui_label_title, LV_ALIGN_CENTER, 0, 0);
 
+  // Clock
   g_ui_label_clock = lv_label_create(bar);
   lv_label_set_text(g_ui_label_clock, "--:--"); // was "0:00"
   lv_obj_align(g_ui_label_clock, LV_ALIGN_RIGHT_MID, -4, 0);
+
+  // NTP status icon near the clock.
+  g_ui_ntp_icon = lv_label_create(bar);
+  lv_label_set_text(g_ui_ntp_icon, LV_SYMBOL_CLOSE); // "no valid sync yet"
+  lv_obj_align(g_ui_ntp_icon, LV_ALIGN_LEFT_MID, 80, 0);
+
+  // Small button to silence alarms
+  g_ui_button_silence = lv_btn_create(bar);
+  lv_obj_set_size(g_ui_button_silence, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_align(g_ui_button_silence, LV_ALIGN_LEFT_MID, 110, 0);
+  lv_obj_add_event_cb(g_ui_button_silence, SilenceButtonEvent, LV_EVENT_CLICKED,
+                      nullptr);
+
+  g_ui_button_silence_label = lv_label_create(g_ui_button_silence);
+  lv_label_set_text(g_ui_button_silence_label, "Silence");
+  lv_obj_center(g_ui_button_silence_label);
+
+    // Ensure initial visual state matches "not silenced".
+  UpdateSilenceButtonAppearance();
 
   // Small button to toggle Room / Underbelly view for the map.
   g_ui_button_belly = lv_btn_create(bar);
@@ -2284,17 +2370,12 @@ void GuiInit() {
   lv_label_set_text(g_ui_button_map_label, "Tiles");
   lv_obj_center(g_ui_button_map_label);
 
-  // NTP status icon near the clock.
-  g_ui_ntp_icon = lv_label_create(bar);
-  lv_label_set_text(g_ui_ntp_icon, LV_SYMBOL_CLOSE); // "no valid sync yet"
-  lv_obj_align(g_ui_ntp_icon, LV_ALIGN_LEFT_MID, 80, 0);
-
   // Prominent popup "card" for "syncing" state (hidden by default).
   g_ui_ntp_popup = lv_obj_create(screen);
 
   // Size: wide box across most of the screen width, auto height.
   lv_obj_set_width(g_ui_ntp_popup, lv_pct(80));
-  lv_obj_set_height(g_ui_ntp_popup, LV_SIZE_CONTENT);
+  lv_obj_set_height(g_ui_ntp_popup, lv_pct(50));
 
   // Subtle light blue background.
   lv_obj_set_style_bg_color(g_ui_ntp_popup,
@@ -3624,6 +3705,53 @@ static void RoomMapSetViewMode(UiViewMode mode) {
   g_values_dirty = true;
 }
 
+static void SilenceButtonEvent(lv_event_t *e) {
+  (void)e;
+
+  // If we're in console-driven test mode, treat "Silence" as
+  // "stop the test now", even if there are no real alerts/warnings.
+  if (g_buzzer_test_active) {
+    BuzzerStopTestInternal();
+
+    // No need to touch the silence state machine here; this was only a test.
+    // Just ensure the buzzer is off and the button appearance is up to date.
+    digitalWrite(kBuzzerPin, LOW);
+    g_buzzer_on = false;
+    g_buzzer_beep_start_ms = 0;
+    g_buzzer_last_beep_ms = 0;
+
+    UpdateSilenceButtonAppearance();
+    return;
+  }
+
+  // --- Existing behaviour for real alerts/warnings -------------------------
+
+  // Do nothing if already in a silenced / cooldown state.
+  if (g_buzzer_silence_state != kBuzzerSilenceIdle) {
+    return;
+  }
+
+  // Only makes sense to silence if something is actually alarming or warning.
+  if (!g_any_alert && !g_any_warning) {
+    return;
+  }
+
+  // Enter "active silence" for the current alert episode.
+  g_buzzer_silence_state = kBuzzerSilenceActive;
+  g_buzzer_silence_rearm_at_ms = 0;
+
+  // Immediately force the buzzer off and reset its timing.
+  digitalWrite(kBuzzerPin, LOW);
+  g_buzzer_on = false;
+  g_buzzer_beep_start_ms = 0;
+  g_buzzer_last_beep_ms = 0;
+
+  // Turn the button red.
+  UpdateSilenceButtonAppearance();
+}
+
+
+
 static void BellyButtonEvent(lv_event_t *e) {
   (void)e;
   g_map_use_underbelly = !g_map_use_underbelly;
@@ -3716,51 +3844,151 @@ void DisplayLoop() {
 
   UpdateUptimeLabel();
   GuiUpdateNtpStatusIcon();
+
+  UpdateSilenceButtonAppearance();
+  
   lvgl_port_unlock();
 }
 
-void BuzzerLoop() {
-  // Static state so we can be called every loop() tick.
-  static bool buzzer_on = false;
-  static uint32_t beep_start_ms = 0;
-  static uint32_t last_beep_ms = 0;
+// Start console-driven buzzer test mode.
+static void BuzzerStartTestInternal(bool use_alert_profile) {
+  g_buzzer_test_use_alert_pattern = use_alert_profile;
+  g_buzzer_test_active = true;
 
-  const uint32_t now_ms = millis();
+  // Test should not be blocked by any prior silence/cooldown state.
+  g_buzzer_silence_state = kBuzzerSilenceIdle;
+  g_buzzer_silence_rearm_at_ms = 0;
 
-  // Priority: ALERT > WARNING (warning includes stale/etc via g_any_warning).
-  const bool have_alert = g_any_alert;
-  const bool have_warning = (!have_alert && g_any_warning);
+  // Reset scheduler so the first test beep comes quickly.
+  digitalWrite(kBuzzerPin, LOW);
+  g_buzzer_on = false;
+  g_buzzer_beep_start_ms = 0;
+  g_buzzer_last_beep_ms = 0;
 
-  uint32_t gap_ms = 0;
-  if (have_alert) {
-    gap_ms = g_beep_gap_alert_ms;
-  } else if (have_warning) {
-    gap_ms = g_beep_gap_warn_ms;
-  }
+  DLOG("[BUZZER] Test mode ON (%s pattern)\n",
+       use_alert_profile ? "alert" : "warn");
+}
 
-  // If no conditions or disabled, ensure buzzer is off and reset schedule.
-  if ((!have_alert && !have_warning) || gap_ms == 0 || g_beep_len_ms == 0) {
-    if (buzzer_on) {
-      digitalWrite(kBuzzerPin, LOW);
-      buzzer_on = false;
-    }
-    last_beep_ms = 0;
+static void BuzzerStopTestInternal() {
+  if (!g_buzzer_test_active) {
     return;
   }
 
-  if (buzzer_on) {
-    // Turn off after configured beep length.
-    if (now_ms - beep_start_ms >= g_beep_len_ms) {
+  g_buzzer_test_active = false;
+  digitalWrite(kBuzzerPin, LOW);
+  g_buzzer_on = false;
+  g_buzzer_beep_start_ms = 0;
+  g_buzzer_last_beep_ms = 0;
+
+  DLOG("[BUZZER] Test mode OFF\n");
+}
+
+void BuzzerLoop() {
+  const uint32_t now_ms = millis();
+
+  // Real alert/warning state from the tile/map logic.
+  const bool any_real_active = (g_any_alert || g_any_warning);
+
+  // --- Silence / cooldown state machine (real alerts only) ------------------
+  switch (g_buzzer_silence_state) {
+  case kBuzzerSilenceIdle:
+    // Normal operation; nothing special.
+    break;
+
+  case kBuzzerSilenceActive:
+    // User has pressed "Silence" for the current episode.
+    // Stay here while there are active alerts/warnings.
+    if (!any_real_active) {
+      // Alerts cleared → start cooldown timer.
+      g_buzzer_silence_state = kBuzzerSilenceCooldown;
+      g_buzzer_silence_rearm_at_ms = now_ms + g_buzzer_cooldown_ms;
+    }
+    break;
+
+  case kBuzzerSilenceCooldown:
+    // Ignore any new alerts until both:
+    //   - cooldown has expired, AND
+    //   - there are no active alerts/warnings.
+    if (!any_real_active && g_buzzer_silence_rearm_at_ms != 0U &&
+        now_ms >= g_buzzer_silence_rearm_at_ms) {
+      g_buzzer_silence_state = kBuzzerSilenceIdle;
+      g_buzzer_silence_rearm_at_ms = 0;
+    }
+    break;
+  }
+
+  const bool silence_in_effect =
+      (g_buzzer_silence_state == kBuzzerSilenceActive ||
+       g_buzzer_silence_state == kBuzzerSilenceCooldown);
+
+  // If a real alert episode is active (and not silenced), it owns the buzzer
+  // and cancels any console-driven test.
+  if (any_real_active && !silence_in_effect && g_buzzer_test_active) {
+    DLOG("[BUZZER] Real alert active; cancelling test mode\n");
+    BuzzerStopTestInternal();
+  }
+
+  // Decide what *pattern* should drive the buzzer right now.
+  bool beep_should_run = false;
+  uint32_t gap_ms = 0;
+
+  // 1) Real alert/warning pattern (highest priority).
+  if (any_real_active && !silence_in_effect) {
+    bool use_alert_profile = g_any_alert;
+    bool use_warn_profile = (!use_alert_profile && g_any_warning);
+
+    if (use_alert_profile) {
+      beep_should_run = true;
+      gap_ms = g_beep_gap_alert_ms;
+    } else if (use_warn_profile) {
+      beep_should_run = true;
+      gap_ms = g_beep_gap_warn_ms;
+    }
+  }
+
+  // 2) If no real alert is currently driving the buzzer, allow test mode.
+  if (!beep_should_run && g_buzzer_test_active) {
+    beep_should_run = true;
+    gap_ms = g_buzzer_test_use_alert_pattern ? g_beep_gap_alert_ms
+                                             : g_beep_gap_warn_ms;
+  }
+
+  const bool beep_disabled =
+      (!beep_should_run || gap_ms == 0 || g_beep_len_ms == 0);
+
+  // If there is nothing to beep about, or it's disabled, ensure the buzzer
+  // is off and reset scheduling appropriately.
+  if (beep_disabled) {
+    if (g_buzzer_on) {
       digitalWrite(kBuzzerPin, LOW);
-      buzzer_on = false;
-      last_beep_ms = now_ms;
+      g_buzzer_on = false;
+    }
+
+    // For real-alert episodes, reset schedule when they're inactive or silenced
+    // so the next re-armed episode starts cleanly. Test mode handles its own
+    // reset via BuzzerStartTestInternal().
+    if (!any_real_active || silence_in_effect) {
+      g_buzzer_last_beep_ms = 0;
+    }
+    return;
+  }
+
+  // --- Normal beep scheduling (shared for real + test) ----------------------
+
+  if (g_buzzer_on) {
+    // Turn off after configured beep length.
+    if (now_ms - g_buzzer_beep_start_ms >= g_beep_len_ms) {
+      digitalWrite(kBuzzerPin, LOW);
+      g_buzzer_on = false;
+      g_buzzer_last_beep_ms = now_ms;
     }
   } else {
-    // Start a beep if it's the first one or the gap has elapsed.
-    if (last_beep_ms == 0 || now_ms - last_beep_ms >= gap_ms) {
+    // Start a beep if it's the first one, or the gap has elapsed.
+    if (g_buzzer_last_beep_ms == 0U ||
+        now_ms - g_buzzer_last_beep_ms >= gap_ms) {
       digitalWrite(kBuzzerPin, HIGH);
-      buzzer_on = true;
-      beep_start_ms = now_ms;
+      g_buzzer_on = true;
+      g_buzzer_beep_start_ms = now_ms;
     }
   }
 }
@@ -4563,30 +4791,242 @@ static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ERR topo (type just 'topo' for help)"));
 }
 
+static bool ParseMsArgument(const String &arg, uint32_t *out_ms, Print &out) {
+  if (out_ms == nullptr) {
+    return false;
+  }
+
+  const char *cstr = arg.c_str();
+  char *end = nullptr;
+  unsigned long value = strtoul(cstr, &end, 10);
+  if (end == cstr) {
+    out.printf("ERR: \"%s\" is not a valid integer\n", cstr);
+    return false;
+  }
+  if (value > 3600000UL) { // clamp: 1 hour max
+    out.println(F("ERR: value too large (max 3600000 ms)"));
+    return false;
+  }
+
+  *out_ms = static_cast<uint32_t>(value);
+  return true;
+}
+
 static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
 
-  if (argc < 4) {
-    out.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> "
-                  "<alert_gap_ms>, gaps>=0)"));
+  // No args or "status" -> show current settings/state.
+  if (argc == 1 || (argc >= 2 && argv[1].equalsIgnoreCase("status"))) {
+    out.printf("buzzer settings:\n");
+    out.printf("  len       : %lu ms\n",
+               static_cast<unsigned long>(g_beep_len_ms));
+    out.printf("  warn_gap  : %lu ms\n",
+               static_cast<unsigned long>(g_beep_gap_warn_ms));
+    out.printf("  alert_gap : %lu ms\n",
+               static_cast<unsigned long>(g_beep_gap_alert_ms));
+    out.printf("  cooldown  : %lu ms\n",
+               static_cast<unsigned long>(g_buzzer_cooldown_ms));
+
+    const char *silence_str = "idle";
+    switch (g_buzzer_silence_state) {
+    case kBuzzerSilenceIdle:
+      silence_str = "idle";
+      break;
+    case kBuzzerSilenceActive:
+      silence_str = "active";
+      break;
+    case kBuzzerSilenceCooldown:
+      silence_str = "cooldown";
+      break;
+    }
+
+    out.printf("buzzer state:\n");
+    out.printf("  alerts    : %s (warn=%s)\n",
+               g_any_alert ? "YES" : "no",
+               g_any_warning ? "YES" : "no");
+    out.printf("  silence   : %s\n", silence_str);
+    out.printf("  test_mode : %s (%s pattern)\n",
+               g_buzzer_test_active ? "ON" : "off",
+               g_buzzer_test_use_alert_pattern ? "alert" : "warn");
     return;
   }
-  long len_ms = argv[1].toInt();
-  long gap_warn_ms = argv[2].toInt();
-  long gap_alert_ms = argv[3].toInt();
-  if (len_ms <= 0 || gap_warn_ms < 0 || gap_alert_ms < 0) {
-    out.println(F("ERR buzzer (use: buzzer <len_ms> <warn_gap_ms> "
-                  "<alert_gap_ms>, gaps>=0)"));
+
+  const String sub = argv[1];
+
+  // -------------------------------------------------------------------------
+  // Set beep length:  buzzer len <ms>
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("len") || sub.equalsIgnoreCase("length")) {
+    if (argc < 3) {
+      out.println(F("ERR: usage: buzzer len <ms>"));
+      return;
+    }
+    uint32_t ms = 0;
+    if (!ParseMsArgument(argv[2], &ms, out)) {
+      return;
+    }
+    g_beep_len_ms = ms;
+    SaveBuzzerSettings();
+    out.printf("buzzer len set to %lu ms\n", static_cast<unsigned long>(ms));
     return;
   }
-  g_beep_len_ms = (uint32_t)len_ms;
-  g_beep_gap_warn_ms = (uint32_t)gap_warn_ms;
-  g_beep_gap_alert_ms = (uint32_t)gap_alert_ms;
-  SaveBuzzerSettings();
-  out.printf("buzzer len=%lu ms warn_gap=%lu ms alert_gap=%lu ms\n",
-             (unsigned long)g_beep_len_ms, (unsigned long)g_beep_gap_warn_ms,
-             (unsigned long)g_beep_gap_alert_ms);
+
+  // -------------------------------------------------------------------------
+  // Set warning gap:  buzzer warn <ms>
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("warn") || sub.equalsIgnoreCase("warn_gap")) {
+    if (argc < 3) {
+      out.println(F("ERR: usage: buzzer warn <ms>"));
+      return;
+    }
+    uint32_t ms = 0;
+    if (!ParseMsArgument(argv[2], &ms, out)) {
+      return;
+    }
+    g_beep_gap_warn_ms = ms;
+    SaveBuzzerSettings();
+    out.printf("buzzer warn_gap set to %lu ms\n",
+               static_cast<unsigned long>(ms));
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Set alert gap:  buzzer alert <ms>
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("alert") || sub.equalsIgnoreCase("alert_gap")) {
+    if (argc < 3) {
+      out.println(F("ERR: usage: buzzer alert <ms>"));
+      return;
+    }
+    uint32_t ms = 0;
+    if (!ParseMsArgument(argv[2], &ms, out)) {
+      return;
+    }
+    g_beep_gap_alert_ms = ms;
+    SaveBuzzerSettings();
+    out.printf("buzzer alert_gap set to %lu ms\n",
+               static_cast<unsigned long>(ms));
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Set cooldown:  buzzer cooldown <ms>
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("cooldown") || sub.equalsIgnoreCase("cd")) {
+    if (argc < 3) {
+      out.println(F("ERR: usage: buzzer cooldown <ms>"));
+      return;
+    }
+    uint32_t ms = 0;
+    if (!ParseMsArgument(argv[2], &ms, out)) {
+      return;
+    }
+    // Allow 0 to mean "no extra cooldown".
+    g_buzzer_cooldown_ms = ms;
+    SaveBuzzerSettings();
+    out.printf("buzzer cooldown set to %lu ms\n",
+               static_cast<unsigned long>(ms));
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Test mode:  buzzer test [alert|warn|off]
+  //   - uses beep_len_ms and the configured gaps
+  //   - runs until "buzzer test off" or "buzzer stop"
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("test")) {
+    if (argc == 2) {
+      // Default: alert pattern test.
+      BuzzerStartTestInternal(/*use_alert_profile=*/true);
+      out.println(F("buzzer test: ON (alert pattern)"));
+      return;
+    }
+
+    const String mode = argv[2];
+    if (mode.equalsIgnoreCase("off") || mode.equalsIgnoreCase("stop")) {
+      BuzzerStopTestInternal();
+      out.println(F("buzzer test: OFF"));
+      return;
+    }
+
+    if (mode.equalsIgnoreCase("alert") || mode.equalsIgnoreCase("high")) {
+      BuzzerStartTestInternal(/*use_alert_profile=*/true);
+      out.println(F("buzzer test: ON (alert pattern)"));
+      return;
+    }
+
+    if (mode.equalsIgnoreCase("warn") || mode.equalsIgnoreCase("low")) {
+      BuzzerStartTestInternal(/*use_alert_profile=*/false);
+      out.println(F("buzzer test: ON (warn pattern)"));
+      return;
+    }
+
+    out.println(
+        F("ERR: usage: buzzer test [alert|warn|off] (default is alert)"));
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Silence:  buzzer silence
+  //   Same semantics as pressing the on-screen Silence button:
+  //   - only works if a real alert/warning is active
+  //   - starts a silence/cooldown episode
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("silence")) {
+    if (g_buzzer_silence_state != kBuzzerSilenceIdle) {
+      out.println(F("buzzer: already silenced / in cooldown"));
+      return;
+    }
+    if (!g_any_alert && !g_any_warning) {
+      out.println(F("buzzer: no active alerts/warnings to silence"));
+      return;
+    }
+
+    g_buzzer_silence_state = kBuzzerSilenceActive;
+    g_buzzer_silence_rearm_at_ms = 0;
+
+    digitalWrite(kBuzzerPin, LOW);
+    g_buzzer_on = false;
+    g_buzzer_beep_start_ms = 0;
+    g_buzzer_last_beep_ms = 0;
+
+    out.println(
+        F("buzzer: silence ACTIVE (will auto re-arm after alerts clear + "
+          "cooldown)"));
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Hard stop:  buzzer stop
+  //   - turn off test mode (if any)
+  //   - force buzzer output low and clear timing
+  //   (does NOT alter silence/cooldown state)
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("stop")) {
+    BuzzerStopTestInternal();
+    digitalWrite(kBuzzerPin, LOW);
+    g_buzzer_on = false;
+    g_buzzer_beep_start_ms = 0;
+    g_buzzer_last_beep_ms = 0;
+
+    out.println(F("buzzer: STOP (test off, output low)"));
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Fallback: print usage
+  // -------------------------------------------------------------------------
+  out.println(F("buzzer usage:"));
+  out.println(F("  buzzer                     - show settings/state"));
+  out.println(F("  buzzer len <ms>           - set beep length"));
+  out.println(F("  buzzer warn <ms>          - set warning gap"));
+  out.println(F("  buzzer alert <ms>         - set alert gap"));
+  out.println(F("  buzzer cooldown <ms>      - set cooldown between episodes"));
+  out.println(F("  buzzer test [alert|warn|off]"));
+  out.println(F("                            - start/stop buzzer test pattern"));
+  out.println(F("  buzzer silence            - same as GUI Silence button"));
+  out.println(F("  buzzer stop               - stop test and force buzzer off"));
 }
 
 static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
@@ -5753,6 +6193,14 @@ void setup() {
   Serial.begin(DBG_BAUD);
   delay(200);
 
+  #ifdef ESP_ARDUINO_VERSION_STR
+    Serial.printf("ESP32 Arduino core version: %s\n", ESP_ARDUINO_VERSION_STR);
+  #else
+    Serial.println("ESP32 Arduino core version macro not defined (likely core < 3.x).");
+  #endif
+
+  Serial.printf("ESP-IDF version        : %s\n", esp_get_idf_version());
+
   RootInitStorage();
 
   DisplayInit();
@@ -5784,7 +6232,7 @@ void setup() {
   g_console.RegisterCommand("limits", &CmdLimits,
                             "limits show | warn <lo> <hi> | alert <lo> <hi>");
   g_console.RegisterCommand("buzzer", &CmdBuzzer,
-                            "buzzer <len_ms> <warn_gap_ms> <alert_gap_ms>");
+                            "buzzer len | warn | alert | cooldown | test | silence | stop");
   g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");
   g_console.RegisterCommand("order", &CmdOrder, "sensor global order");
   g_console.RegisterCommand("norder", &CmdNorder, "tile order");
