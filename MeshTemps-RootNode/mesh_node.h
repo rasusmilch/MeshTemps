@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <time.h>
 #include <vector>
 #include <limits>
 
@@ -19,7 +20,11 @@ class MeshNode {
  public:
   // One time-series sample for a single sensor.
   struct SensorHistorySample {
-    uint32_t timestamp_ms;  // monotonic millis() at time of sample
+    // Timestamp interpretation depends on |has_epoch|:
+    //   - has_epoch==false: timestamp_ms stores millis() since boot
+    //   - has_epoch==true : timestamp_ms stores epoch seconds
+    uint32_t timestamp_ms;
+    bool has_epoch;
     float temp_c;
     bool has_value;
     bool corrected;
@@ -181,6 +186,13 @@ class MeshNode {
   // retention_days is used to size the per-sensor ring buffer.
   static void SetHistoryConfig(uint32_t interval_ms, uint32_t retention_days);
 
+  // Called once after the first successful time sync (e.g., SNTP).
+  //
+  // Stores the mapping between millis() and epoch, and back-fills any
+  // existing SensorHistorySample entries that were logged before the sync
+  // so they gain epoch timestamps.
+  static void OnFirstTimeSync(time_t epoch_now, uint32_t now_ms);
+
   static uint32_t history_interval_ms() { return history_interval_ms_; }
   static uint32_t history_retention_days() { return history_retention_days_; }
   static size_t history_capacity_per_sensor() {
@@ -235,7 +247,13 @@ class MeshNode {
 
   // Internal helpers.
   static size_t ComputeHistoryCapacityPerSensor();
+  static time_t ComputeEpochFromMillis(uint32_t timestamp_ms);
   void MaybeLogHistorySample(uint32_t now_ms);
+
+  // Mapping from millis() -> epoch captured at first time sync.
+  static bool has_time_sync_;
+  static time_t first_sync_epoch_;
+  static uint32_t first_sync_ms_;
 };
 
 // ---------------------------------------------------------------------------
