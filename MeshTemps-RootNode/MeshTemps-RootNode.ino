@@ -364,6 +364,14 @@ static volatile bool g_ntp_cb_pending = false;
 // Epoch at last SNTP sync (UTC seconds since 1970).
 static volatile time_t g_ntp_last_sync_epoch = 0;
 
+// History / time-mapping: track whether we've already back-filled
+// MeshNode history using the first valid NTP fix.
+static bool g_history_time_backfilled = false;
+
+// Forward declaration; implemented below.
+static void OnFirstNtpTimeSync(time_t epoch_now, uint32_t now_ms);
+
+
 // Per-node alert/warning mute under g_labels["mute"][nodeId]:
 // bit0 = LOW side muted; bit1 = HIGH side muted.
 enum NodeMuteMask : uint8_t {
@@ -931,7 +939,42 @@ static void RootInitNetwork() {
   g_last_ntp_attempt_ms = millis();
 }
 
-// Periodic NTP resync – call from loop().
+// Called exactly once on the first successful NTP sync.
+// epoch_now:   Unix epoch (seconds since 1970) at "now_ms".
+// now_ms:      root millis() when we process the sync.
+static void OnFirstNtpTimeSync(time_t epoch_now, uint32_t now_ms) {
+  if (g_history_time_backfilled) {
+    return;
+  }
+
+  if (epoch_now <= 0) {
+    Serial.println(F("[HIST] OnFirstNtpTimeSync: invalid epoch, skipping"));
+    return;
+  }
+
+  if (now_ms == 0U) {
+    // Extremely early in boot; just wait for the next sync instead.
+    Serial.println(F("[HIST] OnFirstNtpTimeSync: now_ms=0, skipping"));
+    return;
+  }
+
+  Serial.printf(
+      "[HIST] First NTP sync: epoch_now=%ld now_ms=%lu; backdating history.\n",
+      static_cast<long>(epoch_now),
+      static_cast<unsigned long>(now_ms));
+
+  // Hand off to MeshNode:
+  //  - store the mapping epoch_now <-> now_ms, and
+  //  - back-fill any existing HistorySample entries that only have
+  //    ms-since-boot timestamps.
+  //
+  // You will add this static method in mesh_node.{h,cpp}.
+  MeshNode::OnFirstTimeSync(epoch_now, now_ms);
+
+  g_history_time_backfilled = true;
+}
+
+
 // Periodic NTP resync – call from loop(). Non-blocking.
 static void NtpLoop() {
   const uint32_t now_ms = millis();
@@ -963,6 +1006,12 @@ static void NtpLoop() {
       Serial.printf("[NTP] Time synced: %s\n", buf);
     } else {
       Serial.println(F("[NTP] Time sync callback, but getLocalTime() failed"));
+    }
+
+    // Once we have a valid epoch and a millis() reference, back-date
+    // all existing history samples that only have ms-since-boot timestamps.
+    if (t > 0 && !g_history_time_backfilled) {
+      OnFirstNtpTimeSync(t, now_ms);
     }
   }
 
