@@ -5962,15 +5962,14 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       if (sample.has_epoch) {
         struct tm tm_buf;
         char time_buf[32];
-        const time_t sample_epoch = static_cast<time_t>(sample_ts);
-        if (localtime_r(&sample_epoch, &tm_buf) != nullptr &&
+        if (localtime_r(&sample.timestamp_epoch, &tm_buf) != nullptr &&
             strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S",
                      &tm_buf) != 0) {
           out.print(F(" @ "));
           out.print(time_buf);
         } else {
           out.print(F(" @ epoch="));
-          out.print(static_cast<long>(sample_epoch));
+          out.print(static_cast<long>(sample.timestamp_epoch));
         }
       }
 

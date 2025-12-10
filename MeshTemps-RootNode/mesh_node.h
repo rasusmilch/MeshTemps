@@ -20,11 +20,9 @@ class MeshNode {
  public:
   // One time-series sample for a single sensor.
   struct SensorHistorySample {
-    // Timestamp interpretation depends on |has_epoch|:
-    //   - has_epoch==false: timestamp_ms stores millis() since boot
-    //   - has_epoch==true : timestamp_ms stores epoch seconds
-    uint32_t timestamp_ms;
-    bool has_epoch;
+    uint32_t timestamp_ms;  // monotonic millis() at time of sample
+    time_t timestamp_epoch; // optional wall-clock time at sample
+    bool has_epoch;         // true if timestamp_epoch is valid
     float temp_c;
     bool has_value;
     bool corrected;

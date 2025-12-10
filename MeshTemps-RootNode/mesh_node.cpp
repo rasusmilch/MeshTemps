@@ -85,17 +85,15 @@ void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
 
     SensorHistorySample sample;
     sample.timestamp_ms = now_ms;
+    sample.timestamp_epoch = 0;
     sample.has_epoch = false;
     sample.temp_c = sensor.temp_c;
     sample.has_value = sensor.has_value;
     sample.corrected = sensor.corrected;
 
     if (has_time_sync_) {
-      const time_t epoch = ComputeEpochFromMillis(now_ms);
-      if (epoch > 0) {
-        sample.timestamp_ms = static_cast<uint32_t>(epoch);
-        sample.has_epoch = true;
-      }
+      sample.timestamp_epoch = ComputeEpochFromMillis(now_ms);
+      sample.has_epoch = true;
     }
 
     // Write to ring buffer at head_index.
@@ -479,22 +477,15 @@ void MeshNode::OnFirstTimeSync(time_t epoch_now, uint32_t now_ms) {
           continue;
         }
 
-        const uint32_t original_ms = sample.timestamp_ms;
-
-        const time_t epoch = ComputeEpochFromMillis(original_ms);
-        if (epoch <= 0) {
-          continue;
-        }
-
-        sample.timestamp_ms = static_cast<uint32_t>(epoch);
+        sample.timestamp_epoch = ComputeEpochFromMillis(sample.timestamp_ms);
         sample.has_epoch = true;
         ++backfilled_samples;
 
         if (example_ms == 0U) {
           example_node_id = node.node_id_;
           example_addr = sensor.address;
-          example_ms = original_ms;
-          example_epoch = sample.timestamp_ms;
+          example_ms = sample.timestamp_ms;
+          example_epoch = sample.timestamp_epoch;
         }
       }
     }
