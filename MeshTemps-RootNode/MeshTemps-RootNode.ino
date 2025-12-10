@@ -967,8 +967,6 @@ static void OnFirstNtpTimeSync(time_t epoch_now, uint32_t now_ms) {
   //  - store the mapping epoch_now <-> now_ms, and
   //  - back-fill any existing HistorySample entries that only have
   //    ms-since-boot timestamps.
-  //
-  // You will add this static method in mesh_node.{h,cpp}.
   MeshNode::OnFirstTimeSync(epoch_now, now_ms);
 
   g_history_time_backfilled = true;
@@ -5944,7 +5942,23 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       out.print(static_cast<unsigned long>(sample_ts));
       out.print(F(" (age="));
       out.print(static_cast<unsigned long>(age_s));
-      out.print(F(" s) temp="));
+      out.print(F(" s)"));
+
+      if (sample.has_epoch) {
+        struct tm tm_buf;
+        char time_buf[32];
+        if (localtime_r(&sample.timestamp_epoch, &tm_buf) != nullptr &&
+            strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S",
+                     &tm_buf) != 0) {
+          out.print(F(" @ "));
+          out.print(time_buf);
+        } else {
+          out.print(F(" @ epoch="));
+          out.print(static_cast<long>(sample.timestamp_epoch));
+        }
+      }
+
+      out.print(F(" temp="));
       out.print(sample.temp_c, 3);
       out.print(F(" C"));
 
