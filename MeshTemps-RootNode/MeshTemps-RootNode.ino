@@ -4523,6 +4523,8 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
   // Extended debug: "debug nodes" prints per-node age and sequence health.
   if (argc >= 2 && argv[1] == "nodes") {
     const uint32_t now_ms = millis();
+    const time_t now_epoch = time(nullptr);
+    const time_t now_epoch = time(nullptr);
 
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
     if (ids.empty()) {
@@ -5915,6 +5917,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     const uint32_t now_ms = millis();
+    const time_t now_epoch = time(nullptr);
     const size_t total = samples.size();
     const size_t start_index =
         (total > max_samples) ? (total - max_samples) : 0U;
@@ -5933,12 +5936,24 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     for (size_t i = start_index; i < total; ++i) {
       const MeshNode::SensorHistorySample &sample = samples[i];
       const uint32_t sample_ts = sample.timestamp_ms;
-      const uint32_t age_s =
-          (now_ms >= sample_ts) ? ((now_ms - sample_ts) / 1000U) : 0U;
+      uint32_t age_s = 0U;
+
+      if (sample.has_epoch && now_epoch > 0) {
+        const time_t sample_epoch = static_cast<time_t>(sample_ts);
+        age_s = (now_epoch >= sample_epoch)
+                    ? static_cast<uint32_t>(now_epoch - sample_epoch)
+                    : 0U;
+      } else if (!sample.has_epoch && now_ms >= sample_ts) {
+        age_s = (now_ms - sample_ts) / 1000U;
+      }
 
       out.print(F("  #"));
       out.print(static_cast<unsigned long>(i));
-      out.print(F(": t_ms="));
+      if (sample.has_epoch) {
+        out.print(F(": t_epoch="));
+      } else {
+        out.print(F(": t_ms="));
+      }
       out.print(static_cast<unsigned long>(sample_ts));
       out.print(F(" (age="));
       out.print(static_cast<unsigned long>(age_s));
