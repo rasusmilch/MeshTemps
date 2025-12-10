@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <map>
+#include <limits>
+#include <time.h>
 
 MeshNode::MeshNode(uint32_t node_id)
     : node_id_(node_id),
@@ -83,9 +85,16 @@ void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
 
     SensorHistorySample sample;
     sample.timestamp_ms = now_ms;
+    sample.timestamp_epoch = 0;
+    sample.has_epoch = false;
     sample.temp_c = sensor.temp_c;
     sample.has_value = sensor.has_value;
     sample.corrected = sensor.corrected;
+
+    if (has_time_sync_) {
+      sample.timestamp_epoch = ComputeEpochFromMillis(now_ms);
+      sample.has_epoch = true;
+    }
 
     // Write to ring buffer at head_index.
     sensor.history[sensor.history_head_index] = sample;
@@ -98,6 +107,36 @@ void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
   }
 
   last_history_log_ms_ = now_ms;
+}
+
+time_t MeshNode::ComputeEpochFromMillis(uint32_t timestamp_ms) {
+  if (!has_time_sync_) {
+    return 0;
+  }
+
+  const uint32_t reference_ms = first_sync_ms_;
+  int64_t delta_ms = 0;
+
+  if (timestamp_ms >= reference_ms) {
+    delta_ms = static_cast<int64_t>(timestamp_ms - reference_ms);
+  } else {
+    const uint32_t backward_ms = reference_ms - timestamp_ms;
+
+    if (backward_ms > (std::numeric_limits<uint32_t>::max() / 2U)) {
+      // millis() rolled over; add the wrapped range instead of producing a
+      // massive negative offset that would push epochs far into the past.
+      delta_ms = static_cast<int64_t>(timestamp_ms) +
+                 (static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) +
+                  1LL - static_cast<int64_t>(reference_ms));
+    } else {
+      // Normal case for backfilling samples captured before the time sync.
+      delta_ms = -static_cast<int64_t>(backward_ms);
+    }
+  }
+
+  const time_t epoch =
+      first_sync_epoch_ + static_cast<time_t>(delta_ms / 1000LL);
+  return epoch;
 }
 
 String MeshNode::FormatNodeKeyHex(uint32_t node_id) {
@@ -400,12 +439,100 @@ std::map<uint32_t, MeshNode> g_mesh_nodes;
 
 }  // namespace
 
+// static
+void MeshNode::OnFirstTimeSync(time_t epoch_now, uint32_t now_ms) {
+  if (epoch_now <= 0 || now_ms == 0U) {
+    return;
+  }
+
+  first_sync_epoch_ = epoch_now;
+  first_sync_ms_ = now_ms;
+  has_time_sync_ = true;
+
+  size_t backfilled_samples = 0U;
+  size_t touched_sensors = 0U;
+
+  uint32_t example_node_id = 0U;
+  String example_addr;
+  uint32_t example_ms = 0U;
+  time_t example_epoch = 0;
+
+  for (auto& kv : g_mesh_nodes) {
+    MeshNode& node = kv.second;
+    for (auto& sensor : node.sensors_) {
+      if (sensor.history_size == 0U || sensor.history.empty()) {
+        continue;
+      }
+
+      ++touched_sensors;
+
+      const size_t capacity = sensor.history.size();
+      const size_t start_index =
+          (sensor.history_size == capacity) ? sensor.history_head_index : 0U;
+
+      for (size_t i = 0; i < sensor.history_size; ++i) {
+        const size_t idx = (start_index + i) % capacity;
+        auto& sample = sensor.history[idx];
+        if (sample.has_epoch) {
+          continue;
+        }
+
+        sample.timestamp_epoch = ComputeEpochFromMillis(sample.timestamp_ms);
+        sample.has_epoch = true;
+        ++backfilled_samples;
+
+        if (example_ms == 0U) {
+          example_node_id = node.node_id_;
+          example_addr = sensor.address;
+          example_ms = sample.timestamp_ms;
+          example_epoch = sample.timestamp_epoch;
+        }
+      }
+    }
+  }
+
+  Serial.printf(
+      "[HIST] Backfilled %lu samples with epoch timestamps across %lu sensors.\n",
+      static_cast<unsigned long>(backfilled_samples),
+      static_cast<unsigned long>(touched_sensors));
+
+  if (example_ms != 0U) {
+    struct tm tm_buf;
+    char time_buf[32];
+    bool formatted =
+        (localtime_r(&example_epoch, &tm_buf) != nullptr) &&
+        (strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_buf) !=
+         0);
+
+    const String node_hex = FormatNodeKeyHex(example_node_id);
+
+    if (formatted) {
+      Serial.printf(
+          "[HIST] Example backfill: node %s sensor %s t_ms=%lu -> %s\n",
+          node_hex.c_str(),
+          example_addr.c_str(),
+          static_cast<unsigned long>(example_ms),
+          time_buf);
+    } else {
+      Serial.printf(
+          "[HIST] Example backfill: node %s sensor %s t_ms=%lu -> epoch=%ld\n",
+          node_hex.c_str(),
+          example_addr.c_str(),
+          static_cast<unsigned long>(example_ms),
+          static_cast<long>(example_epoch));
+    }
+  }
+}
+
 // Static history configuration defaults.
 //  - 1 minute logging interval
 //  - 7 days of retention
 uint32_t MeshNode::history_interval_ms_ = 60U * 1000U;
 uint32_t MeshNode::history_retention_days_ = 7U;
 size_t MeshNode::history_capacity_per_sensor_ = 0U;
+bool MeshNode::has_time_sync_ = false;
+time_t MeshNode::first_sync_epoch_ = 0;
+uint32_t MeshNode::first_sync_ms_ = 0U;
 
 
 std::vector<uint32_t> GetAllMeshNodeIds() {
