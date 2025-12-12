@@ -13,7 +13,7 @@
 //   addrToHex(const uint8_t*).
 
 #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
-#include "serial_console.h"
+#include "../serial_protocol.h"
 
 // The GUI board talks to the bridge over the UART0 header while keeping Serial
 // (USB CDC) for the console.
@@ -23,7 +23,6 @@
 #ifndef BRIDGE_GUI_RX_PIN
 #define BRIDGE_GUI_RX_PIN 44  // U0RXD on ESP32-S3
 #endif
-#include "serial_protocol.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -47,6 +46,7 @@
 #include <map>
 #include <sys/time.h> // for settimeofday()
 #include <time.h>
+#include "serial_console.h"
 
 using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
