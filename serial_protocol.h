@@ -17,9 +17,15 @@
 // "time_sync" messages carry UTC epoch seconds and timezone metadata from the
 // bridge so the GUI node can set its RTC without running Wi‑Fi/NTP locally.
 //
+// "bridge_status" messages report mesh connectivity. The bridge emits an
+// optional `reason` (e.g., "mesh_event" or "boot"), a `connections` count, and
+// a `nodes` array of the currently connected mesh node IDs with optional
+// `lastSeenMs` latency derived from the most recent payload observed from each
+// node.
+//
 // Pins/baud can be overridden before including this header.
 #ifndef BRIDGE_GUI_BAUD
-#define BRIDGE_GUI_BAUD 921600
+#define BRIDGE_GUI_BAUD 115200
 #endif
 
 #ifndef BRIDGE_GUI_TX_PIN

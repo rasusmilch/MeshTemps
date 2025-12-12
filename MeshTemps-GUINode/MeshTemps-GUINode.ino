@@ -24,7 +24,7 @@
 #ifndef BRIDGE_GUI_RX_PIN
 #define BRIDGE_GUI_RX_PIN 44  // U0RXD on ESP32-S3
 #endif
-#include "serial_protocol.h"
+#include "../serial_protocol.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -4569,7 +4569,6 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
   // Extended debug: "debug nodes" prints per-node age and sequence health.
   if (argc >= 2 && argv[1] == "nodes") {
     const uint32_t now_ms = millis();
-    const time_t now_epoch = time(nullptr);
     const time_t now_epoch = time(nullptr);
 
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();

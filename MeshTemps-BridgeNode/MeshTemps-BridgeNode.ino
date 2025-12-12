@@ -11,6 +11,8 @@
 #include <esp_sntp.h>
 #include <painlessMesh.h>
 #include <algorithm>
+#include <map>
+#include <stdarg.h>
 
 #include "Config.h"
 
@@ -24,7 +26,7 @@
 #endif
 
 #include "serial_console.h"
-#include "serial_protocol.h"
+#include "../serial_protocol.h"
 
 // -----------------------------------------------------------------------------
 // Mesh + WiFi state (copied from MeshTemps-RootNode)
@@ -70,6 +72,8 @@ static bool g_gui_passthrough = false;
 static bool g_gui_passthrough_escape = false;
 static String g_gui_passthrough_tx_line;
 static String g_gui_passthrough_rx_line;
+static bool g_debug_verbose = false;
+static std::map<uint32_t, uint32_t> g_node_last_seen_ms;
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -84,12 +88,26 @@ static void PrintCommandHeader(Print &out, int argc, const String argv[]) {
   out.println();
 }
 
+static void DebugPrintln(const __FlashStringHelper *msg) {
+  if (g_debug_verbose && msg != nullptr) {
+    Serial.println(msg);
+  }
+}
+
+static void DebugPrintf(const char *fmt, ...) {
+  if (!g_debug_verbose || fmt == nullptr) return;
+  va_list args;
+  va_start(args, fmt);
+  Serial.vprintf(fmt, args);
+  va_end(args);
+}
+
 static void SendJsonLineWithEcho(HardwareSerial &port, const JsonDocument &doc) {
   String line;
   serializeJson(doc, line);
   port.println(line);
 
-  if (g_gui_passthrough) {
+  if (g_gui_passthrough || g_debug_verbose) {
     Serial.print(F("[BRIDGE->GUI] "));
     Serial.println(line);
   }
@@ -163,6 +181,7 @@ static void RootAnnounce() {
   String message;
   serializeJson(doc, message);
   mesh.sendBroadcast(message);
+  DebugPrintln(F("[MESH] broadcast root announce"));
 }
 
 static void SendBridgeHello() {
@@ -172,15 +191,32 @@ static void SendBridgeHello() {
   doc["uptimeMs"] = static_cast<uint32_t>(millis());
   doc["note"] = "mesh->gui headless bridge";
   SendJsonLineWithEcho(gui_serial, doc);
+  DebugPrintln(F("[BRIDGE] sent bridge_hello"));
 }
 
-static void SendBridgeStatus() {
+static void SendBridgeStatus(const char *reason = nullptr) {
   JsonDocument doc;
   doc["type"] = "bridge_status";
   doc["rootId"] = mesh.getNodeId();
-  doc["uptimeMs"] = static_cast<uint32_t>(millis());
-  doc["connections"] = mesh.getNodeList().size();
+  const uint32_t now_ms = millis();
+  doc["uptimeMs"] = static_cast<uint32_t>(now_ms);
+  auto node_list = mesh.getNodeList();
+  doc["connections"] = node_list.size();
+  JsonArray nodes = doc.createNestedArray("nodes");
+  for (const auto &id : node_list) {
+    JsonObject node = nodes.createNestedObject();
+    node["id"] = id;
+    auto it = g_node_last_seen_ms.find(id);
+    if (it != g_node_last_seen_ms.end()) {
+      node["lastSeenMs"] = static_cast<uint32_t>(now_ms - it->second);
+    }
+  }
+  if (reason != nullptr) {
+    doc["reason"] = reason;
+  }
   SendJsonLineWithEcho(gui_serial, doc);
+  DebugPrintf("[BRIDGE] status connections=%u\n",
+              static_cast<unsigned>(node_list.size()));
 }
 
 static void SendTimeSyncToGui(const char *source) {
@@ -192,6 +228,10 @@ static void SendTimeSyncToGui(const char *source) {
   doc["dst"] = g_network_config.dst_enabled;
   doc["source"] = source;
   SendJsonLineWithEcho(gui_serial, doc);
+  DebugPrintf("[TIME] forwarded time_sync source=%s epoch=%ld tzMin=%ld dst=%s\n",
+              source, static_cast<long>(g_ntp_last_sync_epoch),
+              static_cast<long>(g_network_config.timezone_minutes),
+              g_network_config.dst_enabled ? "on" : "off");
 }
 
 static void ForwardMeshPayload(uint32_t from, const JsonDocument &payload) {
@@ -201,6 +241,7 @@ static void ForwardMeshPayload(uint32_t from, const JsonDocument &payload) {
   envelope["rxMs"] = static_cast<uint32_t>(millis());
   envelope["payload"] = payload.as<JsonVariantConst>();
   SendJsonLineWithEcho(gui_serial, envelope);
+  DebugPrintf("[MESH] fwd temps from=0x%08lX\n", static_cast<unsigned long>(from));
 }
 
 // Respond to a leaf's root_probe with a unicast root_ack.
@@ -217,6 +258,8 @@ static void HandleRootProbe(uint32_t from, const JsonDocument &probe_doc) {
   String out;
   serializeJson(reply, out);
   mesh.sendSingle(from, out);
+  DebugPrintf("[MESH] root_probe ack to=0x%08lX\n",
+              static_cast<unsigned long>(from));
 }
 
 static void ProcessGuiPassthrough() {
@@ -281,6 +324,9 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   }
 
   const char *type = doc["type"] | "temps";
+  DebugPrintf("[MESH RX] from=0x%08lX type=%s\n",
+              static_cast<unsigned long>(from), type);
+  g_node_last_seen_ms[from] = millis();
   if (strcmp(type, "root_probe") == 0) {
     HandleRootProbe(from, doc);
     return;
@@ -291,7 +337,7 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   }
 }
 
-void OnConnectionsChangedRoot() { SendBridgeStatus(); }
+void OnConnectionsChangedRoot() { SendBridgeStatus("mesh_event"); }
 
 // -----------------------------------------------------------------------------
 // WiFi / NTP helpers
@@ -452,6 +498,12 @@ static void WifiLoop() {
     doc["ssid"] = g_network_config.ssid;
     doc["ip"] = connected ? WiFi.localIP().toString() : "";
     SendJsonLineWithEcho(gui_serial, doc);
+    if (g_debug_verbose) {
+      Serial.printf("[WiFi] %s ssid=\"%s\" ip=%s\n",
+                    connected ? "connected" : "disconnected",
+                    g_network_config.ssid.c_str(),
+                    connected ? WiFi.localIP().toString().c_str() : "");
+    }
   }
 }
 
@@ -463,6 +515,31 @@ static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
   g_console.PrintHelp(out);
+}
+
+static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  if (argc < 2) {
+    out.printf("debug %s\n", g_debug_verbose ? "on" : "off");
+    out.println(F("Use 'debug on|off' to toggle verbose mesh/wifi/ntp logging."));
+    return;
+  }
+
+  const String sub = argv[1];
+  if (sub.equalsIgnoreCase("on")) {
+    g_debug_verbose = true;
+    out.println(F("[DEBUG] verbose logging enabled"));
+    return;
+  }
+  if (sub.equalsIgnoreCase("off")) {
+    g_debug_verbose = false;
+    out.println(F("[DEBUG] verbose logging disabled"));
+    return;
+  }
+
+  out.println(F("ERR debug (use on|off)"));
 }
 
 static void CmdPassthru(void *ctx, int argc, const String argv[], Print &out) {
@@ -648,12 +725,14 @@ void setup() {
   g_task_announce.enable();
 
   g_console.RegisterCommand("help", &CmdHelp, "show help");
+  g_console.RegisterCommand("debug", &CmdDebug, "debug on|off");
   g_console.RegisterCommand("passthru", &CmdPassthru,
                             "mirror GUI UART (17/18) to USB");
   g_console.RegisterCommand("wifi", &CmdWifi, "wifi status|scan|connect|ssid|password|clear");
   g_console.RegisterCommand("time", &CmdTime, "time now|sync");
 
   SendBridgeHello();
+  SendBridgeStatus("boot");
 }
 
 void loop() {
