@@ -13,16 +13,18 @@
 //   addrToHex(const uint8_t*).
 
 #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
-#include "../serial_protocol.h" // LEAVE THIS ALONE, IN DIRECTORY ABOVE THE CURRENT ONE SINCE IT'S SHARED
+#include "serial_console.h"
 
-// The GUI board talks to the bridge over the UART0 header while keeping Serial
-// (USB CDC) for the console.
+// The GUI board talks to the bridge over the default UART0 header (U0TXD/U0RXD)
+// while keeping Serial (USB CDC) for the PC console. Do not remap to the bridge
+// pins (17/18); those are reserved for the bridge firmware's dedicated UART.
 #ifndef BRIDGE_GUI_TX_PIN
 #define BRIDGE_GUI_TX_PIN 43  // U0TXD on ESP32-S3
 #endif
 #ifndef BRIDGE_GUI_RX_PIN
 #define BRIDGE_GUI_RX_PIN 44  // U0RXD on ESP32-S3
 #endif
+#include "serial_protocol.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -46,13 +48,6 @@
 #include <map>
 #include <sys/time.h> // for settimeofday()
 #include <time.h>
-#include "serial_console.h"
-
-HardwareSerial bridge_serial(0);
-static String g_bridge_rx_line;
-static bool g_bridge_passthrough = false;
-static bool g_bridge_passthrough_escape = false;
-static String g_bridge_passthrough_tx_line;
 
 using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
@@ -4062,6 +4057,12 @@ void BuzzerLoop() {
 //   void Handler(void* ctx, int argc, const String argv[], Print& out)
 // -----------------------------------------------------------------------------
 
+// Passthrough controls are needed by console handlers defined below; declare
+// them here so they are available before the bridge serial section.
+static bool g_bridge_passthrough = false;
+static bool g_bridge_passthrough_escape = false;
+static String g_bridge_passthrough_tx_line;
+
 static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -4568,6 +4569,7 @@ static void CmdDebug(void *ctx, int argc, const String argv[], Print &out) {
   // Extended debug: "debug nodes" prints per-node age and sequence health.
   if (argc >= 2 && argv[1] == "nodes") {
     const uint32_t now_ms = millis();
+    const time_t now_epoch = time(nullptr);
     const time_t now_epoch = time(nullptr);
 
     const std::vector<uint32_t> ids = GetAllMeshNodeIds();
@@ -6310,6 +6312,9 @@ void OnConnectionsChangedRoot() {
 // -----------------------------------------------------------------------------
 // Serial bridge input (GUI node)
 // -----------------------------------------------------------------------------
+
+HardwareSerial bridge_serial(0);
+static String g_bridge_rx_line;
 
 static void HandleBridgeFrame(const JsonDocument &doc) {
   if (!doc["payload"].is<JsonVariantConst>()) {

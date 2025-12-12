@@ -13,8 +13,18 @@
 #include <algorithm>
 
 #include "Config.h"
+
+// Bridge <-> GUI uses a dedicated UART on GPIO17/18 so we leave UART0 on the
+// CH434 for flashing/console access.
+#ifndef BRIDGE_GUI_TX_PIN
+#define BRIDGE_GUI_TX_PIN 17
+#endif
+#ifndef BRIDGE_GUI_RX_PIN
+#define BRIDGE_GUI_RX_PIN 18
+#endif
+
 #include "serial_console.h"
-#include "../serial_protocol.h" // LEAVE THIS ALONE, IN DIRECTORY ABOVE THE CURRENT ONE SINCE IT'S SHARED
+#include "serial_protocol.h"
 
 // -----------------------------------------------------------------------------
 // Mesh + WiFi state (copied from MeshTemps-RootNode)
