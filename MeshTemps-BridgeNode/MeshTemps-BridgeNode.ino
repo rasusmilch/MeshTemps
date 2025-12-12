@@ -468,7 +468,13 @@ static void NtpLoop() {
   (void)SyncTimeFromNtp(Serial);
 }
 
-static void InitWifiSta() {
+// Mirror the original root behaviour: let painlessMesh own STA attach.
+// We only apply credentials via stationManual() and seed the RTC so SNTP can
+// adjust it later. Explicit WiFi.begin()/mode juggling caused mesh links to
+// bounce, so we avoid it here.
+static void InitNetwork() {
+  LoadNetworkConfigFromNVS();
+
   if (g_network_config.ssid.isEmpty()) {
     Serial.println(F("[WiFi] No SSID configured; skipping WiFi/NTP"));
     SetDefaultDateTime();
@@ -477,10 +483,15 @@ static void InitWifiSta() {
     g_ntp_retry_period_ms = kNtpRetryInitialMs;
     return;
   }
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.begin(g_network_config.ssid.c_str(), g_network_config.password.c_str());
+
+  Serial.printf("[WiFi] Using SSID=\"%s\"\n", g_network_config.ssid.c_str());
   EnsureMeshStationConfigApplied(Serial, /*force_reapply=*/true);
+  Serial.println(F(
+      "[WiFi] STA credentials applied; root mesh node will connect to WiFi "
+      "in the background when possible."));
+
   SetDefaultDateTime();
+  g_ntp_time_valid = false;
   g_ntp_retry_period_ms = kNtpRetryInitialMs;
   g_last_ntp_attempt_ms = millis();
 }
@@ -707,7 +718,6 @@ void setup() {
 
   RootPickMeshChannel();
   LoadNetworkConfigFromNVS();
-  InitWifiSta();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
@@ -730,6 +740,8 @@ void setup() {
                             "mirror GUI UART (17/18) to USB");
   g_console.RegisterCommand("wifi", &CmdWifi, "wifi status|scan|connect|ssid|password|clear");
   g_console.RegisterCommand("time", &CmdTime, "time now|sync");
+
+  InitNetwork();
 
   SendBridgeHello();
   SendBridgeStatus("boot");
