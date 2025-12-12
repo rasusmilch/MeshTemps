@@ -809,6 +809,11 @@ static void CmdTime(void *ctx, int argc, const String argv[], Print &out) {
       out.println(F("[TIME] SSID not configured; use 'wifi ssid ...' first"));
       return;
     }
+    if (!EnsureWifiConnected(out)) {
+      out.println(F("[TIME] WiFi not connected; cannot perform NTP sync"));
+      return;
+    }
+
     g_last_ntp_attempt_ms = millis();
     if (!SyncTimeFromNtp(out) && !g_ntp_time_valid) {
       SetDefaultDateTime();
@@ -816,6 +821,70 @@ static void CmdTime(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
   out.println(F("ERR time (use 'time now' or 'time sync')"));
+}
+
+static void CmdTz(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  // tz           -> show
+  // tz show
+  if (argc < 2 || argv[1].equalsIgnoreCase("show")) {
+    const long tz_min = g_network_config.timezone_minutes;
+    const long abs_min = (tz_min >= 0) ? tz_min : -tz_min;
+    const long h = abs_min / 60;
+    const long m = abs_min % 60;
+    const char sign = (tz_min >= 0) ? '+' : '-';
+
+    out.printf("tz: utc_offset=%ld min (%c%02ld:%02ld) dst=%s\n", tz_min, sign,
+               h, m, g_network_config.dst_enabled ? "on" : "off");
+    return;
+  }
+
+  // tz set <minutes> [dst on|off|0|1]
+  if (argv[1].equalsIgnoreCase("set")) {
+    if (argc < 3) {
+      out.println(F("ERR tz set (usage: tz set <minutes> [dst on|off|0|1])"));
+      return;
+    }
+    const long minutes = argv[2].toInt();
+
+    bool dst = g_network_config.dst_enabled;
+    if (argc >= 4) {
+      const String dst_arg = argv[3];
+      if (dst_arg.equalsIgnoreCase("on") || dst_arg == "1") {
+        dst = true;
+      } else if (dst_arg.equalsIgnoreCase("off") || dst_arg == "0") {
+        dst = false;
+      } else {
+        out.println(
+            F("ERR tz set (dst must be on|off|0|1 if provided as arg 3)"));
+        return;
+      }
+    }
+
+    g_network_config.timezone_minutes = static_cast<int32_t>(minutes);
+    g_network_config.dst_enabled = dst;
+    SaveNetworkConfigToNVS();
+
+    const long tz_min = g_network_config.timezone_minutes;
+    const long abs_min = (tz_min >= 0) ? tz_min : -tz_min;
+    const long h = abs_min / 60;
+    const long m = abs_min % 60;
+    const char sign = (tz_min >= 0) ? '+' : '-';
+
+    out.printf(
+        "tz set: utc_offset=%ld min (%c%02ld:%02ld) dst=%s (saved to NVS)\n",
+        tz_min, sign, h, m, g_network_config.dst_enabled ? "on" : "off");
+
+    // If WiFi is already connected, re-sync time with new offset.
+    if (WiFi.status() == WL_CONNECTED) {
+      (void)SyncTimeFromNtp(out);
+    }
+    return;
+  }
+
+  out.println(F("ERR tz (use 'tz show' or 'tz set <minutes> [dst on|off]')"));
 }
 
 // -----------------------------------------------------------------------------
@@ -848,6 +917,7 @@ void setup() {
   g_console.RegisterCommand("passthru", &CmdPassthru,
                             "mirror GUI UART (17/18) to USB");
   g_console.RegisterCommand("wifi", &CmdWifi, "wifi status|scan|connect|ssid|password|clear");
+  g_console.RegisterCommand("tz", &CmdTz, "tz show|set <minutes> [dst on|off]");
   g_console.RegisterCommand("time", &CmdTime, "time now|sync");
 
   InitNetwork();

@@ -27,7 +27,9 @@ Flash this sketch to the ESP32-S3 that stays on Wi‑Fi/mesh duty.
 
 ## Console controls
 - `wifi status|scan|connect|ssid|password|clear`
-- `time now|sync` (forces NTP and pushes a `time_sync` envelope to the GUI)
+- `tz show|set <minutes> [dst on|off]` to configure timezone/DST before NTP sync
+- `time now|sync` (forces NTP with the configured TZ/DST and pushes a `time_sync`
+  envelope to the GUI)
 - `debug on|off` to mirror mesh/Wi‑Fi/NTP events to the PC console
 - `passthru on|off` to mirror the GUI link (GPIO17/18) to the PC console for
   bridge-link debugging
