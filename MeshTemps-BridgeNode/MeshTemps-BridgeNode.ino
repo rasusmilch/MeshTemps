@@ -14,7 +14,7 @@
 
 #include "Config.h"
 #include "serial_console.h"
-#include "./serial_protocol.h"
+#include "../serial_protocol.h" // LEAVE THIS ALONE, IN DIRECTORY ABOVE THE CURRENT ONE SINCE IT'S SHARED
 
 // -----------------------------------------------------------------------------
 // Mesh + WiFi state (copied from MeshTemps-RootNode)

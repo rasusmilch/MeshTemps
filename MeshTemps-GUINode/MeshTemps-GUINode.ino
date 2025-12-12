@@ -13,7 +13,7 @@
 //   addrToHex(const uint8_t*).
 
 #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
-#include "../serial_protocol.h"
+#include "../serial_protocol.h" // LEAVE THIS ALONE, IN DIRECTORY ABOVE THE CURRENT ONE SINCE IT'S SHARED
 
 // The GUI board talks to the bridge over the UART0 header while keeping Serial
 // (USB CDC) for the console.
@@ -47,6 +47,12 @@
 #include <sys/time.h> // for settimeofday()
 #include <time.h>
 #include "serial_console.h"
+
+HardwareSerial bridge_serial(0);
+static String g_bridge_rx_line;
+static bool g_bridge_passthrough = false;
+static bool g_bridge_passthrough_escape = false;
+static String g_bridge_passthrough_tx_line;
 
 using esp_panel::board::Board;
 using esp_panel::drivers::BusRGB;
@@ -6304,12 +6310,6 @@ void OnConnectionsChangedRoot() {
 // -----------------------------------------------------------------------------
 // Serial bridge input (GUI node)
 // -----------------------------------------------------------------------------
-
-HardwareSerial bridge_serial(0);
-static String g_bridge_rx_line;
-static bool g_bridge_passthrough = false;
-static bool g_bridge_passthrough_escape = false;
-static String g_bridge_passthrough_tx_line;
 
 static void HandleBridgeFrame(const JsonDocument &doc) {
   if (!doc["payload"].is<JsonVariantConst>()) {
