@@ -224,7 +224,7 @@ static void RootPickMeshChannel() {
 static void RootAnnounce() {
   JsonDocument doc;
   const uint32_t now_ms = millis();
-  doc["type"] = "root";
+  doc["type"] = "root_announce";
   doc["rootId"] = mesh.getNodeId();
   doc["uptimeMs"] = static_cast<uint32_t>(now_ms);
 
