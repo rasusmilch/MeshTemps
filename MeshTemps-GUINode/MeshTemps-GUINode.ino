@@ -14,6 +14,17 @@
 
 #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
 #include "serial_console.h"
+
+// The GUI board talks to the bridge over the default UART0 header (U0TXD/U0RXD)
+// while keeping Serial (USB CDC) for the PC console. Do not remap to the bridge
+// pins (17/18); those are reserved for the bridge firmware's dedicated UART.
+#ifndef BRIDGE_GUI_TX_PIN
+#define BRIDGE_GUI_TX_PIN 43  // U0TXD on ESP32-S3
+#endif
+#ifndef BRIDGE_GUI_RX_PIN
+#define BRIDGE_GUI_RX_PIN 44  // U0RXD on ESP32-S3
+#endif
+#include "../serial_protocol.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
@@ -4046,10 +4057,45 @@ void BuzzerLoop() {
 //   void Handler(void* ctx, int argc, const String argv[], Print& out)
 // -----------------------------------------------------------------------------
 
+// Passthrough controls are needed by console handlers defined below; declare
+// them here so they are available before the bridge serial section.
+static bool g_bridge_passthrough = false;
+static bool g_bridge_passthrough_escape = false;
+static String g_bridge_passthrough_tx_line;
+
 static void CmdHelp(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
   g_console.PrintHelp(out);
+}
+
+static void CmdPassthru(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  if (argc < 2) {
+    out.printf("passthru %s\n", g_bridge_passthrough ? "on" : "off");
+    out.println(F("Use 'passthru on' to mirror GUI<->bridge UART0 to USB."));
+    out.println(F("Exit passthrough with '~.' when active."));
+    return;
+  }
+
+  if (argv[1].equalsIgnoreCase("on")) {
+    g_bridge_passthrough = true;
+    g_bridge_passthrough_escape = false;
+    g_bridge_passthrough_tx_line = "";
+    out.println(F("[BRIDGE<->GUI] passthrough enabled; exit with '~.'"));
+    return;
+  }
+
+  if (argv[1].equalsIgnoreCase("off")) {
+    g_bridge_passthrough = false;
+    g_bridge_passthrough_tx_line = "";
+    out.println(F("[BRIDGE<->GUI] passthrough disabled"));
+    return;
+  }
+
+  out.println(F("ERR passthru (use on|off)"));
 }
 
 static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
@@ -6263,11 +6309,147 @@ void OnConnectionsChangedRoot() {
 }
 
 // -----------------------------------------------------------------------------
-// Arduino entry points (root)
+// Serial bridge input (GUI node)
+// -----------------------------------------------------------------------------
+
+HardwareSerial bridge_serial(0);
+static String g_bridge_rx_line;
+
+static void HandleBridgeFrame(const JsonDocument &doc) {
+  if (!doc["payload"].is<JsonVariantConst>()) {
+    return;
+  }
+
+  // Reuse the root's JSON handling by passing the original temps payload and
+  // source node id to OnReceiveRoot().
+  String payload;
+  serializeJson(doc["payload"], payload);
+
+  String mutable_payload = payload; // OnReceiveRoot expects a mutable String
+  const uint32_t from = doc["from"] | 0U;
+  OnReceiveRoot(from, mutable_payload);
+}
+
+static void HandleBridgeStatus(const JsonDocument &doc) {
+  const size_t peers = doc["connections"] | 0U;
+  GuiUpdateNetwork(peers);
+  GuiRequestRender();
+}
+
+static void HandleBridgeTimeSync(const JsonDocument &doc) {
+  const time_t epoch = doc["epoch"] | 0;
+  const int32_t tz_min = doc["tzMinutes"] | 0;
+  const bool dst = doc["dst"] | false;
+
+  if (epoch <= 0) {
+    return;
+  }
+
+  const long gmt_offset_sec = static_cast<long>(tz_min) * 60L;
+  const long dst_offset_sec = dst ? 3600L : 0L;
+
+  // Apply timezone offsets (servers empty because GUI has no Wi-Fi/NTP).
+  configTime(gmt_offset_sec, dst_offset_sec, "", "");
+
+  struct timeval tv;
+  tv.tv_sec = epoch;
+  tv.tv_usec = 0;
+  settimeofday(&tv, nullptr);
+
+  g_ntp_sync_in_progress = false;
+  g_ntp_time_valid = true;
+  g_last_ntp_ok_ms = millis();
+  g_ntp_retry_period_ms = kNtpResyncPeriodMs;
+  g_ntp_last_sync_epoch = epoch;
+
+  if (!g_history_time_backfilled) {
+    OnFirstNtpTimeSync(epoch, g_last_ntp_ok_ms);
+  }
+
+  GuiUpdateNtpStatusIcon();
+  GuiRequestRender();
+}
+
+static void ProcessBridgeSerial() {
+  while (bridge_serial.available() > 0) {
+    const char ch = bridge_serial.read();
+    if (ch == '\n') {
+      if (g_bridge_rx_line.isEmpty()) {
+        continue;
+      }
+
+      if (g_bridge_passthrough) {
+        Serial.print(F("[BRIDGE->GUI-PC] "));
+        Serial.println(g_bridge_rx_line);
+      }
+
+      JsonDocument doc;
+      if (deserializeJson(doc, g_bridge_rx_line) == DeserializationError::Ok) {
+        const char *type = doc["type"] | "";
+        if (strcmp(type, "mesh_frame") == 0) {
+          HandleBridgeFrame(doc);
+        } else if (strcmp(type, "bridge_status") == 0) {
+          HandleBridgeStatus(doc);
+        } else if (strcmp(type, "time_sync") == 0) {
+          HandleBridgeTimeSync(doc);
+        }
+      }
+
+      g_bridge_rx_line.clear();
+    } else if (ch != '\r') {
+      g_bridge_rx_line += ch;
+    }
+  }
+}
+
+static void ProcessBridgePassthroughTx() {
+  if (!g_bridge_passthrough) return;
+
+  while (Serial.available() > 0) {
+    const char ch = Serial.read();
+
+    if (g_bridge_passthrough_escape) {
+      g_bridge_passthrough_escape = false;
+      if (ch == '.') {
+        g_bridge_passthrough = false;
+        g_bridge_passthrough_tx_line = "";
+        Serial.println(F("[BRIDGE<->GUI] passthrough disabled"));
+        return;
+      }
+      // If escape was started but not completed, forward both characters.
+      bridge_serial.write('~');
+      if (ch != '\r' && ch != '\n') {
+        g_bridge_passthrough_tx_line += '~';
+      }
+    }
+
+    if (ch == '~') {
+      g_bridge_passthrough_escape = true;
+      continue;
+    }
+
+    bridge_serial.write(ch);
+
+    if (ch == '\n') {
+      if (!g_bridge_passthrough_tx_line.isEmpty()) {
+        Serial.print(F("[GUI-PC->BRIDGE] "));
+        Serial.println(g_bridge_passthrough_tx_line);
+      }
+      g_bridge_passthrough_tx_line = "";
+    } else if (ch != '\r') {
+      g_bridge_passthrough_tx_line += ch;
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Arduino entry points (GUI)
 // -----------------------------------------------------------------------------
 
 void setup() {
   Serial.begin(DBG_BAUD);
+  bridge_serial.begin(BRIDGE_GUI_BAUD, SERIAL_8N1, BRIDGE_GUI_RX_PIN,
+                      BRIDGE_GUI_TX_PIN);
   delay(200);
 
   #ifdef ESP_ARDUINO_VERSION_STR
@@ -6294,6 +6476,8 @@ void setup() {
   digitalWrite(kBuzzerPin, LOW);
 
   g_console.RegisterCommand("help", &CmdHelp, "show help");
+  g_console.RegisterCommand("passthru", &CmdPassthru,
+                            "mirror GUI<->bridge UART to USB");
   g_console.RegisterCommand("ls", &CmdLs, "list nodes/sensors");
   g_console.RegisterCommand("node", &CmdNode, "label or rm a node");
   g_console.RegisterCommand("nodes", &CmdNodes, "nodes clear");
@@ -6328,45 +6512,21 @@ void setup() {
   g_console.RegisterCommand("labels", &CmdLabels,
                             "labels sensor on|off | labels age on|off");
   g_console.RegisterCommand("view", &CmdView, "view tiles | map [room|belly]");
-  g_console.RegisterCommand(
-      "wifi", &CmdWifi,
-      "WiFi / NTP control: wifi status|scan|connect|ssid|password|clear");
-  g_console.RegisterCommand(
-      "tz", &CmdTz, "Timezone: tz show | tz set <minutes> [dst on|off]");
-  g_console.RegisterCommand("time", &CmdTime, "Show or sync RTC time via NTP");
   g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view");
 
   // This will override the compile-time defaults if keys exist in NVS.
   LoadHistoryConfigFromNvs();
 
-  RootPickMeshChannel(); // NEW: choose mesh channel based on AP
-
-  mesh.setDebugMsgTypes(ERROR | STARTUP);
-  // mesh.setDebugMsgTypes(ALL);
-  mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
-            g_mesh_channel, MESH_HIDDEN);
-  mesh.setRoot(true);
-  mesh.setContainsRoot(true);
-  mesh.onReceive(&OnReceiveRoot);
-  mesh.onChangedConnections(&OnConnectionsChangedRoot);
-
-  g_task_announce.set(TASK_IMMEDIATE, TASK_FOREVER, []() {
-    RootAnnounce();
-    g_task_announce.delay(ROOT_ANNOUNCE_MS);
-  });
-  user_scheduler.addTask(g_task_announce);
-  g_task_announce.enable();
-
-  // Load WiFi / timezone from NVS and attempt initial WiFi + NTP sync.
-  RootInitNetwork();
-
-  Serial.println(F("ROOT ready. Type 'help'."));
+  Serial.println(F("GUI ready. Type 'help'."));
 }
 
 void loop() {
-  mesh.update();
+  ProcessBridgeSerial();
   DisplayLoop();
   BuzzerLoop();
-  NtpLoop(); // NEW: periodic NTP resync (every 24h)
-  g_console.Poll(Serial, Serial);
+  if (g_bridge_passthrough) {
+    ProcessBridgePassthroughTx();
+  } else {
+    g_console.Poll(Serial, Serial);
+  }
 }
