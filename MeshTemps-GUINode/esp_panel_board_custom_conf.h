@@ -400,8 +400,8 @@
      * Keep IO5 low so the Waveshare USB CDC path works (IO5 enables the CAN
      * PHY when high). The CH422G drives everything high after
      * enableAllIO_Output(), so explicitly drive IO5 back low.
-     */                                                                          \
-    expander->digitalWrite(5, 0);                                               \
+     */                                                                        \
+    expander->digitalWrite(5, 0);                                              \
     return true;                                                               \
   }
 
