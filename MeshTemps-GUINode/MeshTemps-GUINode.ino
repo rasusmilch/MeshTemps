@@ -365,6 +365,7 @@ static uint32_t g_last_ntp_attempt_ms = 0;
 static uint32_t g_last_ntp_ok_ms = 0;
 static uint32_t g_ntp_retry_period_ms = kNtpRetryInitialMs;
 static bool g_ntp_sync_in_progress = false;
+static uint32_t g_last_time_request_ms = 0;
 
 // NTP servers.
 static const char *kNtpServer1 = "pool.ntp.org";
@@ -4057,6 +4058,9 @@ void BuzzerLoop() {
 //   void Handler(void* ctx, int argc, const String argv[], Print& out)
 // -----------------------------------------------------------------------------
 
+static void MaybeRequestTimeFromBridge(const char *reason,
+                                       bool force_ntp = false);
+
 // Passthrough controls are needed by console handlers defined below; declare
 // them here so they are available before the bridge serial section.
 static bool g_bridge_passthrough = false;
@@ -4096,6 +4100,36 @@ static void CmdPassthru(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   out.println(F("ERR passthru (use on|off)"));
+}
+
+static void CmdTime(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  if (argc < 2) {
+    out.println(F("usage: time now|request|sync"));
+    return;
+  }
+
+  const String sub = argv[1];
+  if (sub.equalsIgnoreCase("now") || sub.equalsIgnoreCase("show")) {
+    PrintCurrentLocalTime(out);
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("request")) {
+    MaybeRequestTimeFromBridge("console_request", /*force_ntp=*/false);
+    out.println(F("[TIME] requested time_sync from bridge"));
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("sync") || sub.equalsIgnoreCase("force")) {
+    MaybeRequestTimeFromBridge("console_force", /*force_ntp=*/true);
+    out.println(F("[TIME] requested bridge NTP sync"));
+    return;
+  }
+
+  out.println(F("ERR time (use now|request|sync)"));
 }
 
 static void CmdKnown(void *ctx, int argc, const String argv[], Print &out) {
@@ -6333,6 +6367,9 @@ static void HandleBridgeFrame(const JsonDocument &doc) {
 static void HandleBridgeStatus(const JsonDocument &doc) {
   const size_t peers = doc["connections"] | 0U;
   GuiUpdateNetwork(peers);
+  if (!g_ntp_time_valid) {
+    MaybeRequestTimeFromBridge("bridge_status", /*force_ntp=*/false);
+  }
   GuiRequestRender();
 }
 
@@ -6368,6 +6405,38 @@ static void HandleBridgeTimeSync(const JsonDocument &doc) {
 
   GuiUpdateNtpStatusIcon();
   GuiRequestRender();
+}
+
+static void SendTimeRequestToBridge(const char *reason, bool force_ntp) {
+  JsonDocument doc;
+  doc["type"] = "time_request";
+  if (reason != nullptr && reason[0] != '\0') {
+    doc["reason"] = reason;
+  }
+  if (force_ntp) {
+    doc["force"] = true;
+  }
+
+  String line;
+  serializeJson(doc, line);
+  bridge_serial.println(line);
+
+  if (g_bridge_passthrough) {
+    Serial.print(F("[GUI->BRIDGE] "));
+    Serial.println(line);
+  }
+}
+
+static void MaybeRequestTimeFromBridge(const char *reason, bool force_ntp) {
+  const uint32_t now_ms = millis();
+  constexpr uint32_t kMinIntervalMs = 2000;
+  if (g_last_time_request_ms != 0U &&
+      (now_ms - g_last_time_request_ms) < kMinIntervalMs) {
+    return;  // Avoid spamming the bridge.
+  }
+
+  SendTimeRequestToBridge(reason, force_ntp);
+  g_last_time_request_ms = now_ms;
 }
 
 static void ProcessBridgeSerial() {
@@ -6486,6 +6555,7 @@ void setup() {
   g_console.RegisterCommand("load", &CmdLoad, "load labels");
   g_console.RegisterCommand("erase", &CmdErase, "erase labels");
   g_console.RegisterCommand("debug", &CmdDebug, "debug on|off|nodes");
+  g_console.RegisterCommand("time", &CmdTime, "time now|request|sync");
   g_console.RegisterCommand("units", &CmdUnits, "units c|f");
   g_console.RegisterCommand("highlight", &CmdHighlight,
                             "highlight missing on|off | highlight stale <min>");
@@ -6516,6 +6586,11 @@ void setup() {
 
   // This will override the compile-time defaults if keys exist in NVS.
   LoadHistoryConfigFromNvs();
+
+  // Ask the bridge for current time (and to force NTP if needed) after a GUI
+  // reboot so the display regains a valid clock without waiting for the
+  // bridge's periodic resync window.
+  MaybeRequestTimeFromBridge("boot", /*force_ntp=*/true);
 
   Serial.println(F("GUI ready. Type 'help'."));
 }

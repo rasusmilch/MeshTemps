@@ -72,6 +72,7 @@ static bool g_gui_passthrough = false;
 static bool g_gui_passthrough_escape = false;
 static String g_gui_passthrough_tx_line;
 static String g_gui_passthrough_rx_line;
+static String g_gui_rx_line;
 static bool g_debug_verbose = false;
 static std::map<uint32_t, uint32_t> g_node_last_seen_ms;
 
@@ -166,9 +167,58 @@ static void SaveNetworkConfigToNVS() {
   prefs.end();
 }
 
+// Scan nearby APs for our configured SSID and reuse its channel so the STA
+// interface doesn't force the mesh AP to hop (which would drop leaf links).
+static int32_t ScanChannelForConfiguredSsid(Print &out) {
+  LoadNetworkConfigFromNVS();
+
+  if (g_network_config.ssid.isEmpty()) {
+    out.println(F("[WiFi] SSID not configured; using default mesh channel"));
+    return -1;
+  }
+
+  out.println(F("[WiFi] Scanning for configured SSID to pick mesh channel..."));
+  int32_t best_rssi = -1000;
+  int32_t found_channel = -1;
+
+  const int network_count =
+      WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
+
+  if (network_count <= 0) {
+    out.println(F("[WiFi] WiFi.scanNetworks() found no APs"));
+  } else {
+    for (int i = 0; i < network_count; ++i) {
+      String ssid = WiFi.SSID(i);
+      if (ssid == g_network_config.ssid) {
+        const int chan = WiFi.channel(i);
+        const int rssi = WiFi.RSSI(i);
+        if (chan > 0 && rssi > best_rssi) {
+          best_rssi = rssi;
+          found_channel = chan;
+        }
+      }
+    }
+  }
+
+  WiFi.scanDelete();
+
+  if (found_channel > 0) {
+    out.printf("[WiFi] Chose channel %d for mesh (AP RSSI=%d dBm)\n",
+               static_cast<int>(found_channel), best_rssi);
+  } else {
+    out.println(
+        F("[WiFi] Configured SSID not found; keeping default mesh channel"));
+  }
+  return found_channel;
+}
+
 static void RootPickMeshChannel() {
-  // For now, just keep the configured channel. Hook for future STA-driven pick.
-  g_mesh_channel = MESH_CHANNEL;
+  int32_t chan = ScanChannelForConfiguredSsid(Serial);
+  if (chan > 0) {
+    g_mesh_channel = chan;
+  } else {
+    g_mesh_channel = MESH_CHANNEL; // fallback
+  }
 }
 
 static void RootAnnounce() {
@@ -220,10 +270,16 @@ static void SendBridgeStatus(const char *reason = nullptr) {
 }
 
 static void SendTimeSyncToGui(const char *source) {
+  time_t epoch = g_ntp_last_sync_epoch;
+  if (epoch <= 0) {
+    epoch = time(nullptr);
+  }
+  g_ntp_last_sync_epoch = epoch;
+
   JsonDocument doc;
   doc["type"] = "time_sync";
   doc["rootId"] = mesh.getNodeId();
-  doc["epoch"] = static_cast<long>(g_ntp_last_sync_epoch);
+  doc["epoch"] = static_cast<long>(epoch);
   doc["tzMinutes"] = g_network_config.timezone_minutes;
   doc["dst"] = g_network_config.dst_enabled;
   doc["source"] = source;
@@ -313,6 +369,60 @@ static void ProcessGuiPassthrough() {
       g_gui_passthrough_rx_line = "";
     } else if (ch != '\r') {
       g_gui_passthrough_rx_line += ch;
+    }
+  }
+}
+
+static void HandleGuiTimeRequest(const JsonDocument &doc) {
+  const bool force_ntp = doc["force"] | false;
+  const char *reason = doc["reason"] | "gui_request";
+
+  if (g_debug_verbose) {
+    Serial.printf("[BRIDGE] gui time_request force=%s reason=%s\n",
+                  force_ntp ? "true" : "false", reason);
+  }
+
+  const time_t now_epoch = time(nullptr);
+  if (g_ntp_time_valid || g_ntp_last_sync_epoch > 0 || now_epoch > 0) {
+    if (g_ntp_last_sync_epoch <= 0) {
+      g_ntp_last_sync_epoch = now_epoch;
+    }
+    SendTimeSyncToGui(reason);
+  }
+
+  if (force_ntp || !g_ntp_time_valid) {
+    // Try an immediate NTP sync regardless of the normal retry schedule.
+    g_ntp_retry_period_ms = kNtpRetryInitialMs;
+    g_last_ntp_attempt_ms = 0;
+    if (EnsureWifiConnected(Serial)) {
+      (void)SyncTimeFromNtp(Serial);
+    }
+  }
+}
+
+static void ProcessGuiSerial() {
+  while (gui_serial.available() > 0) {
+    const char ch = gui_serial.read();
+    if (ch == '\n') {
+      if (g_gui_rx_line.isEmpty()) {
+        continue;
+      }
+      if (g_debug_verbose) {
+        Serial.print(F("[GUI->BRIDGE] "));
+        Serial.println(g_gui_rx_line);
+      }
+
+      JsonDocument doc;
+      if (deserializeJson(doc, g_gui_rx_line) == DeserializationError::Ok) {
+        const char *type = doc["type"] | "";
+        if (strcmp(type, "time_request") == 0) {
+          HandleGuiTimeRequest(doc);
+        }
+      }
+
+      g_gui_rx_line = "";
+    } else if (ch != '\r') {
+      g_gui_rx_line += ch;
     }
   }
 }
@@ -717,7 +827,6 @@ void setup() {
   gui_serial.begin(BRIDGE_GUI_BAUD, SERIAL_8N1, BRIDGE_GUI_RX_PIN, BRIDGE_GUI_TX_PIN);
 
   RootPickMeshChannel();
-  LoadNetworkConfigFromNVS();
 
   mesh.setDebugMsgTypes(ERROR | STARTUP);
   mesh.init(MESH_PREFIX, MESH_PASSWORD, &user_scheduler, MESH_PORT, WIFI_AP_STA,
@@ -755,6 +864,7 @@ void loop() {
   if (g_gui_passthrough) {
     ProcessGuiPassthrough();
   } else {
+    ProcessGuiSerial();
     g_console.Poll(Serial, Serial);
   }
 }

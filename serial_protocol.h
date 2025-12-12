@@ -7,7 +7,8 @@
 //
 // Envelope shape:
 //   {
-//     "type": "mesh_frame" | "bridge_hello" | "bridge_status" | "time_sync",
+//     "type": "mesh_frame" | "bridge_hello" | "bridge_status" |
+//             "time_sync" | "time_request",
 //     ...
 //   }
 //
@@ -22,6 +23,10 @@
 // a `nodes` array of the currently connected mesh node IDs with optional
 // `lastSeenMs` latency derived from the most recent payload observed from each
 // node.
+//
+// "time_request" messages are sent from the GUI to the bridge to ask for the
+// current epoch/timezone and optionally force an NTP sync on the bridge even if
+// its periodic resync timer has not fired yet.
 //
 // Pins/baud can be overridden before including this header.
 #ifndef BRIDGE_GUI_BAUD
