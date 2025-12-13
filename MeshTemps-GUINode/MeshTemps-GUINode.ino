@@ -6257,6 +6257,7 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   // and record how many sensors we had so we can detect newly created ones.
   const uint32_t payload_node_id = doc["nodeId"] | from;
   size_t prev_sensor_count = 0;
+  const bool node_existed = (FindMeshNode(payload_node_id) != nullptr);
   if (MeshNode *existing = FindMeshNode(payload_node_id)) {
     prev_sensor_count = existing->sensors().size();
   }
@@ -6282,6 +6283,13 @@ void OnReceiveRoot(uint32_t from, String &msg) {
        static_cast<unsigned long>(node_id),
        bus_gpio,
        static_cast<unsigned>(new_sensor_count));
+
+  // Apply any persisted per-node metadata (rank, mute, etc.) as soon as a
+  // brand-new node appears via the bridge so settings like mute survive GUI
+  // restarts even though we don't run the mesh stack here.
+  if (!node_existed) {
+    LoadNodeMetaFromNVS();
+  }
 
   // Topology persistence: add/update known IDs.
   if (g_topology_persist_enabled) {

@@ -167,6 +167,27 @@ static void SaveNetworkConfigToNVS() {
   prefs.end();
 }
 
+static const char *WifiStatusToString(wl_status_t st) {
+  switch (st) {
+    case WL_IDLE_STATUS:
+      return "IDLE";
+    case WL_NO_SSID_AVAIL:
+      return "NO_SSID";
+    case WL_SCAN_COMPLETED:
+      return "SCAN_DONE";
+    case WL_CONNECTED:
+      return "CONNECTED";
+    case WL_CONNECT_FAILED:
+      return "CONNECT_FAILED";
+    case WL_CONNECTION_LOST:
+      return "CONNECTION_LOST";
+    case WL_DISCONNECTED:
+      return "DISCONNECTED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
 // Scan nearby APs for our configured SSID and reuse its channel so the STA
 // interface doesn't force the mesh AP to hop (which would drop leaf links).
 static int32_t ScanChannelForConfiguredSsid(Print &out) {
@@ -715,7 +736,8 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     out.printf("tz_minutes=%ld dst=%s\n", static_cast<long>(g_network_config.timezone_minutes),
                g_network_config.dst_enabled ? "on" : "off");
     const wl_status_t st = WiFi.status();
-    out.printf("wifi_status=%d\n", static_cast<int>(st));
+    const char *st_str = WifiStatusToString(st);
+    out.printf("wifi_status=%s (%d)\n", st_str, static_cast<int>(st));
     const int32_t phy_channel = WiFi.channel();
     if (phy_channel > 0) {
       out.printf("radio_channel=%d\n", static_cast<int>(phy_channel));
