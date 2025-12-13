@@ -326,11 +326,7 @@ static bool NvsPutIntVerified(Preferences &preferences, const char *key,
 
 static bool NvsPutULongVerified(Preferences &preferences, const char *key,
                                 uint32_t value) {
-  const size_t written = preferences.putULong(key, value);
-  if (written != sizeof(uint32_t)) {
-    NvsLogVerifyFailure(key, "putULong wrote wrong length");
-    return false;
-  }
+  (void)preferences.putULong(key, value);
 
   if (!preferences.isKey(key)) {
     NvsLogVerifyFailure(key, "key missing after putULong");
