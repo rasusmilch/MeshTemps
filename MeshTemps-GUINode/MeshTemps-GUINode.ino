@@ -6956,6 +6956,36 @@ static void SendNtfyRequestToBridge(const String &message,
   }
 }
 
+static void SendNtfyRequestToBridge(const String &message,
+                                    bool cache_when_offline, bool is_summary,
+                                    const char *title) {
+  if (!g_ntfy_config.enabled || message.isEmpty()) {
+    return;
+  }
+
+  JsonDocument doc;
+  doc["type"] = "ntfy_request";
+  doc["message"] = message;
+  if (is_summary) {
+    doc["summary"] = true;
+  }
+  if (cache_when_offline) {
+    doc["cache"] = true;
+  }
+  if (title != nullptr && title[0] != '\0') {
+    doc["title"] = title;
+  }
+
+  String line;
+  serializeJson(doc, line);
+  bridge_serial.println(line);
+
+  if (g_bridge_passthrough) {
+    Serial.print(F("[GUI->BRIDGE] "));
+    Serial.println(line);
+  }
+}
+
 static void MaybeRequestTimeFromBridge(const char *reason, bool force_ntp) {
   const uint32_t now_ms = millis();
   constexpr uint32_t kMinIntervalMs = 2000;
