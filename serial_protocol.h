@@ -8,7 +8,8 @@
 // Envelope shape:
 //   {
 //     "type": "mesh_frame" | "bridge_hello" | "bridge_status" |
-//             "time_sync" | "time_request",
+//             "time_sync" | "time_request" | "wifi_connected" |
+//             "wifi_disconnected",
 //     ...
 //   }
 //

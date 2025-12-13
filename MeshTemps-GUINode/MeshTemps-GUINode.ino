@@ -6859,6 +6859,38 @@ static void HandleBridgeFrame(const JsonDocument &doc) {
   OnReceiveRoot(from, mutable_payload);
 }
 
+static void HandleBridgeHello(const JsonDocument &doc) {
+  const uint32_t root_id = doc["rootId"] | 0U;
+  const uint32_t uptime_ms = doc["uptimeMs"] | 0U;
+  const char *note = doc["note"] | "";
+
+  if (g_debug_enabled) {
+    Serial.printf("[BRIDGE] hello rootId=0x%08lX uptimeMs=%lu note=%s\n",
+                  static_cast<unsigned long>(root_id),
+                  static_cast<unsigned long>(uptime_ms), note);
+  }
+
+  GuiUpdateNetwork(GetAllMeshNodeIds().size());
+  MaybeRequestTimeFromBridge("bridge_hello", /*force_ntp=*/false);
+  GuiRequestRender();
+}
+
+static void HandleBridgeWifiStatus(const JsonDocument &doc, bool connected) {
+  const char *ssid = doc["ssid"] | "";
+  const char *ip = doc["ip"] | "";
+
+  if (g_debug_enabled) {
+    Serial.printf("[BRIDGE] wifi_%s ssid=\"%s\" ip=%s\n",
+                  connected ? "connected" : "disconnected", ssid, ip);
+  }
+
+  if (connected) {
+    MaybeRequestTimeFromBridge("wifi_connected", /*force_ntp=*/false);
+  }
+
+  GuiRequestRender();
+}
+
 static void HandleBridgeStatus(const JsonDocument &doc) {
   const size_t peers = doc["connections"] | 0U;
   size_t node_count = 0U;
@@ -7006,8 +7038,14 @@ static void ProcessBridgeSerial() {
         const char *type = doc["type"] | "";
         if (strcmp(type, "mesh_frame") == 0) {
           HandleBridgeFrame(doc);
+        } else if (strcmp(type, "bridge_hello") == 0) {
+          HandleBridgeHello(doc);
         } else if (strcmp(type, "bridge_status") == 0) {
           HandleBridgeStatus(doc);
+        } else if (strcmp(type, "wifi_connected") == 0) {
+          HandleBridgeWifiStatus(doc, /*connected=*/true);
+        } else if (strcmp(type, "wifi_disconnected") == 0) {
+          HandleBridgeWifiStatus(doc, /*connected=*/false);
         } else if (strcmp(type, "time_sync") == 0) {
           HandleBridgeTimeSync(doc);
         } else {
