@@ -224,7 +224,7 @@ static void FlushNtfyQueue() {
 
 static void SendLineToGui(const String &line) {
   if (g_gui_passthrough || g_debug_verbose) {
-    Serial.print(F("[BRIDGE->GUI] "));
+    Serial.print(F("[BRIDGE->GUI SENT] "));
     Serial.println(line);
   }
 
@@ -579,7 +579,7 @@ static void ProcessGuiPassthrough() {
     const char ch = gui_serial.read();
     if (ch == '\n') {
       if (!g_gui_passthrough_rx_line.isEmpty()) {
-        Serial.print(F("[GUI->BRIDGE-PC] "));
+        Serial.print(F("[GUI->BRIDGE-PC RECEIVED] "));
         Serial.println(g_gui_passthrough_rx_line);
         HandleGuiJsonLine(g_gui_passthrough_rx_line);
       }
@@ -649,6 +649,11 @@ static void ProcessGuiSerial() {
   while (gui_serial.available() > 0) {
     const char ch = gui_serial.read();
     if (ch == '\n') {
+      if (g_debug_verbose) {
+        Serial.print(F("[GUI->BRIDGE RECEIVED] "));
+        Serial.println(g_gui_rx_line);
+      }
+
       HandleGuiJsonLine(g_gui_rx_line);
       g_gui_rx_line = "";
     } else if (ch != '\r') {
