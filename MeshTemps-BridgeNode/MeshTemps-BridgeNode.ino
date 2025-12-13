@@ -1021,7 +1021,12 @@ static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
     req.title = "MeshTemps test";
     req.cache_when_offline = true;
     TrySendOrQueueNtfy(req);
-    out.println(F("ntfy: test message queued"));
+
+    NtfyRequest summary_req = req;
+    summary_req.is_summary = true;
+    TrySendOrQueueNtfy(summary_req);
+
+    out.println(F("ntfy: test message queued to alert & summary"));
     return;
   }
 

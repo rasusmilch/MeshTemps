@@ -5451,7 +5451,9 @@ static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
     }
     SendNtfyRequestToBridge(payload, /*cache_when_offline=*/true,
                             /*is_summary=*/false, "MeshTemps test");
-    out.println(F("ntfy: test message queued"));
+    SendNtfyRequestToBridge(payload, /*cache_when_offline=*/true,
+                            /*is_summary=*/true, "MeshTemps test");
+    out.println(F("ntfy: test message queued to alert & summary"));
     return;
   }
 
