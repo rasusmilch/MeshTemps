@@ -221,6 +221,17 @@ constexpr uint32_t kDefaultBeepLenMs = 150;   // ms buzzer ON
 constexpr uint32_t kDefaultGapWarnMs = 10000; // ms between warning beeps
 constexpr uint32_t kDefaultGapAlertMs = 5000; // ms between alert beeps
 
+// NVS keys (must be <= 15 chars due to NVS key limits).
+constexpr const char kKeyBeepLen[] = "beep_len_ms";
+constexpr const char kKeyBeepWarnGap[] = "beep_warn_gap";
+constexpr const char kKeyBeepAlertGap[] = "beep_alert_gap";
+constexpr const char kKeyBeepCooldown[] = "beep_cooldown";
+// Legacy keys from the monolithic root sketch (too long for NVS but kept for
+// read-back in case they were ever persisted on compatible builds).
+constexpr const char kKeyBeepWarnLegacy[] = "beep_gap_warn_ms";
+constexpr const char kKeyBeepAlertLegacy[] = "beep_gap_alert_ms";
+constexpr const char kKeyBeepCooldownLegacy[] = "beep_cooldown_ms";
+
 uint32_t g_beep_len_ms = kDefaultBeepLenMs;
 uint32_t g_beep_gap_warn_ms = kDefaultGapWarnMs;
 uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
@@ -252,6 +263,8 @@ bool g_buzzer_test_use_alert_pattern = true;
 // Flashing (root)
 constexpr uint32_t kDefaultFlashIntervalMs =
     1000; // ms between flash toggles; 0 = off
+constexpr const char kKeyFlashInterval[] = "flash_int_ms";
+constexpr const char kKeyFlashIntervalLegacy[] = "flash_interval_ms";
 uint32_t g_flash_interval_ms = kDefaultFlashIntervalMs;
 
 // Persistent root prefs.
@@ -602,6 +615,19 @@ static bool NvsPutULongVerified(Preferences &preferences, const char *key,
     return false;
   }
   return true;
+}
+
+static uint32_t NvsGetULongWithFallback(Preferences &preferences,
+                                        const char *primary_key,
+                                        const char *legacy_key,
+                                        uint32_t default_value) {
+  if (preferences.isKey(primary_key)) {
+    return preferences.getULong(primary_key, default_value);
+  }
+  if (legacy_key != nullptr && preferences.isKey(legacy_key)) {
+    return preferences.getULong(legacy_key, default_value);
+  }
+  return default_value;
 }
 
 static bool NvsPutFloatVerified(Preferences &preferences, const char *key,
@@ -1544,17 +1570,17 @@ void SaveBuzzerSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
 
   bool is_successful = true;
-  is_successful =
-      NvsPutULongVerified(g_root_preferences, "beep_len_ms", g_beep_len_ms) &&
-      is_successful;
-  is_successful = NvsPutULongVerified(g_root_preferences, "beep_gap_warn_ms",
+  is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepLen,
+                                      g_beep_len_ms) &&
+                  is_successful;
+  is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepWarnGap,
                                       g_beep_gap_warn_ms) &&
                   is_successful;
-  is_successful = NvsPutULongVerified(g_root_preferences, "beep_gap_alert_ms",
+  is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepAlertGap,
                                       g_beep_gap_alert_ms) &&
                   is_successful;
   // NEW: cooldown between alert episodes
-  is_successful = NvsPutULongVerified(g_root_preferences, "beep_cooldown_ms",
+  is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepCooldown,
                                       g_buzzer_cooldown_ms) &&
                   is_successful;
 
@@ -1569,13 +1595,19 @@ void SaveBuzzerSettings() {
 void LoadBuzzerSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const uint32_t len =
-      g_root_preferences.getULong("beep_len_ms", kDefaultBeepLenMs);
-  const uint32_t gw =
-      g_root_preferences.getULong("beep_gap_warn_ms", kDefaultGapWarnMs);
-  const uint32_t ga =
-      g_root_preferences.getULong("beep_gap_alert_ms", kDefaultGapAlertMs);
-  const uint32_t cd =
-      g_root_preferences.getULong("beep_cooldown_ms", kDefaultBuzzerCooldownMs);
+      NvsGetULongWithFallback(g_root_preferences, kKeyBeepLen, nullptr,
+                              kDefaultBeepLenMs);
+  const uint32_t gw = NvsGetULongWithFallback(g_root_preferences,
+                                              kKeyBeepWarnGap,
+                                              kKeyBeepWarnLegacy,
+                                              kDefaultGapWarnMs);
+  const uint32_t ga = NvsGetULongWithFallback(g_root_preferences,
+                                              kKeyBeepAlertGap,
+                                              kKeyBeepAlertLegacy,
+                                              kDefaultGapAlertMs);
+  const uint32_t cd = NvsGetULongWithFallback(
+      g_root_preferences, kKeyBeepCooldown, kKeyBeepCooldownLegacy,
+      kDefaultBuzzerCooldownMs);
   g_root_preferences.end();
 
   g_beep_len_ms = (len > 0) ? len : kDefaultBeepLenMs;
@@ -1589,7 +1621,7 @@ void SaveFlashSettings() {
   Serial.println(F("Saving Flash Interval Settings..."));
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
   const bool is_successful = NvsPutULongVerified(
-      g_root_preferences, "flash_interval_ms", g_flash_interval_ms);
+      g_root_preferences, kKeyFlashInterval, g_flash_interval_ms);
   g_root_preferences.end();
 
   if (!is_successful) {
@@ -1599,8 +1631,9 @@ void SaveFlashSettings() {
 
 void LoadFlashSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const uint32_t fi =
-      g_root_preferences.getULong("flash_interval_ms", kDefaultFlashIntervalMs);
+  const uint32_t fi = NvsGetULongWithFallback(
+      g_root_preferences, kKeyFlashInterval, kKeyFlashIntervalLegacy,
+      kDefaultFlashIntervalMs);
   g_root_preferences.end();
   g_flash_interval_ms = fi;
 }
