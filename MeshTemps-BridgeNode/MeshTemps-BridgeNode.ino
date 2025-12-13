@@ -632,7 +632,7 @@ static void HandleGuiNtfyRequest(const JsonDocument &doc) {
                                                     : false;
 
   const bool wifi_up = (WiFi.status() == WL_CONNECTED);
-  if (g_debug_enabled) {
+  if (g_debug_verbose) {
     Serial.printf(
         "[NTFY] GUI req len=%u cache=%s summary=%s title=%s enabled=%s wifi=%s "
         "queue=%u raw=%s\n",
