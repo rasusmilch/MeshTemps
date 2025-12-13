@@ -632,15 +632,17 @@ static void HandleGuiNtfyRequest(const JsonDocument &doc) {
                                                     : false;
 
   const bool wifi_up = (WiFi.status() == WL_CONNECTED);
-  Serial.printf(
-      "[NTFY] GUI req len=%u cache=%s summary=%s title=%s enabled=%s wifi=%s "
-      "queue=%u raw=%s\n",
-      static_cast<unsigned>(req.message.length()),
-      req.cache_when_offline ? "yes" : "no", req.is_summary ? "yes" : "no",
-      req.title.c_str(), g_ntfy_config.enabled ? "yes" : "no",
-      wifi_up ? "up" : "down",
-      static_cast<unsigned>(g_ntfy_queue.size()),
-      doc.as<String>().c_str());
+  if (g_debug_enabled) {
+    Serial.printf(
+        "[NTFY] GUI req len=%u cache=%s summary=%s title=%s enabled=%s wifi=%s "
+        "queue=%u raw=%s\n",
+        static_cast<unsigned>(req.message.length()),
+        req.cache_when_offline ? "yes" : "no", req.is_summary ? "yes" : "no",
+        req.title.c_str(), g_ntfy_config.enabled ? "yes" : "no",
+        wifi_up ? "up" : "down",
+        static_cast<unsigned>(g_ntfy_queue.size()),
+        doc.as<String>().c_str());
+  }
 
   TrySendOrQueueNtfy(req);
 }
