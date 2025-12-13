@@ -19,7 +19,7 @@
 
 #include "Config.h"
 
-// Bridge <-> GUI uses a dedicated UART on GPIO17/18 so we leave UART0 on the
+// Bridge <-> GUI uses a dedicated UART on GPIO16/17 so we leave UART0 on the
 // CH434 for flashing/console access.
 #ifndef BRIDGE_GUI_TX_PIN
 #define BRIDGE_GUI_TX_PIN 17
