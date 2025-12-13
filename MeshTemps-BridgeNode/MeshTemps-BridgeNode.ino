@@ -6,13 +6,16 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <esp_sntp.h>
 #include <painlessMesh.h>
 #include <algorithm>
 #include <map>
 #include <stdarg.h>
+#include <vector>
 
 #include "Config.h"
 
@@ -76,6 +79,25 @@ static String g_gui_rx_line;
 static bool g_debug_verbose = false;
 static std::map<uint32_t, uint32_t> g_node_last_seen_ms;
 
+// ntfy (Wi-Fi bridge) ---------------------------------------------------------
+struct NtfyConfig {
+  bool enabled = true;
+  String server_url = "https://ntfy.sh";
+  String alert_topic = "meshtemps-alerts";
+  String summary_topic = "meshtemps-summary";
+};
+
+struct NtfyRequest {
+  String topic;
+  String message;
+  String server;
+  String title;
+  bool cache_when_offline = false;
+};
+
+static NtfyConfig g_ntfy_config;
+static std::vector<NtfyRequest> g_ntfy_queue;
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
@@ -101,6 +123,112 @@ static void DebugPrintf(const char *fmt, ...) {
   va_start(args, fmt);
   Serial.vprintf(fmt, args);
   va_end(args);
+}
+
+// -----------------------------------------------------------------------------
+// ntfy helpers
+// -----------------------------------------------------------------------------
+
+static String TrimTrailingSlash(const String &url) {
+  if (url.endsWith("/")) {
+    return url.substring(0, url.length() - 1);
+  }
+  return url;
+}
+
+static bool SendNtfyHttp(const NtfyRequest &req) {
+  if (!g_ntfy_config.enabled) {
+    DebugPrintln(F("[NTFY] disabled; dropping request"));
+    return false;
+  }
+
+  String topic = req.topic;
+  if (topic.isEmpty()) {
+    topic = g_ntfy_config.alert_topic;
+  }
+  String server = req.server;
+  if (server.isEmpty()) {
+    server = g_ntfy_config.server_url;
+  }
+
+  if (topic.isEmpty() || server.isEmpty()) {
+    Serial.println(F("[NTFY] Missing topic/server; cannot send"));
+    return false;
+  }
+
+  const String base = TrimTrailingSlash(server);
+  String url = base + "/" + topic;
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  if (!http.begin(client, url)) {
+    Serial.printf("[NTFY] http.begin failed for %s\n", url.c_str());
+    return false;
+  }
+
+  if (!req.title.isEmpty()) {
+    http.addHeader("Title", req.title);
+  }
+  http.addHeader("Content-Type", "text/plain");
+
+  const int status = http.POST(req.message);
+  http.end();
+
+  if (status >= 200 && status < 300) {
+    DebugPrintf("[NTFY] sent topic=%s status=%d\n", topic.c_str(), status);
+    return true;
+  }
+
+  Serial.printf("[NTFY] post failed status=%d\n", status);
+  return false;
+}
+
+static void QueueNtfyRequest(const NtfyRequest &req) {
+  constexpr size_t kMaxQueue = 20;
+  if (g_ntfy_queue.size() >= kMaxQueue) {
+    Serial.println(F("[NTFY] queue full; dropping"));
+    return;
+  }
+  g_ntfy_queue.push_back(req);
+  DebugPrintf("[NTFY] queued (size=%u)\n", static_cast<unsigned>(g_ntfy_queue.size()));
+}
+
+static void TrySendOrQueueNtfy(const NtfyRequest &req) {
+  if (!g_ntfy_config.enabled) {
+    DebugPrintln(F("[NTFY] disabled; ignoring request"));
+    return;
+  }
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (req.cache_when_offline) {
+      QueueNtfyRequest(req);
+    } else {
+      DebugPrintln(F("[NTFY] Wi-Fi down; dropping uncached request"));
+    }
+    return;
+  }
+
+  const bool ok = SendNtfyHttp(req);
+  if (!ok && req.cache_when_offline) {
+    QueueNtfyRequest(req);
+  }
+}
+
+static void FlushNtfyQueue() {
+  if (!g_ntfy_config.enabled) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  size_t idx = 0;
+  while (idx < g_ntfy_queue.size()) {
+    const NtfyRequest req = g_ntfy_queue[idx];
+    if (SendNtfyHttp(req)) {
+      g_ntfy_queue.erase(g_ntfy_queue.begin() + idx);
+    } else {
+      // Stop trying if the send failed while connected.
+      break;
+    }
+  }
 }
 
 static void SendJsonLineWithEcho(HardwareSerial &port, const JsonDocument &doc) {
@@ -164,6 +292,36 @@ static void SaveNetworkConfigToNVS() {
   prefs.putString("pwd", g_network_config.password);
   prefs.putInt("tz_min", g_network_config.timezone_minutes);
   prefs.putInt("tz_dst", g_network_config.dst_enabled ? 1 : 0);
+  prefs.end();
+}
+
+static void LoadNtfyConfigFromNvs() {
+  Preferences prefs;
+  if (!prefs.begin("ntfy", true)) {
+    return;
+  }
+
+  g_ntfy_config.enabled = prefs.getInt("enabled", 1) != 0;
+  g_ntfy_config.server_url = prefs.getString("server", g_ntfy_config.server_url);
+  g_ntfy_config.alert_topic =
+      prefs.getString("alert_topic", g_ntfy_config.alert_topic);
+  g_ntfy_config.summary_topic =
+      prefs.getString("summary_topic", g_ntfy_config.summary_topic);
+
+  prefs.end();
+}
+
+static void SaveNtfyConfigToNvs() {
+  Preferences prefs;
+  if (!prefs.begin("ntfy", false)) {
+    return;
+  }
+
+  prefs.putInt("enabled", g_ntfy_config.enabled ? 1 : 0);
+  prefs.putString("server", g_ntfy_config.server_url);
+  prefs.putString("alert_topic", g_ntfy_config.alert_topic);
+  prefs.putString("summary_topic", g_ntfy_config.summary_topic);
+
   prefs.end();
 }
 
@@ -421,6 +579,23 @@ static void HandleGuiTimeRequest(const JsonDocument &doc) {
   }
 }
 
+static void HandleGuiNtfyRequest(const JsonDocument &doc) {
+  const char *msg = doc["message"] | "";
+  if (msg[0] == '\0') {
+    return;
+  }
+
+  NtfyRequest req;
+  req.message = msg;
+  req.topic = doc["topic"].as<String>();
+  req.server = doc["server"].as<String>();
+  req.title = doc["title"].as<String>();
+  req.cache_when_offline = doc["cache"].is<bool>() ? doc["cache"].as<bool>()
+                                                    : false;
+
+  TrySendOrQueueNtfy(req);
+}
+
 static void ProcessGuiSerial() {
   while (gui_serial.available() > 0) {
     const char ch = gui_serial.read();
@@ -438,6 +613,8 @@ static void ProcessGuiSerial() {
         const char *type = doc["type"] | "";
         if (strcmp(type, "time_request") == 0) {
           HandleGuiTimeRequest(doc);
+        } else if (strcmp(type, "ntfy_request") == 0) {
+          HandleGuiNtfyRequest(doc);
         }
       }
 
@@ -640,12 +817,20 @@ static void WifiLoop() {
     doc["ssid"] = g_network_config.ssid;
     doc["ip"] = connected ? WiFi.localIP().toString() : "";
     SendJsonLineWithEcho(gui_serial, doc);
+
+    if (connected) {
+      FlushNtfyQueue();
+    }
     if (g_debug_verbose) {
       Serial.printf("[WiFi] %s ssid=\"%s\" ip=%s\n",
                     connected ? "connected" : "disconnected",
                     g_network_config.ssid.c_str(),
                     connected ? WiFi.localIP().toString().c_str() : "");
     }
+  }
+
+  if (connected && !g_ntfy_queue.empty()) {
+    FlushNtfyQueue();
   }
 }
 
@@ -713,6 +898,78 @@ static void CmdPassthru(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   out.println(F("ERR passthru (use on|off)"));
+}
+
+static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  if (argc < 2 || argv[1].equalsIgnoreCase("show")) {
+    out.printf("ntfy: enabled=%s\n", g_ntfy_config.enabled ? "yes" : "no");
+    out.printf("  server=%s\n", g_ntfy_config.server_url.c_str());
+    out.printf("  alert_topic=%s\n", g_ntfy_config.alert_topic.c_str());
+    out.printf("  summary_topic=%s\n", g_ntfy_config.summary_topic.c_str());
+    out.printf("  queued=%u\n", static_cast<unsigned>(g_ntfy_queue.size()));
+    return;
+  }
+
+  const String sub = argv[1];
+  if (sub.equalsIgnoreCase("enable")) {
+    if (argc < 3) {
+      out.println(F("ERR ntfy enable (use on|off)"));
+      return;
+    }
+    g_ntfy_config.enabled = argv[2].equalsIgnoreCase("on") ||
+                            argv[2].equalsIgnoreCase("true") ||
+                            argv[2] == "1";
+    SaveNtfyConfigToNvs();
+    out.printf("ntfy: enabled=%s (saved)\n", g_ntfy_config.enabled ? "yes" : "no");
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("server")) {
+    if (argc < 3) {
+      out.println(F("ERR ntfy server <url>"));
+      return;
+    }
+    g_ntfy_config.server_url = argv[2];
+    SaveNtfyConfigToNvs();
+    out.printf("ntfy: server=%s (saved)\n", g_ntfy_config.server_url.c_str());
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("topic")) {
+    if (argc < 4) {
+      out.println(F("ERR ntfy topic alert|summary <name>"));
+      return;
+    }
+    const String which = argv[2];
+    const String value = argv[3];
+    if (which.equalsIgnoreCase("alert")) {
+      g_ntfy_config.alert_topic = value;
+      SaveNtfyConfigToNvs();
+      out.printf("ntfy: alert_topic=%s (saved)\n",
+                 g_ntfy_config.alert_topic.c_str());
+      return;
+    }
+    if (which.equalsIgnoreCase("summary")) {
+      g_ntfy_config.summary_topic = value;
+      SaveNtfyConfigToNvs();
+      out.printf("ntfy: summary_topic=%s (saved)\n",
+                 g_ntfy_config.summary_topic.c_str());
+      return;
+    }
+    out.println(F("ERR ntfy topic (use alert|summary <name>)"));
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("clearqueue")) {
+    g_ntfy_queue.clear();
+    out.println(F("ntfy: cleared pending queue"));
+    return;
+  }
+
+  out.println(F("ERR ntfy (use show|enable|server|topic|clearqueue)"));
 }
 
 static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
@@ -938,10 +1195,13 @@ void setup() {
   g_console.RegisterCommand("debug", &CmdDebug, "debug on|off");
   g_console.RegisterCommand("passthru", &CmdPassthru,
                             "mirror GUI UART (17/18) to USB");
+  g_console.RegisterCommand("ntfy", &CmdNtfy,
+                            "ntfy show|enable|server|topic|clearqueue");
   g_console.RegisterCommand("wifi", &CmdWifi, "wifi status|scan|connect|ssid|password|clear");
   g_console.RegisterCommand("tz", &CmdTz, "tz show|set <minutes> [dst on|off]");
   g_console.RegisterCommand("time", &CmdTime, "time now|sync");
 
+  LoadNtfyConfigFromNvs();
   InitNetwork();
 
   SendBridgeHello();
