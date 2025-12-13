@@ -6924,6 +6924,7 @@ static void SendNtfyRequestToBridge(const String &message,
                                     bool cache_when_offline, bool is_summary,
                                     const char *title) {
   if (!g_ntfy_config.enabled || message.isEmpty()) {
+    Serial.println(F("[NTFY] not sending to bridge (disabled or empty message)"));
     return;
   }
 
@@ -6943,6 +6944,13 @@ static void SendNtfyRequestToBridge(const String &message,
   String line;
   serializeJson(doc, line);
   bridge_serial.println(line);
+
+  Serial.printf(
+      "[NTFY] queued for bridge len=%u cache=%s summary=%s title=%s\n",
+      static_cast<unsigned>(message.length()),
+      cache_when_offline ? "yes" : "no",
+      is_summary ? "yes" : "no",
+      (title != nullptr && title[0] != '\0') ? title : "");
 
   if (g_bridge_passthrough) {
     Serial.print(F("[GUI->BRIDGE] "));

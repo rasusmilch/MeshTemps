@@ -181,12 +181,13 @@ static void QueueNtfyRequest(const NtfyRequest &req) {
     return;
   }
   g_ntfy_queue.push_back(req);
-  DebugPrintf("[NTFY] queued (size=%u)\n", static_cast<unsigned>(g_ntfy_queue.size()));
+  Serial.printf("[NTFY] cached request (size=%u)\n",
+                static_cast<unsigned>(g_ntfy_queue.size()));
 }
 
 static void TrySendOrQueueNtfy(const NtfyRequest &req) {
   if (!g_ntfy_config.enabled) {
-    DebugPrintln(F("[NTFY] disabled; ignoring request"));
+    Serial.println(F("[NTFY] disabled; ignoring request"));
     return;
   }
 
@@ -194,7 +195,7 @@ static void TrySendOrQueueNtfy(const NtfyRequest &req) {
     if (req.cache_when_offline) {
       QueueNtfyRequest(req);
     } else {
-      DebugPrintln(F("[NTFY] Wi-Fi down; dropping uncached request"));
+      Serial.println(F("[NTFY] Wi-Fi down; dropping uncached request"));
     }
     return;
   }
@@ -607,6 +608,7 @@ static void HandleGuiTimeRequest(const JsonDocument &doc) {
 static void HandleGuiNtfyRequest(const JsonDocument &doc) {
   const char *msg = doc["message"] | "";
   if (msg[0] == '\0') {
+    Serial.println(F("[NTFY] empty message from GUI; ignoring"));
     return;
   }
 
@@ -617,6 +619,16 @@ static void HandleGuiNtfyRequest(const JsonDocument &doc) {
                                               : false;
   req.cache_when_offline = doc["cache"].is<bool>() ? doc["cache"].as<bool>()
                                                     : false;
+
+  const bool wifi_up = (WiFi.status() == WL_CONNECTED);
+  Serial.printf(
+      "[NTFY] GUI req len=%u cache=%s summary=%s title=%s enabled=%s wifi=%s "
+      "queue=%u\n",
+      static_cast<unsigned>(req.message.length()),
+      req.cache_when_offline ? "yes" : "no", req.is_summary ? "yes" : "no",
+      req.title.c_str(), g_ntfy_config.enabled ? "yes" : "no",
+      wifi_up ? "up" : "down",
+      static_cast<unsigned>(g_ntfy_queue.size()));
 
   TrySendOrQueueNtfy(req);
 }
