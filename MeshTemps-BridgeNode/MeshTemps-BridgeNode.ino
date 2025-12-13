@@ -25,7 +25,7 @@
 #define BRIDGE_GUI_TX_PIN 17
 #endif
 #ifndef BRIDGE_GUI_RX_PIN
-#define BRIDGE_GUI_RX_PIN 18
+#define BRIDGE_GUI_RX_PIN 16
 #endif
 
 #include "serial_console.h"
