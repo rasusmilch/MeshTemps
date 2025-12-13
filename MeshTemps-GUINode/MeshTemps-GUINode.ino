@@ -312,6 +312,19 @@ float g_alert_high_c = 30.0;
 bool g_any_warning = false;
 bool g_any_alert = false;
 
+// ntfy notifications
+struct NtfyConfig {
+  bool enabled = true;
+  bool summary_enabled = true;
+  uint32_t summary_period_min = 15; // minutes
+};
+
+enum class AlertState { kNormal = 0, kWarning = 1, kAlert = 2, kMissing = 3 };
+
+NtfyConfig g_ntfy_config;
+std::map<String, AlertState> g_ntfy_states;
+uint32_t g_ntfy_last_summary_ms = 0;
+
 // Top bar height in pixels; must match GuiInit().
 constexpr lv_coord_t kTopBarHeightPx = 36;
 
@@ -341,6 +354,9 @@ volatile size_t g_ui_peers = 0;
 Board *g_board = nullptr;
 
 void GuiRebuildTiles(); // forward
+static void SendNtfyRequestToBridge(const String &message,
+                                    bool cache_when_offline, bool is_summary,
+                                    const char *title = nullptr);
 // BuildTileContentForNode is defined later, after mesh_tile.h is included.
 // No extra prototype needed here.
 
@@ -1548,6 +1564,38 @@ void SaveHighlightSettings() {
   }
 }
 
+void LoadNtfySettings() {
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  g_ntfy_config.enabled = (g_root_preferences.getInt("ntfy_en", 1) != 0);
+  g_ntfy_config.summary_enabled = (g_root_preferences.getInt("ntfy_sum_en", 1) != 0);
+  g_ntfy_config.summary_period_min =
+      static_cast<uint32_t>(g_root_preferences.getUInt("ntfy_sum_min",
+                                                       g_ntfy_config.summary_period_min));
+  g_root_preferences.end();
+}
+
+void SaveNtfySettings() {
+  Serial.println(F("Saving ntfy Settings..."));
+  g_root_preferences.begin("meshroot", /*readOnly=*/false);
+
+  bool is_successful = true;
+  is_successful =
+      NvsPutIntVerified(g_root_preferences, "ntfy_en", g_ntfy_config.enabled ? 1 : 0) &&
+      is_successful;
+  is_successful = NvsPutIntVerified(g_root_preferences, "ntfy_sum_en",
+                                    g_ntfy_config.summary_enabled ? 1 : 0) &&
+                  is_successful;
+  is_successful = NvsPutULongVerified(g_root_preferences, "ntfy_sum_min",
+                                      g_ntfy_config.summary_period_min) &&
+                  is_successful;
+
+  g_root_preferences.end();
+
+  if (!is_successful) {
+    Serial.println(F("[NVS VERIFY] SaveNtfySettings failed"));
+  }
+}
+
 void LoadTileDisplaySettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   const int show_labels = g_root_preferences.getInt("show_labels", 1);
@@ -1912,6 +1960,91 @@ static String CanonAddr16(const String &addr) {
   return out;
 }
 
+static float ToDisplayUnits(float temp_c) {
+  if (isnan(temp_c)) return temp_c;
+  return g_display_fahrenheit ? (temp_c * 9.0f / 5.0f + 32.0f) : temp_c;
+}
+
+static const char *DisplayUnitsLabel() { return g_display_fahrenheit ? "°F" : "°C"; }
+
+static String FormatTempForMessage(float temp_c) {
+  if (isnan(temp_c)) {
+    return String("(no value)");
+  }
+  char buf[24];
+  const float t = ToDisplayUnits(temp_c);
+  snprintf(buf, sizeof(buf), "%.1f%s", static_cast<double>(t), DisplayUnitsLabel());
+  return String(buf);
+}
+
+static String FormatLimitRange(float low_c, float high_c) {
+  const bool has_low = !isnan(low_c);
+  const bool has_high = !isnan(high_c);
+  if (!has_low && !has_high) {
+    return String();
+  }
+
+  char buf[48];
+  if (has_low && has_high) {
+    snprintf(buf, sizeof(buf), "%.1f to %.1f%s", static_cast<double>(ToDisplayUnits(low_c)),
+             static_cast<double>(ToDisplayUnits(high_c)), DisplayUnitsLabel());
+  } else if (has_low) {
+    snprintf(buf, sizeof(buf), "below %.1f%s", static_cast<double>(ToDisplayUnits(low_c)),
+             DisplayUnitsLabel());
+  } else {
+    snprintf(buf, sizeof(buf), "above %.1f%s", static_cast<double>(ToDisplayUnits(high_c)),
+             DisplayUnitsLabel());
+  }
+  return String(buf);
+}
+
+static String FormatLimitSummary() {
+  String parts;
+  String warn = FormatLimitRange(g_warn_low_c, g_warn_high_c);
+  String alert = FormatLimitRange(g_alert_low_c, g_alert_high_c);
+  if (warn.length() > 0) {
+    parts += "warn: ";
+    parts += warn;
+  }
+  if (alert.length() > 0) {
+    if (parts.length() > 0) parts += "; ";
+    parts += "alert: ";
+    parts += alert;
+  }
+  return parts;
+}
+
+static const char *AlertStateName(AlertState state) {
+  switch (state) {
+  case AlertState::kWarning:
+    return "warning";
+  case AlertState::kAlert:
+    return "alert";
+  case AlertState::kMissing:
+    return "missing";
+  case AlertState::kNormal:
+  default:
+    return "normal";
+  }
+}
+
+static String NodeDisplayName(const MeshNode *node) {
+  if (node == nullptr) return String("(unknown node)");
+  if (node->label().length() > 0) {
+    return node->label();
+  }
+  char buf[11];
+  snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(node->node_id()));
+  return String(buf);
+}
+
+static String SensorDisplayName(const MeshNode::Sensor &sensor) {
+  if (sensor.label.length() > 0) {
+    return sensor.label;
+  }
+  return CanonAddr16(sensor.address);
+}
+
 // Build one tile's Content from MeshNode state + thresholds.
 // If a node exists in MeshNode store, we render it; otherwise we skip.
 static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
@@ -2073,6 +2206,95 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
 
   *out = c;
   return true;
+}
+
+static void EmitStateNotification(const String &key, AlertState new_state,
+                                  const String &subject, const String &detail,
+                                  const String &normal_detail, bool cache) {
+  AlertState prev = AlertState::kNormal;
+  auto it = g_ntfy_states.find(key);
+  if (it != g_ntfy_states.end()) {
+    prev = it->second;
+  }
+
+  if (new_state == prev) {
+    return;
+  }
+
+  if (new_state == AlertState::kNormal) {
+    if (prev != AlertState::kNormal) {
+      String msg = "Resolved (";
+      msg += AlertStateName(prev);
+      msg += "): ";
+      msg += subject;
+      if (normal_detail.length() > 0) {
+        msg += " - ";
+        msg += normal_detail;
+      }
+      if (g_debug_enabled) {
+        Serial.printf("[NTFY] %s -> normal (%s)\n", key.c_str(),
+                      normal_detail.c_str());
+      }
+      SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
+    }
+    g_ntfy_states.erase(key);
+    return;
+  }
+
+  String msg = "[";
+  msg += AlertStateName(new_state);
+  msg += "] ";
+  msg += subject;
+  if (detail.length() > 0) {
+    msg += " - ";
+    msg += detail;
+  }
+
+  if (g_debug_enabled) {
+    Serial.printf("[NTFY] %s: %s -> %s\n", key.c_str(),
+                  AlertStateName(prev), AlertStateName(new_state));
+  }
+  SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
+  g_ntfy_states[key] = new_state;
+}
+
+static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
+                                      uint8_t node_mute, bool *low_alert,
+                                      bool *high_alert, bool *low_warn,
+                                      bool *high_warn) {
+  if (low_alert) *low_alert = false;
+  if (high_alert) *high_alert = false;
+  if (low_warn) *low_warn = false;
+  if (high_warn) *high_warn = false;
+
+  if (!sensor.has_value || isnan(sensor.temp_c)) {
+    return AlertState::kNormal;
+  }
+
+  bool la = (!isnan(g_alert_low_c) && sensor.temp_c < g_alert_low_c);
+  bool ha = (!isnan(g_alert_high_c) && sensor.temp_c > g_alert_high_c);
+  if (la && (node_mute & kMuteLow)) la = false;
+  if (ha && (node_mute & kMuteHigh)) ha = false;
+
+  if (low_alert) *low_alert = la;
+  if (high_alert) *high_alert = ha;
+
+  if (la || ha) {
+    return AlertState::kAlert;
+  }
+
+  bool lw = (!isnan(g_warn_low_c) && sensor.temp_c < g_warn_low_c);
+  bool hw = (!isnan(g_warn_high_c) && sensor.temp_c > g_warn_high_c);
+  if (lw && (node_mute & kMuteLow)) lw = false;
+  if (hw && (node_mute & kMuteHigh)) hw = false;
+
+  if (low_warn) *low_warn = lw;
+  if (high_warn) *high_warn = hw;
+
+  if (lw || hw) {
+    return AlertState::kWarning;
+  }
+  return AlertState::kNormal;
 }
 
 // Find the [start,end) span (0-based token index) of a whitespace-delimited
@@ -3867,6 +4089,186 @@ static void ViewButtonEvent(lv_event_t *e) {
   }
 }
 
+static void ProcessNtfyAlerts(uint32_t now_ms) {
+  if (!g_ntfy_config.enabled || g_use_dummy_data) {
+    return;
+  }
+
+  auto mesh_node_list = mesh.getNodeList();
+  std::vector<uint32_t> connected_ids(mesh_node_list.begin(), mesh_node_list.end());
+  auto is_connected = [&](uint32_t node_id) -> bool {
+    for (uint32_t connected_id : connected_ids) {
+      if (connected_id == node_id) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (uint32_t id : ids) {
+    MeshNode *node = FindMeshNode(id);
+    if (node == nullptr) {
+      continue;
+    }
+
+    const bool node_connected = is_connected(id);
+    const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
+    const bool is_missing = !node_connected && (g_stale_minutes_threshold > 0U) &&
+                           (age_min >= g_stale_minutes_threshold);
+    const bool is_stale = node_connected && (g_stale_minutes_threshold > 0U) &&
+                          (age_min >= g_stale_minutes_threshold);
+    const bool sequence_stuck =
+        node->SequenceStuck(now_ms, kSeqStuckMsThreshold);
+    const uint8_t node_mute = node->mute_mask() & 0x3u;
+
+    bool node_has_alert = false;
+    bool node_has_warning = false;
+    String node_normal_detail;
+
+    for (const auto &sensor : node->sensors()) {
+      bool low_alert = false, high_alert = false, low_warn = false, high_warn = false;
+      const AlertState state = EvaluateSensorState(sensor, node_mute, &low_alert,
+                                                  &high_alert, &low_warn, &high_warn);
+      if (state == AlertState::kAlert) {
+        node_has_alert = true;
+      } else if (state == AlertState::kWarning) {
+        node_has_warning = true;
+      }
+
+      if (node_normal_detail.isEmpty() && sensor.has_value && !isnan(sensor.temp_c)) {
+        node_normal_detail = FormatTempForMessage(sensor.temp_c);
+      }
+
+      const String sensor_key = String("S:") + node->node_id_str() + ":" +
+                                CanonAddr16(sensor.address);
+      const String subject = NodeDisplayName(node) + " / " + SensorDisplayName(sensor);
+
+      String detail;
+      String resolved_detail;
+      if (sensor.has_value && !isnan(sensor.temp_c)) {
+        resolved_detail = FormatTempForMessage(sensor.temp_c);
+      }
+
+      if (state != AlertState::kNormal && sensor.has_value && !isnan(sensor.temp_c)) {
+        detail = FormatTempForMessage(sensor.temp_c);
+        if (low_alert) detail += " < alert low";
+        if (high_alert) detail += " > alert high";
+        if (low_warn && !low_alert) detail += " < warn low";
+        if (high_warn && !high_alert) detail += " > warn high";
+        const String limits = FormatLimitSummary();
+        if (limits.length() > 0) {
+          detail += " (";
+          detail += limits;
+          detail += ")";
+        }
+      }
+
+      EmitStateNotification(sensor_key, state, subject, detail, resolved_detail,
+                            /*cache=*/true);
+    }
+
+    if (sequence_stuck && !node_has_alert) {
+      node_has_warning = true;
+    }
+    if (is_stale && !node_has_alert) {
+      node_has_warning = true;
+    }
+
+    AlertState node_state = AlertState::kNormal;
+    String node_detail;
+    if (is_missing) {
+      node_state = AlertState::kMissing;
+      node_detail = "last update " + String(age_min) + " min ago";
+    } else if (node_has_alert) {
+      node_state = AlertState::kAlert;
+      node_detail = "sensor alert active";
+    } else if (node_has_warning) {
+      node_state = AlertState::kWarning;
+      if (sequence_stuck) {
+        node_detail = "sequence stuck";
+      } else if (is_stale) {
+        node_detail = "data stale (" + String(age_min) + " min)";
+      } else {
+        node_detail = "sensor near limits";
+      }
+    }
+
+    const String node_key = String("N:") + node->node_id_str();
+    EmitStateNotification(node_key, node_state, NodeDisplayName(node), node_detail,
+                          node_normal_detail, /*cache=*/true);
+  }
+}
+
+static void MaybeSendNtfySummary(uint32_t now_ms) {
+  if (!g_ntfy_config.enabled || !g_ntfy_config.summary_enabled || g_use_dummy_data) {
+    return;
+  }
+  if (g_ntfy_config.summary_period_min == 0U) {
+    return;
+  }
+
+  const uint32_t period_ms = g_ntfy_config.summary_period_min * 60000UL;
+  if (g_ntfy_last_summary_ms == 0U) {
+    g_ntfy_last_summary_ms = now_ms;
+    return;
+  }
+  if (now_ms - g_ntfy_last_summary_ms < period_ms) {
+    return;
+  }
+  g_ntfy_last_summary_ms = now_ms;
+
+  String message;
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (size_t i = 0; i < ids.size(); ++i) {
+    MeshNode *node = FindMeshNode(ids[i]);
+    if (node == nullptr) {
+      continue;
+    }
+
+    message += NodeDisplayName(node);
+    message += ":\n";
+
+    size_t sensor_lines = 0;
+    for (const auto &sensor : node->sensors()) {
+      if (!sensor.has_value || isnan(sensor.temp_c)) {
+        continue;
+      }
+      message += "  - ";
+      message += SensorDisplayName(sensor);
+      message += ": ";
+      message += FormatTempForMessage(sensor.temp_c);
+      message += "\n";
+      ++sensor_lines;
+    }
+
+    if (sensor_lines == 0) {
+      message += "  - (no readings)\n";
+    }
+
+    if (i + 1 < ids.size()) {
+      message += "\n";
+    }
+  }
+
+  if (message.length() > 0) {
+    SendNtfyRequestToBridge(message, /*cache_when_offline=*/false,
+                            /*is_summary=*/true, "MeshTemps summary");
+  }
+}
+
+static void NtfyLoop() {
+  static uint32_t last_check_ms = 0;
+  const uint32_t now_ms = millis();
+  if (last_check_ms != 0U && (now_ms - last_check_ms) < 2000U) {
+    return; // throttle to avoid heavy work every loop()
+  }
+  last_check_ms = now_ms;
+
+  ProcessNtfyAlerts(now_ms);
+  MaybeSendNtfySummary(now_ms);
+}
+
 // -----------------------------------------------------------------------------
 // GUI helpers callable from elsewhere
 // -----------------------------------------------------------------------------
@@ -4970,6 +5372,84 @@ static bool ParseMsArgument(const String &arg, uint32_t *out_ms, Print &out) {
 
   *out_ms = static_cast<uint32_t>(value);
   return true;
+}
+
+static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  if (argc < 2 || argv[1].equalsIgnoreCase("show")) {
+    out.printf("ntfy: enabled=%s summary=%s every=%lu min\n",
+               g_ntfy_config.enabled ? "yes" : "no",
+               g_ntfy_config.summary_enabled ? "yes" : "no",
+               static_cast<unsigned long>(g_ntfy_config.summary_period_min));
+    out.println(F("  topics/server configured on bridge"));
+    out.printf("  tracked_states=%u\n",
+               static_cast<unsigned>(g_ntfy_states.size()));
+    return;
+  }
+
+  const String sub = argv[1];
+  if (sub.equalsIgnoreCase("enable")) {
+    if (argc < 3) {
+      out.println(F("ERR ntfy enable (use on|off)"));
+      return;
+    }
+    g_ntfy_config.enabled = argv[2].equalsIgnoreCase("on") ||
+                            argv[2].equalsIgnoreCase("true") ||
+                            argv[2] == "1";
+    SaveNtfySettings();
+    out.printf("ntfy: enabled=%s (saved)\n", g_ntfy_config.enabled ? "yes" : "no");
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("summary")) {
+    if (argc < 3) {
+      out.println(F("ERR ntfy summary (use on|off)"));
+      return;
+    }
+    g_ntfy_config.summary_enabled = argv[2].equalsIgnoreCase("on") ||
+                                    argv[2].equalsIgnoreCase("true") ||
+                                    argv[2] == "1";
+    SaveNtfySettings();
+    out.printf("ntfy: summary=%s (saved)\n",
+               g_ntfy_config.summary_enabled ? "on" : "off");
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("freq") || sub.equalsIgnoreCase("minutes")) {
+    if (argc < 3) {
+      out.println(F("ERR ntfy freq <minutes>"));
+      return;
+    }
+    const long minutes = argv[2].toInt();
+    if (minutes <= 0) {
+      out.println(F("ERR ntfy freq (minutes must be >0)"));
+      return;
+    }
+    g_ntfy_config.summary_period_min = static_cast<uint32_t>(minutes);
+    g_ntfy_last_summary_ms = millis();
+    SaveNtfySettings();
+    out.printf("ntfy: summary every %ld min (saved)\n", minutes);
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("test")) {
+    String payload("MeshTemps ntfy test");
+    if (argc > 2) {
+      payload = argv[2];
+      for (int i = 3; i < argc; ++i) {
+        payload += ' ';
+        payload += argv[i];
+      }
+    }
+    SendNtfyRequestToBridge(payload, /*cache_when_offline=*/true,
+                            /*is_summary=*/false, "MeshTemps test");
+    out.println(F("ntfy: test message queued"));
+    return;
+  }
+
+  out.println(F("ERR ntfy (use show|enable|summary|freq|test [msg])"));
 }
 
 static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
@@ -6433,6 +6913,46 @@ static void SendTimeRequestToBridge(const char *reason, bool force_ntp) {
   if (g_bridge_passthrough) {
     Serial.print(F("[GUI->BRIDGE] "));
     Serial.println(line);
+  } else if (g_debug_enabled) {
+    const char *why = (reason != nullptr && reason[0] != '\0') ? reason : "";
+    Serial.printf("[GUI->BRIDGE] time_request force=%s reason=%s\n",
+                  force_ntp ? "true" : "false", why);
+  }
+}
+
+static void SendNtfyRequestToBridge(const String &message,
+                                    bool cache_when_offline, bool is_summary,
+                                    const char *title) {
+  if (!g_ntfy_config.enabled || message.isEmpty()) {
+    return;
+  }
+
+  JsonDocument doc;
+  doc["type"] = "ntfy_request";
+  doc["message"] = message;
+  if (is_summary) {
+    doc["summary"] = true;
+  }
+  if (cache_when_offline) {
+    doc["cache"] = true;
+  }
+  if (title != nullptr && title[0] != '\0') {
+    doc["title"] = title;
+  }
+
+  String line;
+  serializeJson(doc, line);
+  bridge_serial.println(line);
+
+  if (g_bridge_passthrough) {
+    Serial.print(F("[GUI->BRIDGE] "));
+    Serial.println(line);
+  } else if (g_debug_enabled) {
+    Serial.printf("[GUI->BRIDGE] ntfy_request cache=%s summary=%s title=%s len=%u\n",
+                  cache_when_offline ? "yes" : "no",
+                  is_summary ? "yes" : "no",
+                  (title != nullptr) ? title : "",
+                  static_cast<unsigned>(message.length()));
   }
 }
 
@@ -6571,6 +7091,8 @@ void setup() {
   g_console.RegisterCommand("dummy", &CmdDummy, "dummy on|off");
   g_console.RegisterCommand("limits", &CmdLimits,
                             "limits show | warn <lo> <hi> | alert <lo> <hi>");
+  g_console.RegisterCommand("ntfy", &CmdNtfy,
+                            "ntfy show|enable|summary|freq|test [msg]");
   g_console.RegisterCommand("buzzer", &CmdBuzzer,
                             "buzzer len | warn | alert | cooldown | test | silence | stop");
   g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");
@@ -6594,6 +7116,7 @@ void setup() {
   g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view");
 
   // This will override the compile-time defaults if keys exist in NVS.
+  LoadNtfySettings();
   LoadHistoryConfigFromNvs();
 
   // Ask the bridge for current time (and to force NTP if needed) after a GUI
@@ -6606,6 +7129,7 @@ void setup() {
 
 void loop() {
   ProcessBridgeSerial();
+  NtfyLoop();
   DisplayLoop();
   BuzzerLoop();
   if (g_bridge_passthrough) {
