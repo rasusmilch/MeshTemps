@@ -6920,8 +6920,6 @@ static void SendTimeRequestToBridge(const char *reason, bool force_ntp) {
   }
 }
 
-#ifndef GUI_SEND_NTFY_REQUEST_TO_BRIDGE_DEFINED
-#define GUI_SEND_NTFY_REQUEST_TO_BRIDGE_DEFINED
 static void SendNtfyRequestToBridge(const String &message,
                                     bool cache_when_offline, bool is_summary,
                                     const char *title) {
@@ -6957,7 +6955,6 @@ static void SendNtfyRequestToBridge(const String &message,
                   static_cast<unsigned>(message.length()));
   }
 }
-#endif  // GUI_SEND_NTFY_REQUEST_TO_BRIDGE_DEFINED
 
 static void MaybeRequestTimeFromBridge(const char *reason, bool force_ntp) {
   const uint32_t now_ms = millis();
