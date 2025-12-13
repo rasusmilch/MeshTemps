@@ -607,12 +607,12 @@ void MeshTile::Loop(uint32_t now_ms) {
   flash_on_ = !flash_on_;
   last_flash_toggle_ms_ = now_ms;
 
-  if (g_debug_enabled) {
-    Serial.printf("[FLASH] now=%lu ms interval=%lu ms delta=%lu ms state=%s\n",
-                  static_cast<unsigned long>(now_ms),
-                  static_cast<unsigned long>(flash_interval_ms_),
-                  static_cast<unsigned long>(delta), flash_on_ ? "ON" : "OFF");
-  }
+  // if (g_debug_enabled) {
+  //   Serial.printf("[FLASH] now=%lu ms interval=%lu ms delta=%lu ms state=%s\n",
+  //                 static_cast<unsigned long>(now_ms),
+  //                 static_cast<unsigned long>(flash_interval_ms_),
+  //                 static_cast<unsigned long>(delta), flash_on_ ? "ON" : "OFF");
+  // }
 
   UpdateFlashAppearance();
 }
