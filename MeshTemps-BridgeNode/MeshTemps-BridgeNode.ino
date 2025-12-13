@@ -438,11 +438,24 @@ static void SendBridgeStatus(const char *reason = nullptr) {
               static_cast<unsigned>(node_list.size()));
 }
 
-static void SendTimeSyncToGui(const char *source) {
-  time_t epoch = g_ntp_last_sync_epoch;
-  if (epoch <= 0) {
-    epoch = time(nullptr);
+static bool SendTimeSyncToGui(const char *source) {
+  if (!g_ntp_time_valid) {
+    DebugPrintf("[TIME] skip time_sync source=%s (time not valid)\n", source);
+    return false;
   }
+
+  // Prefer the current RTC value so we propagate an up-to-date epoch instead
+  // of reusing the last NTP sync moment. Fall back to the last sync time if
+  // the RTC has not been seeded yet.
+  time_t epoch = time(nullptr);
+  if (epoch <= 0) {
+    epoch = g_ntp_last_sync_epoch;
+  }
+  if (epoch <= 0) {
+    DebugPrintf("[TIME] skip time_sync source=%s (no epoch available)\n", source);
+    return false;
+  }
+
   g_ntp_last_sync_epoch = epoch;
 
   JsonDocument doc;
@@ -457,6 +470,7 @@ static void SendTimeSyncToGui(const char *source) {
               source, static_cast<long>(g_ntp_last_sync_epoch),
               static_cast<long>(g_network_config.timezone_minutes),
               g_network_config.dst_enabled ? "on" : "off");
+  return true;
 }
 
 static void ForwardMeshPayload(uint32_t from, const JsonDocument &payload) {
@@ -485,6 +499,27 @@ static void HandleRootProbe(uint32_t from, const JsonDocument &probe_doc) {
   mesh.sendSingle(from, out);
   DebugPrintf("[MESH] root_probe ack to=0x%08lX\n",
               static_cast<unsigned long>(from));
+}
+
+static void HandleGuiJsonLine(const String &line) {
+  if (line.isEmpty()) {
+    return;
+  }
+
+  if (g_debug_verbose) {
+    Serial.print(F("[GUI->BRIDGE] "));
+    Serial.println(line);
+  }
+
+  JsonDocument doc;
+  if (deserializeJson(doc, line) == DeserializationError::Ok) {
+    const char *type = doc["type"] | "";
+    if (strcmp(type, "time_request") == 0) {
+      HandleGuiTimeRequest(doc);
+    } else if (strcmp(type, "ntfy_request") == 0) {
+      HandleGuiNtfyRequest(doc);
+    }
+  }
 }
 
 static void ProcessGuiPassthrough() {
@@ -534,6 +569,7 @@ static void ProcessGuiPassthrough() {
       if (!g_gui_passthrough_rx_line.isEmpty()) {
         Serial.print(F("[GUI->BRIDGE-PC] "));
         Serial.println(g_gui_passthrough_rx_line);
+        HandleGuiJsonLine(g_gui_passthrough_rx_line);
       }
       g_gui_passthrough_rx_line = "";
     } else if (ch != '\r') {
@@ -551,9 +587,10 @@ static void HandleGuiTimeRequest(const JsonDocument &doc) {
                   force_ntp ? "true" : "false", reason);
   }
 
-  const time_t now_epoch = time(nullptr);
-  if (g_ntp_last_sync_epoch <= 0 && now_epoch > 0) {
-    g_ntp_last_sync_epoch = now_epoch;
+  const bool sent = SendTimeSyncToGui(reason);
+  if (!sent && g_debug_verbose) {
+    Serial.printf("[TIME] time_sync to GUI skipped (reason=%s valid=%s)\n", reason,
+                  g_ntp_time_valid ? "true" : "false");
   }
   // Always reply so the GUI can refresh its clock even if we only have a
   // coarse RTC value; a force_ntp below will refresh the authoritative time.
@@ -590,24 +627,7 @@ static void ProcessGuiSerial() {
   while (gui_serial.available() > 0) {
     const char ch = gui_serial.read();
     if (ch == '\n') {
-      if (g_gui_rx_line.isEmpty()) {
-        continue;
-      }
-      if (g_debug_verbose) {
-        Serial.print(F("[GUI->BRIDGE] "));
-        Serial.println(g_gui_rx_line);
-      }
-
-      JsonDocument doc;
-      if (deserializeJson(doc, g_gui_rx_line) == DeserializationError::Ok) {
-        const char *type = doc["type"] | "";
-        if (strcmp(type, "time_request") == 0) {
-          HandleGuiTimeRequest(doc);
-        } else if (strcmp(type, "ntfy_request") == 0) {
-          HandleGuiNtfyRequest(doc);
-        }
-      }
-
+      HandleGuiJsonLine(g_gui_rx_line);
       g_gui_rx_line = "";
     } else if (ch != '\r') {
       g_gui_rx_line += ch;
