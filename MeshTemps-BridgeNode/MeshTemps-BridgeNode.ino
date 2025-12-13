@@ -649,7 +649,7 @@ static void ProcessGuiSerial() {
   while (gui_serial.available() > 0) {
     const char ch = gui_serial.read();
     if (ch == '\n') {
-      if (g_debug_verbose) {
+      if (g_debug_verbose || g_bridge_passthrough) {
         Serial.print(F("[GUI->BRIDGE RECEIVED] "));
         Serial.println(g_gui_rx_line);
       }

@@ -6992,10 +6992,7 @@ static void ProcessBridgeSerial() {
         continue;
       }
 
-      if (g_bridge_passthrough) {
-        Serial.print(F("[BRIDGE->GUI-PC RECEIVED] "));
-        Serial.println(g_bridge_rx_line);
-      } else if (g_debug_enabled) {
+      if (g_debug_enabled || g_bridge_passthrough) {
         Serial.print(F("[BRIDGE->GUI RECEIVED] "));
         Serial.println(g_bridge_rx_line);
       }
