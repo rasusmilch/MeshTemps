@@ -438,8 +438,8 @@ static void SendBridgeStatus(const char *reason = nullptr) {
               static_cast<unsigned>(node_list.size()));
 }
 
-static bool SendTimeSyncToGui(const char *source) {
-  if (!g_ntp_time_valid) {
+static bool SendTimeSyncToGui(const char *source, bool allow_stale_time = false) {
+  if (!g_ntp_time_valid && !allow_stale_time) {
     DebugPrintf("[TIME] skip time_sync source=%s (time not valid)\n", source);
     return false;
   }
@@ -582,19 +582,17 @@ static void HandleGuiTimeRequest(const JsonDocument &doc) {
   const bool force_ntp = doc["force"] | false;
   const char *reason = doc["reason"] | "gui_request";
 
-  if (g_debug_verbose) {
-    Serial.printf("[BRIDGE] gui time_request force=%s reason=%s\n",
-                  force_ntp ? "true" : "false", reason);
-  }
+  Serial.printf("[BRIDGE] gui time_request force=%s reason=%s\n",
+                force_ntp ? "true" : "false", reason);
 
   const bool sent = SendTimeSyncToGui(reason);
-  if (!sent && g_debug_verbose) {
+  if (!sent) {
     Serial.printf("[TIME] time_sync to GUI skipped (reason=%s valid=%s)\n", reason,
                   g_ntp_time_valid ? "true" : "false");
   }
   // Always reply so the GUI can refresh its clock even if we only have a
   // coarse RTC value; a force_ntp below will refresh the authoritative time.
-  SendTimeSyncToGui(reason);
+  SendTimeSyncToGui(reason, /*allow_stale_time=*/true);
 
   if (force_ntp || !g_ntp_time_valid) {
     // Try an immediate NTP sync regardless of the normal retry schedule.
