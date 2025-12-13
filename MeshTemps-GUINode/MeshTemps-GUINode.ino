@@ -3843,7 +3843,10 @@ static void ViewButtonEvent(lv_event_t *e) {
 // -----------------------------------------------------------------------------
 
 void GuiUpdateNetwork(size_t peers) {
-  g_ui_peers = peers;
+  const size_t node_count = GetAllMeshNodeIds().size();
+  const size_t effective_peers = std::max(peers, node_count);
+
+  g_ui_peers = effective_peers;
   g_values_dirty = true; // label text only
 }
 
@@ -6297,6 +6300,7 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   }
 
   GuiUpdateNodeSummary(node_model->node_id_str().c_str(), bus_gpio, now_ms);
+  GuiUpdateNetwork(GetAllMeshNodeIds().size());
 
   // Layout vs values: new node means layout; otherwise just value refresh.
   if (structure_changed) {
@@ -6374,7 +6378,15 @@ static void HandleBridgeFrame(const JsonDocument &doc) {
 
 static void HandleBridgeStatus(const JsonDocument &doc) {
   const size_t peers = doc["connections"] | 0U;
-  GuiUpdateNetwork(peers);
+  size_t node_count = 0U;
+  if (doc["nodes"].is<JsonArrayConst>()) {
+    node_count = doc["nodes"].size();
+  }
+  if (node_count == 0U) {
+    node_count = GetAllMeshNodeIds().size();
+  }
+
+  GuiUpdateNetwork(std::max(peers, node_count));
   if (!g_ntp_time_valid) {
     MaybeRequestTimeFromBridge("bridge_status", /*force_ntp=*/false);
   }
