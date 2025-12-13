@@ -6833,7 +6833,7 @@ static String g_bridge_rx_line;
 static void SendLineToBridge(const String &line,
                              const __FlashStringHelper *tag = nullptr) {
   if (g_bridge_passthrough || g_debug_enabled) {
-    Serial.print(F("[GUI->BRIDGE] "));
+    Serial.print(F("[GUI->BRIDGE SENT] "));
     if (tag != nullptr) {
       Serial.print(tag);
       Serial.print(F(": "));
@@ -6926,7 +6926,7 @@ static void SendTimeRequestToBridge(const char *reason, bool force_ntp) {
 
   if (!g_bridge_passthrough && g_debug_enabled) {
     const char *why = (reason != nullptr && reason[0] != '\0') ? reason : "";
-    Serial.printf("[GUI->BRIDGE] time_request force=%s reason=%s\n",
+    Serial.printf("[GUI->BRIDGE SENT] time_request force=%s reason=%s\n",
                   force_ntp ? "true" : "false", why);
   }
 }
@@ -6964,7 +6964,7 @@ static void SendNtfyRequestToBridge(const String &message,
       (title != nullptr && title[0] != '\0') ? title : "");
 
   if (!g_bridge_passthrough && g_debug_enabled) {
-    Serial.printf("[GUI->BRIDGE] ntfy_request cache=%s summary=%s title=%s len=%u\n",
+    Serial.printf("[GUI->BRIDGE SENT] ntfy_request cache=%s summary=%s title=%s len=%u\n",
                   cache_when_offline ? "yes" : "no",
                   is_summary ? "yes" : "no",
                   (title != nullptr) ? title : "",
@@ -6993,7 +6993,10 @@ static void ProcessBridgeSerial() {
       }
 
       if (g_bridge_passthrough) {
-        Serial.print(F("[BRIDGE->GUI-PC] "));
+        Serial.print(F("[BRIDGE->GUI-PC RECEIVED] "));
+        Serial.println(g_bridge_rx_line);
+      } else if (g_debug_enabled) {
+        Serial.print(F("[BRIDGE->GUI RECEIVED] "));
         Serial.println(g_bridge_rx_line);
       }
 
