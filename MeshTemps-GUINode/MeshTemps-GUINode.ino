@@ -304,10 +304,12 @@ bool g_show_sensor_labels = true; // show sensor names in tiles
 bool g_show_age_label = true;     // show "Age: N min" in tiles
 
 // Temperature limits (in °C, NaN = disabled).
+constexpr float kDefaultLimitHysteresisC = 0.5f * (5.0f / 9.0f); // 0.5°F
 float g_warn_low_c = 5.0;
 float g_warn_high_c = 26.0;
 float g_alert_low_c = 3.0;
 float g_alert_high_c = 30.0;
+float g_limit_hysteresis_c = kDefaultLimitHysteresisC;
 
 // Aggregate state for buzzer.
 bool g_any_warning = false;
@@ -1504,6 +1506,9 @@ void SaveLimits() {
   is_successful =
       NvsPutFloatVerified(g_root_preferences, "alert_high_c", g_alert_high_c) &&
       is_successful;
+  is_successful = NvsPutFloatVerified(g_root_preferences, "limit_hyst_c",
+                                      g_limit_hysteresis_c) &&
+                  is_successful;
 
   g_root_preferences.end();
 
@@ -1520,6 +1525,8 @@ void LoadLimits() {
   const float wh = g_root_preferences.getFloat("warn_high_c", g_warn_high_c);
   const float al = g_root_preferences.getFloat("alert_low_c", g_alert_low_c);
   const float ah = g_root_preferences.getFloat("alert_high_c", g_alert_high_c);
+  const float hyst =
+      g_root_preferences.getFloat("limit_hyst_c", g_limit_hysteresis_c);
   g_root_preferences.end();
 
   if (wh > wl) {
@@ -1530,6 +1537,7 @@ void LoadLimits() {
     g_alert_low_c = al;
     g_alert_high_c = ah;
   }
+  g_limit_hysteresis_c = (hyst >= 0.0f) ? hyst : kDefaultLimitHysteresisC;
 }
 
 void LoadDisplayUnits() {
@@ -2018,7 +2026,16 @@ static String FormatLimitSummary() {
   String parts;
   String warn = FormatLimitRange(g_warn_low_c, g_warn_high_c);
   String alert = FormatLimitRange(g_alert_low_c, g_alert_high_c);
+  if (g_limit_hysteresis_c > 0.0f) {
+    const float hyst_disp =
+        g_display_fahrenheit ? (g_limit_hysteresis_c * 1.8f) : g_limit_hysteresis_c;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "hyst=%.2f%s", static_cast<double>(hyst_disp),
+             DisplayUnitsLabel());
+    parts += buf;
+  }
   if (warn.length() > 0) {
+    if (parts.length() > 0) parts += "; ";
     parts += "warn: ";
     parts += warn;
   }
@@ -2171,8 +2188,12 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
         const float t = sv.temp_c;
 
         // Alerts (respect node mute).
-        bool low_alert = (!isnan(g_alert_low_c) && t < g_alert_low_c);
-        bool high_alert = (!isnan(g_alert_high_c) && t > g_alert_high_c);
+        const float alert_low_thresh =
+            isnan(g_alert_low_c) ? NAN : (g_alert_low_c - g_limit_hysteresis_c);
+        const float alert_high_thresh =
+            isnan(g_alert_high_c) ? NAN : (g_alert_high_c + g_limit_hysteresis_c);
+        bool low_alert = (!isnan(alert_low_thresh) && t < alert_low_thresh);
+        bool high_alert = (!isnan(alert_high_thresh) && t > alert_high_thresh);
         if (low_alert && (node_mute & kMuteLow)) {
           low_alert = false;
         }
@@ -2183,8 +2204,12 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
 
         // Warnings only if not already alert (respect mute).
         if (!sv.is_alert) {
-          bool low_warn = (!isnan(g_warn_low_c) && t < g_warn_low_c);
-          bool high_warn = (!isnan(g_warn_high_c) && t > g_warn_high_c);
+          const float warn_low_thresh =
+              isnan(g_warn_low_c) ? NAN : (g_warn_low_c - g_limit_hysteresis_c);
+          const float warn_high_thresh =
+              isnan(g_warn_high_c) ? NAN : (g_warn_high_c + g_limit_hysteresis_c);
+          bool low_warn = (!isnan(warn_low_thresh) && t < warn_low_thresh);
+          bool high_warn = (!isnan(warn_high_thresh) && t > warn_high_thresh);
           if (low_warn && (node_mute & kMuteLow)) {
             low_warn = false;
           }
@@ -2290,8 +2315,12 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     return AlertState::kNormal;
   }
 
-  bool la = (!isnan(g_alert_low_c) && sensor.temp_c < g_alert_low_c);
-  bool ha = (!isnan(g_alert_high_c) && sensor.temp_c > g_alert_high_c);
+  const float alert_low_thresh =
+      isnan(g_alert_low_c) ? NAN : (g_alert_low_c - g_limit_hysteresis_c);
+  const float alert_high_thresh =
+      isnan(g_alert_high_c) ? NAN : (g_alert_high_c + g_limit_hysteresis_c);
+  bool la = (!isnan(alert_low_thresh) && sensor.temp_c < alert_low_thresh);
+  bool ha = (!isnan(alert_high_thresh) && sensor.temp_c > alert_high_thresh);
   if (la && (node_mute & kMuteLow)) la = false;
   if (ha && (node_mute & kMuteHigh)) ha = false;
 
@@ -2302,8 +2331,12 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     return AlertState::kAlert;
   }
 
-  bool lw = (!isnan(g_warn_low_c) && sensor.temp_c < g_warn_low_c);
-  bool hw = (!isnan(g_warn_high_c) && sensor.temp_c > g_warn_high_c);
+  const float warn_low_thresh =
+      isnan(g_warn_low_c) ? NAN : (g_warn_low_c - g_limit_hysteresis_c);
+  const float warn_high_thresh =
+      isnan(g_warn_high_c) ? NAN : (g_warn_high_c + g_limit_hysteresis_c);
+  bool lw = (!isnan(warn_low_thresh) && sensor.temp_c < warn_low_thresh);
+  bool hw = (!isnan(warn_high_thresh) && sensor.temp_c > warn_high_thresh);
   if (lw && (node_mute & kMuteLow)) lw = false;
   if (hw && (node_mute & kMuteHigh)) hw = false;
 
@@ -5274,12 +5307,18 @@ static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   auto FromC = [&](float v) {
     return g_display_fahrenheit ? (v * 1.8f + 32.0f) : v;
   };
+  auto DeltaToC = [&](float v) { return g_display_fahrenheit ? (v / 1.8f) : v; };
+  auto DeltaFromC = [&](float v) {
+    return g_display_fahrenheit ? (v * 1.8f) : v;
+  };
   const char *unit = g_display_fahrenheit ? "F" : "C";
   if (argc >= 2 && argv[1] == "show") {
     out.printf("limits warn=%.2f..%.2f %s\n", FromC(g_warn_low_c),
                FromC(g_warn_high_c), unit);
     out.printf("limits alert=%.2f..%.2f %s\n", FromC(g_alert_low_c),
                FromC(g_alert_high_c), unit);
+    out.printf("limits hysteresis=%.2f %s\n", DeltaFromC(g_limit_hysteresis_c),
+               unit);
     return;
   }
   if (argc >= 4 && (argv[1] == "warn" || argv[1] == "alert")) {
@@ -5304,8 +5343,20 @@ static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
     }
     return;
   }
+  if (argc >= 3 && argv[1] == "hyst") {
+    const float hyst_in = argv[2].toFloat();
+    if (hyst_in < 0.0f) {
+      out.println(F("ERR limits (hysteresis must be >= 0)"));
+      return;
+    }
+    g_limit_hysteresis_c = DeltaToC(hyst_in);
+    SaveLimits();
+    out.printf("limits hysteresis=%.2f %s\n", DeltaFromC(g_limit_hysteresis_c),
+               unit);
+    return;
+  }
   out.println(F("ERR limits (use 'limits show' | 'limits warn <lo> <hi>' | "
-                "'limits alert <lo> <hi>')"));
+                "'limits alert <lo> <hi>' | 'limits hyst <delta>')"));
 }
 
 static void CmdTopo(void *ctx, int argc, const String argv[], Print &out) {
