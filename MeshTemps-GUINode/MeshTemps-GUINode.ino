@@ -5534,46 +5534,6 @@ static void CmdSorder(void *ctx, int argc, const String argv[], Print &out) {
         "'sorder clear <nodeIdHex> <addr16>' | 'sorder list [nodeIdHex]')"));
 }
 
-static void CmdTime(void *ctx, int argc, const String argv[], Print &out) {
-  (void)ctx;
-  PrintCommandHeader(out, argc, argv);
-
-  if (argc <= 1) {
-    out.println(F("usage:"));
-    out.println(F("  time now          - show current local time"));
-    out.println(F("  time sync         - force NTP sync now"));
-    return;
-  }
-
-  const String sub = argv[1];
-
-  if (sub.equalsIgnoreCase("now") || sub.equalsIgnoreCase("show")) {
-    PrintCurrentLocalTime(out);
-    return;
-  }
-
-  if (sub.equalsIgnoreCase("sync")) {
-    if (g_network_config.ssid.isEmpty()) {
-      out.println(F("[TIME] SSID not configured; use 'wifi ssid ...' first"));
-      return;
-    }
-
-    if (!EnsureWifiConnected(out)) {
-      out.println(F("[TIME] WiFi not connected; cannot perform NTP sync"));
-      return;
-    }
-
-    g_last_ntp_attempt_ms = millis(); // keep scheduler in sync
-    const bool ok = SyncTimeFromNtp(out);
-    if (!ok && !g_ntp_time_valid) {
-      SetDefaultDateTime();
-    }
-    return;
-  }
-
-  out.println(F("ERR time (use 'time now' or 'time sync')"));
-}
-
 static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
