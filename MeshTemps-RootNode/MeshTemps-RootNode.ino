@@ -590,10 +590,8 @@ static bool NvsPutIntVerified(Preferences &preferences, const char *key,
 static bool NvsPutULongVerified(Preferences &preferences, const char *key,
                                 uint32_t value) {
   const size_t written = preferences.putULong(key, value);
-  const bool length_ok =
-      (written == sizeof(uint32_t) || written == sizeof(uint64_t));
-  if (!length_ok) {
-    NvsLogVerifyFailure(key, "putULong wrote unexpected length");
+  if (written == 0) {
+    NvsLogVerifyFailure(key, "putULong wrote zero bytes");
     return false;
   }
 
