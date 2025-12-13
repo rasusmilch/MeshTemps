@@ -2231,6 +2231,10 @@ static void EmitStateNotification(const String &key, AlertState new_state,
         msg += " - ";
         msg += normal_detail;
       }
+      if (g_debug_enabled) {
+        Serial.printf("[NTFY] %s -> normal (%s)\n", key.c_str(),
+                      normal_detail.c_str());
+      }
       SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
     }
     g_ntfy_states.erase(key);
@@ -2246,6 +2250,10 @@ static void EmitStateNotification(const String &key, AlertState new_state,
     msg += detail;
   }
 
+  if (g_debug_enabled) {
+    Serial.printf("[NTFY] %s: %s -> %s\n", key.c_str(),
+                  AlertStateName(prev), AlertStateName(new_state));
+  }
   SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
   g_ntfy_states[key] = new_state;
 }
@@ -5426,7 +5434,22 @@ static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  out.println(F("ERR ntfy (use show|enable|summary|freq)"));
+  if (sub.equalsIgnoreCase("test")) {
+    String payload("MeshTemps ntfy test");
+    if (argc > 2) {
+      payload = argv[2];
+      for (int i = 3; i < argc; ++i) {
+        payload += ' ';
+        payload += argv[i];
+      }
+    }
+    SendNtfyRequestToBridge(payload, /*cache_when_offline=*/true,
+                            /*is_summary=*/false, "MeshTemps test");
+    out.println(F("ntfy: test message queued"));
+    return;
+  }
+
+  out.println(F("ERR ntfy (use show|enable|summary|freq|test [msg])"));
 }
 
 static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
@@ -6890,6 +6913,46 @@ static void SendTimeRequestToBridge(const char *reason, bool force_ntp) {
   if (g_bridge_passthrough) {
     Serial.print(F("[GUI->BRIDGE] "));
     Serial.println(line);
+  } else if (g_debug_enabled) {
+    const char *why = (reason != nullptr && reason[0] != '\0') ? reason : "";
+    Serial.printf("[GUI->BRIDGE] time_request force=%s reason=%s\n",
+                  force_ntp ? "true" : "false", why);
+  }
+}
+
+static void SendNtfyRequestToBridge(const String &message,
+                                    bool cache_when_offline, bool is_summary,
+                                    const char *title) {
+  if (!g_ntfy_config.enabled || message.isEmpty()) {
+    return;
+  }
+
+  JsonDocument doc;
+  doc["type"] = "ntfy_request";
+  doc["message"] = message;
+  if (is_summary) {
+    doc["summary"] = true;
+  }
+  if (cache_when_offline) {
+    doc["cache"] = true;
+  }
+  if (title != nullptr && title[0] != '\0') {
+    doc["title"] = title;
+  }
+
+  String line;
+  serializeJson(doc, line);
+  bridge_serial.println(line);
+
+  if (g_bridge_passthrough) {
+    Serial.print(F("[GUI->BRIDGE] "));
+    Serial.println(line);
+  } else if (g_debug_enabled) {
+    Serial.printf("[GUI->BRIDGE] ntfy_request cache=%s summary=%s title=%s len=%u\n",
+                  cache_when_offline ? "yes" : "no",
+                  is_summary ? "yes" : "no",
+                  (title != nullptr) ? title : "",
+                  static_cast<unsigned>(message.length()));
   }
 }
 
@@ -7059,7 +7122,7 @@ void setup() {
   g_console.RegisterCommand("limits", &CmdLimits,
                             "limits show | warn <lo> <hi> | alert <lo> <hi>");
   g_console.RegisterCommand("ntfy", &CmdNtfy,
-                            "ntfy show|enable|summary|freq");
+                            "ntfy show|enable|summary|freq|test [msg]");
   g_console.RegisterCommand("buzzer", &CmdBuzzer,
                             "buzzer len | warn | alert | cooldown | test | silence | stop");
   g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");

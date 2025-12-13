@@ -552,12 +552,12 @@ static void HandleGuiTimeRequest(const JsonDocument &doc) {
   }
 
   const time_t now_epoch = time(nullptr);
-  if (g_ntp_time_valid || g_ntp_last_sync_epoch > 0 || now_epoch > 0) {
-    if (g_ntp_last_sync_epoch <= 0) {
-      g_ntp_last_sync_epoch = now_epoch;
-    }
-    SendTimeSyncToGui(reason);
+  if (g_ntp_last_sync_epoch <= 0 && now_epoch > 0) {
+    g_ntp_last_sync_epoch = now_epoch;
   }
+  // Always reply so the GUI can refresh its clock even if we only have a
+  // coarse RTC value; a force_ntp below will refresh the authoritative time.
+  SendTimeSyncToGui(reason);
 
   if (force_ntp || !g_ntp_time_valid) {
     // Try an immediate NTP sync regardless of the normal retry schedule.
@@ -959,7 +959,26 @@ static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  out.println(F("ERR ntfy (use show|enable|server|topic|clearqueue)"));
+  if (sub.equalsIgnoreCase("test")) {
+    String payload("MeshTemps ntfy test");
+    if (argc > 2) {
+      payload = argv[2];
+      for (int i = 3; i < argc; ++i) {
+        payload += ' ';
+        payload += argv[i];
+      }
+    }
+
+    NtfyRequest req;
+    req.message = payload;
+    req.title = "MeshTemps test";
+    req.cache_when_offline = true;
+    TrySendOrQueueNtfy(req);
+    out.println(F("ntfy: test message queued"));
+    return;
+  }
+
+  out.println(F("ERR ntfy (use show|enable|server|topic|clearqueue|test [msg])"));
 }
 
 static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
@@ -1186,7 +1205,7 @@ void setup() {
   g_console.RegisterCommand("passthru", &CmdPassthru,
                             "mirror GUI UART (17/18) to USB");
   g_console.RegisterCommand("ntfy", &CmdNtfy,
-                            "ntfy show|enable|server|topic|clearqueue");
+                            "ntfy show|enable|server|topic|clearqueue|test [msg]");
   g_console.RegisterCommand("wifi", &CmdWifi, "wifi status|scan|connect|ssid|password|clear");
   g_console.RegisterCommand("tz", &CmdTz, "tz show|set <minutes> [dst on|off]");
   g_console.RegisterCommand("time", &CmdTime, "time now|sync");
