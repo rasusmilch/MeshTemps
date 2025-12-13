@@ -29,6 +29,7 @@
 #include <ArduinoJson.h>
 #include <Preferences.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring> // for memcmp in NVS verification
 #include <math.h>
@@ -324,6 +325,21 @@ enum class AlertState { kNormal = 0, kWarning = 1, kAlert = 2, kMissing = 3 };
 NtfyConfig g_ntfy_config;
 std::map<String, AlertState> g_ntfy_states;
 uint32_t g_ntfy_last_summary_ms = 0;
+static uint32_t g_ntfy_next_sequence = 1;
+static constexpr uint32_t kNtfyResendIntervalMs = 5000; // rate limit GUI->bridge reissues
+
+struct QueuedNtfy {
+  uint32_t sequence = 0;
+  String message;
+  String title;
+  bool is_summary = false;
+  bool cache_when_offline = false;
+  uint32_t last_send_ms = 0;
+  bool needs_resend = true;
+};
+
+static std::vector<QueuedNtfy> g_ntfy_pending_bridge;
+static uint32_t g_ntfy_next_send_ms = 0;
 
 // Top bar height in pixels; must match GuiInit().
 constexpr lv_coord_t kTopBarHeightPx = 36;
@@ -4273,6 +4289,7 @@ static void NtfyLoop() {
 
   ProcessNtfyAlerts(now_ms);
   MaybeSendNtfySummary(now_ms);
+  MaybeSendQueuedNtfyToBridge();
 }
 
 // -----------------------------------------------------------------------------
@@ -6880,6 +6897,8 @@ static void HandleBridgeHello(const JsonDocument &doc) {
 
   GuiUpdateNetwork(GetAllMeshNodeIds().size());
   MaybeRequestTimeFromBridge("bridge_hello", /*force_ntp=*/false);
+  MarkAllNtfyForResend();
+  MaybeSendQueuedNtfyToBridge();
   GuiRequestRender();
 }
 
@@ -6914,6 +6933,135 @@ static void HandleBridgeStatus(const JsonDocument &doc) {
     MaybeRequestTimeFromBridge("bridge_status", /*force_ntp=*/false);
   }
   GuiRequestRender();
+}
+
+static uint32_t NextNtfySequence() { return g_ntfy_next_sequence++; }
+
+static size_t PickNextQueuedNtfyIndex() {
+  size_t candidate = SIZE_MAX;
+  bool candidate_is_alert = false;
+
+  for (size_t i = 0; i < g_ntfy_pending_bridge.size(); ++i) {
+    if (!g_ntfy_pending_bridge[i].needs_resend) {
+      continue;
+    }
+    const bool is_alert = !g_ntfy_pending_bridge[i].is_summary;
+    if (candidate == SIZE_MAX) {
+      candidate = i;
+      candidate_is_alert = is_alert;
+      continue;
+    }
+
+    if (is_alert && !candidate_is_alert) {
+      candidate = i;
+      candidate_is_alert = true;
+      continue;
+    }
+
+    if (is_alert == candidate_is_alert &&
+        g_ntfy_pending_bridge[i].sequence <
+            g_ntfy_pending_bridge[candidate].sequence) {
+      candidate = i;
+      candidate_is_alert = is_alert;
+    }
+  }
+
+  return candidate;
+}
+
+static void MaybeSendQueuedNtfyToBridge() {
+  if (g_ntfy_pending_bridge.empty()) {
+    return;
+  }
+
+  const uint32_t now_ms = millis();
+  if (g_ntfy_next_send_ms != 0U && now_ms < g_ntfy_next_send_ms) {
+    return;
+  }
+
+  const size_t idx = PickNextQueuedNtfyIndex();
+  if (idx == SIZE_MAX) {
+    return;
+  }
+
+  const QueuedNtfy pending = g_ntfy_pending_bridge[idx];
+
+  JsonDocument doc;
+  doc["type"] = "ntfy_request";
+  doc["message"] = pending.message;
+  doc["seq"] = pending.sequence;
+  if (pending.is_summary) {
+    doc["summary"] = true;
+  }
+  if (pending.cache_when_offline) {
+    doc["cache"] = true;
+  }
+  if (!pending.title.isEmpty()) {
+    doc["title"] = pending.title;
+  }
+
+  String line;
+  serializeJson(doc, line);
+  SendLineToBridge(line, /*tag=*/F("ntfy_request"));
+
+  g_ntfy_pending_bridge[idx].last_send_ms = now_ms;
+  g_ntfy_pending_bridge[idx].needs_resend = false;
+  g_ntfy_next_send_ms = now_ms + kNtfyResendIntervalMs;
+
+  Serial.printf(
+      "[NTFY] queued for bridge len=%u cache=%s summary=%s title=%s seq=%lu\n",
+      static_cast<unsigned>(pending.message.length()),
+      pending.cache_when_offline ? "yes" : "no",
+      pending.is_summary ? "yes" : "no",
+      pending.title.c_str(), static_cast<unsigned long>(pending.sequence));
+
+  if (!g_bridge_passthrough && g_debug_enabled) {
+    Serial.printf(
+        "[GUI->BRIDGE SENT] ntfy_request cache=%s summary=%s title=%s seq=%lu len=%u\n",
+        pending.cache_when_offline ? "yes" : "no",
+        pending.is_summary ? "yes" : "no",
+        pending.title.c_str(), static_cast<unsigned long>(pending.sequence),
+        static_cast<unsigned>(pending.message.length()));
+  }
+}
+
+static void HandleNtfyAckFromBridge(const JsonDocument &doc) {
+  const uint32_t seq = doc["seq"] | 0U;
+  if (seq == 0U) {
+    return;
+  }
+
+  auto it = std::find_if(g_ntfy_pending_bridge.begin(), g_ntfy_pending_bridge.end(),
+                         [&](const QueuedNtfy &pending) {
+                           return pending.sequence == seq;
+                         });
+  if (it == g_ntfy_pending_bridge.end()) {
+    if (g_debug_enabled) {
+      Serial.printf("[NTFY] ack for unknown seq=%lu\n",
+                    static_cast<unsigned long>(seq));
+    }
+    return;
+  }
+
+  g_ntfy_pending_bridge.erase(it);
+  if (g_ntfy_pending_bridge.empty()) {
+    g_ntfy_next_send_ms = 0;
+  } else if (g_ntfy_next_send_ms == 0U) {
+    g_ntfy_next_send_ms = millis() + kNtfyResendIntervalMs;
+  }
+
+  if (g_debug_enabled) {
+    Serial.printf("[NTFY] acked seq=%lu remaining=%u\n",
+                  static_cast<unsigned long>(seq),
+                  static_cast<unsigned>(g_ntfy_pending_bridge.size()));
+  }
+}
+
+static void MarkAllNtfyForResend() {
+  for (auto &pending : g_ntfy_pending_bridge) {
+    pending.needs_resend = true;
+  }
+  g_ntfy_next_send_ms = millis();
 }
 
 static void HandleBridgeTimeSync(const JsonDocument &doc) {
@@ -6979,37 +7127,19 @@ static void SendNtfyRequestToBridge(const String &message,
     return;
   }
 
-  JsonDocument doc;
-  doc["type"] = "ntfy_request";
-  doc["message"] = message;
-  if (is_summary) {
-    doc["summary"] = true;
-  }
-  if (cache_when_offline) {
-    doc["cache"] = true;
-  }
-  if (title != nullptr && title[0] != '\0') {
-    doc["title"] = title;
+  QueuedNtfy pending;
+  pending.sequence = NextNtfySequence();
+  pending.message = message;
+  pending.title = (title != nullptr) ? String(title) : "";
+  pending.is_summary = is_summary;
+  pending.cache_when_offline = cache_when_offline;
+
+  g_ntfy_pending_bridge.push_back(std::move(pending));
+  if (g_ntfy_next_send_ms == 0U) {
+    g_ntfy_next_send_ms = millis();
   }
 
-  String line;
-  serializeJson(doc, line);
-  SendLineToBridge(line, /*tag=*/F("ntfy_request"));
-
-  Serial.printf(
-      "[NTFY] queued for bridge len=%u cache=%s summary=%s title=%s\n",
-      static_cast<unsigned>(message.length()),
-      cache_when_offline ? "yes" : "no",
-      is_summary ? "yes" : "no",
-      (title != nullptr && title[0] != '\0') ? title : "");
-
-  if (!g_bridge_passthrough && g_debug_enabled) {
-    Serial.printf("[GUI->BRIDGE SENT] ntfy_request cache=%s summary=%s title=%s len=%u\n",
-                  cache_when_offline ? "yes" : "no",
-                  is_summary ? "yes" : "no",
-                  (title != nullptr) ? title : "",
-                  static_cast<unsigned>(message.length()));
-  }
+  MaybeSendQueuedNtfyToBridge();
 }
 
 static void MaybeRequestTimeFromBridge(const char *reason, bool force_ntp) {
@@ -7056,6 +7186,8 @@ static void ProcessBridgeSerial() {
           HandleBridgeWifiStatus(doc, /*connected=*/false);
         } else if (strcmp(type, "time_sync") == 0) {
           HandleBridgeTimeSync(doc);
+        } else if (strcmp(type, "ntfy_ack") == 0) {
+          HandleNtfyAckFromBridge(doc);
         } else {
           Serial.printf("[BRIDGE JSON] unknown type=%s raw=%s\n", type,
                         g_bridge_rx_line.c_str());
