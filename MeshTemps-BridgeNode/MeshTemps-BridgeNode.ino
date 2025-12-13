@@ -592,6 +592,9 @@ static void HandleGuiTimeRequest(const JsonDocument &doc) {
     Serial.printf("[TIME] time_sync to GUI skipped (reason=%s valid=%s)\n", reason,
                   g_ntp_time_valid ? "true" : "false");
   }
+  // Always reply so the GUI can refresh its clock even if we only have a
+  // coarse RTC value; a force_ntp below will refresh the authoritative time.
+  SendTimeSyncToGui(reason);
 
   if (force_ntp || !g_ntp_time_valid) {
     // Try an immediate NTP sync regardless of the normal retry schedule.
