@@ -88,10 +88,9 @@ struct NtfyConfig {
 };
 
 struct NtfyRequest {
-  String topic;
   String message;
-  String server;
   String title;
+  bool is_summary = false;
   bool cache_when_offline = false;
 };
 
@@ -129,34 +128,25 @@ static void DebugPrintf(const char *fmt, ...) {
 // ntfy helpers
 // -----------------------------------------------------------------------------
 
-static String TrimTrailingSlash(const String &url) {
-  if (url.endsWith("/")) {
-    return url.substring(0, url.length() - 1);
-  }
-  return url;
-}
-
 static bool SendNtfyHttp(const NtfyRequest &req) {
   if (!g_ntfy_config.enabled) {
     DebugPrintln(F("[NTFY] disabled; dropping request"));
     return false;
   }
 
-  String topic = req.topic;
-  if (topic.isEmpty()) {
-    topic = g_ntfy_config.alert_topic;
-  }
-  String server = req.server;
-  if (server.isEmpty()) {
-    server = g_ntfy_config.server_url;
-  }
+  const String &topic =
+      req.is_summary ? g_ntfy_config.summary_topic : g_ntfy_config.alert_topic;
+  const String &server = g_ntfy_config.server_url;
 
   if (topic.isEmpty() || server.isEmpty()) {
     Serial.println(F("[NTFY] Missing topic/server; cannot send"));
     return false;
   }
 
-  const String base = TrimTrailingSlash(server);
+  String base = server;
+  if (base.endsWith("/")) {
+    base.remove(base.length() - 1);
+  }
   String url = base + "/" + topic;
 
   WiFiClientSecure client;
@@ -431,9 +421,9 @@ static void SendBridgeStatus(const char *reason = nullptr) {
   doc["uptimeMs"] = static_cast<uint32_t>(now_ms);
   auto node_list = mesh.getNodeList();
   doc["connections"] = node_list.size();
-  JsonArray nodes = doc.createNestedArray("nodes");
+  JsonArray nodes = doc["nodes"].to<JsonArray>();
   for (const auto &id : node_list) {
-    JsonObject node = nodes.createNestedObject();
+    JsonObject node = nodes.add<JsonObject>();
     node["id"] = id;
     auto it = g_node_last_seen_ms.find(id);
     if (it != g_node_last_seen_ms.end()) {
@@ -587,9 +577,9 @@ static void HandleGuiNtfyRequest(const JsonDocument &doc) {
 
   NtfyRequest req;
   req.message = msg;
-  req.topic = doc["topic"].as<String>();
-  req.server = doc["server"].as<String>();
   req.title = doc["title"].as<String>();
+  req.is_summary = doc["summary"].is<bool>() ? doc["summary"].as<bool>()
+                                              : false;
   req.cache_when_offline = doc["cache"].is<bool>() ? doc["cache"].as<bool>()
                                                     : false;
 

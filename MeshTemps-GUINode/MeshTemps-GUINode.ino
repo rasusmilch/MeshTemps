@@ -317,9 +317,6 @@ struct NtfyConfig {
   bool enabled = true;
   bool summary_enabled = true;
   uint32_t summary_period_min = 15; // minutes
-  String server_url = "https://ntfy.sh";
-  String alert_topic = "meshtemps-alerts";
-  String summary_topic = "meshtemps-summary";
 };
 
 enum class AlertState { kNormal = 0, kWarning = 1, kAlert = 2, kMissing = 3 };
@@ -357,8 +354,8 @@ volatile size_t g_ui_peers = 0;
 Board *g_board = nullptr;
 
 void GuiRebuildTiles(); // forward
-static void SendNtfyRequestToBridge(const String &message, const String &topic,
-                                    bool cache_when_offline,
+static void SendNtfyRequestToBridge(const String &message,
+                                    bool cache_when_offline, bool is_summary,
                                     const char *title = nullptr);
 // BuildTileContentForNode is defined later, after mesh_tile.h is included.
 // No extra prototype needed here.
@@ -1574,12 +1571,6 @@ void LoadNtfySettings() {
   g_ntfy_config.summary_period_min =
       static_cast<uint32_t>(g_root_preferences.getUInt("ntfy_sum_min",
                                                        g_ntfy_config.summary_period_min));
-  g_ntfy_config.server_url = g_root_preferences.getString("ntfy_server",
-                                                         g_ntfy_config.server_url);
-  g_ntfy_config.alert_topic = g_root_preferences.getString("ntfy_topic_alert",
-                                                          g_ntfy_config.alert_topic);
-  g_ntfy_config.summary_topic = g_root_preferences.getString("ntfy_topic_sum",
-                                                           g_ntfy_config.summary_topic);
   g_root_preferences.end();
 }
 
@@ -1596,15 +1587,6 @@ void SaveNtfySettings() {
                   is_successful;
   is_successful = NvsPutULongVerified(g_root_preferences, "ntfy_sum_min",
                                       g_ntfy_config.summary_period_min) &&
-                  is_successful;
-  is_successful =
-      NvsPutStringVerified(g_root_preferences, "ntfy_server", g_ntfy_config.server_url) &&
-      is_successful;
-  is_successful = NvsPutStringVerified(g_root_preferences, "ntfy_topic_alert",
-                                       g_ntfy_config.alert_topic) &&
-                  is_successful;
-  is_successful = NvsPutStringVerified(g_root_preferences, "ntfy_topic_sum",
-                                       g_ntfy_config.summary_topic) &&
                   is_successful;
 
   g_root_preferences.end();
@@ -2249,8 +2231,7 @@ static void EmitStateNotification(const String &key, AlertState new_state,
         msg += " - ";
         msg += normal_detail;
       }
-      SendNtfyRequestToBridge(msg, g_ntfy_config.alert_topic, cache,
-                              "MeshTemps");
+      SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
     }
     g_ntfy_states.erase(key);
     return;
@@ -2265,7 +2246,7 @@ static void EmitStateNotification(const String &key, AlertState new_state,
     msg += detail;
   }
 
-  SendNtfyRequestToBridge(msg, g_ntfy_config.alert_topic, cache, "MeshTemps");
+  SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
   g_ntfy_states[key] = new_state;
 }
 
@@ -4263,8 +4244,8 @@ static void MaybeSendNtfySummary(uint32_t now_ms) {
   }
 
   if (message.length() > 0) {
-    SendNtfyRequestToBridge(message, g_ntfy_config.summary_topic,
-                            /*cache_when_offline=*/false, "MeshTemps summary");
+    SendNtfyRequestToBridge(message, /*cache_when_offline=*/false,
+                            /*is_summary=*/true, "MeshTemps summary");
   }
 }
 
@@ -5394,9 +5375,7 @@ static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
                g_ntfy_config.enabled ? "yes" : "no",
                g_ntfy_config.summary_enabled ? "yes" : "no",
                static_cast<unsigned long>(g_ntfy_config.summary_period_min));
-    out.printf("  server=%s\n", g_ntfy_config.server_url.c_str());
-    out.printf("  alert_topic=%s\n", g_ntfy_config.alert_topic.c_str());
-    out.printf("  summary_topic=%s\n", g_ntfy_config.summary_topic.c_str());
+    out.println(F("  topics/server configured on bridge"));
     out.printf("  tracked_states=%u\n",
                static_cast<unsigned>(g_ntfy_states.size()));
     return;
@@ -5447,43 +5426,7 @@ static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
     return;
   }
 
-  if (sub.equalsIgnoreCase("server")) {
-    if (argc < 3) {
-      out.println(F("ERR ntfy server <url>"));
-      return;
-    }
-    g_ntfy_config.server_url = argv[2];
-    SaveNtfySettings();
-    out.printf("ntfy: server=%s (saved)\n", g_ntfy_config.server_url.c_str());
-    return;
-  }
-
-  if (sub.equalsIgnoreCase("topic")) {
-    if (argc < 4) {
-      out.println(F("ERR ntfy topic alert|summary <name>"));
-      return;
-    }
-    const String which = argv[2];
-    const String value = argv[3];
-    if (which.equalsIgnoreCase("alert")) {
-      g_ntfy_config.alert_topic = value;
-      SaveNtfySettings();
-      out.printf("ntfy: alert_topic=%s (saved)\n",
-                 g_ntfy_config.alert_topic.c_str());
-      return;
-    }
-    if (which.equalsIgnoreCase("summary")) {
-      g_ntfy_config.summary_topic = value;
-      SaveNtfySettings();
-      out.printf("ntfy: summary_topic=%s (saved)\n",
-                 g_ntfy_config.summary_topic.c_str());
-      return;
-    }
-    out.println(F("ERR ntfy topic (use alert|summary <name>)"));
-    return;
-  }
-
-  out.println(F("ERR ntfy (use show|enable|summary|freq|server|topic)"));
+  out.println(F("ERR ntfy (use show|enable|summary|freq)"));
 }
 
 static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
@@ -6950,8 +6893,8 @@ static void SendTimeRequestToBridge(const char *reason, bool force_ntp) {
   }
 }
 
-static void SendNtfyRequestToBridge(const String &message, const String &topic,
-                                    bool cache_when_offline,
+static void SendNtfyRequestToBridge(const String &message,
+                                    bool cache_when_offline, bool is_summary,
                                     const char *title) {
   if (!g_ntfy_config.enabled || message.isEmpty()) {
     return;
@@ -6960,11 +6903,8 @@ static void SendNtfyRequestToBridge(const String &message, const String &topic,
   JsonDocument doc;
   doc["type"] = "ntfy_request";
   doc["message"] = message;
-  if (topic.length() > 0) {
-    doc["topic"] = topic;
-  }
-  if (g_ntfy_config.server_url.length() > 0) {
-    doc["server"] = g_ntfy_config.server_url;
+  if (is_summary) {
+    doc["summary"] = true;
   }
   if (cache_when_offline) {
     doc["cache"] = true;
@@ -7119,7 +7059,7 @@ void setup() {
   g_console.RegisterCommand("limits", &CmdLimits,
                             "limits show | warn <lo> <hi> | alert <lo> <hi>");
   g_console.RegisterCommand("ntfy", &CmdNtfy,
-                            "ntfy show|enable|summary|freq|server|topic");
+                            "ntfy show|enable|summary|freq");
   g_console.RegisterCommand("buzzer", &CmdBuzzer,
                             "buzzer len | warn | alert | cooldown | test | silence | stop");
   g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");
