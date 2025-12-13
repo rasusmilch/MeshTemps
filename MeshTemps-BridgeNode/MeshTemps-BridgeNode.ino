@@ -95,7 +95,18 @@ struct NtfyRequest {
 };
 
 static NtfyConfig g_ntfy_config;
-static std::vector<NtfyRequest> g_ntfy_queue;
+struct PendingNtfy {
+  NtfyRequest req;
+  uint32_t sequence = 0; // optional sequence number from GUI (0 = none)
+  uint32_t backoff_ms = 0;
+  uint32_t next_attempt_ms = 0;
+};
+
+static std::vector<PendingNtfy> g_ntfy_queue;
+static uint32_t g_ntfy_last_attempt_ms = 0;
+constexpr uint32_t kNtfyBackoffInitialMs = 15000;     // 15 seconds
+constexpr uint32_t kNtfyBackoffMaxMs = 10 * 60 * 1000; // 10 minutes
+constexpr uint32_t kNtfyMinAttemptSpacingMs = 2000;    // 2 seconds
 
 // -----------------------------------------------------------------------------
 // Helpers
@@ -174,51 +185,113 @@ static bool SendNtfyHttp(const NtfyRequest &req) {
   return false;
 }
 
-static void QueueNtfyRequest(const NtfyRequest &req) {
+static void SendNtfyAck(uint32_t sequence) {
+  if (sequence == 0U) return; // no sequence to ack
+
+  JsonDocument doc;
+  doc["type"] = "ntfy_ack";
+  doc["seq"] = sequence;
+  SendJsonLineWithEcho(doc);
+}
+
+static void QueueNtfyRequest(const NtfyRequest &req, uint32_t sequence = 0U,
+                              uint32_t backoff_ms = kNtfyBackoffInitialMs) {
   constexpr size_t kMaxQueue = 20;
   if (g_ntfy_queue.size() >= kMaxQueue) {
     Serial.println(F("[NTFY] queue full; dropping"));
     return;
   }
-  g_ntfy_queue.push_back(req);
+  PendingNtfy pending;
+  pending.req = req;
+  pending.sequence = sequence;
+  pending.backoff_ms = backoff_ms;
+  pending.next_attempt_ms = millis();
+
+  g_ntfy_queue.push_back(pending);
   Serial.printf("[NTFY] cached request (size=%u)\n",
                 static_cast<unsigned>(g_ntfy_queue.size()));
 }
 
-static void TrySendOrQueueNtfy(const NtfyRequest &req) {
+static void TrySendOrQueueNtfy(const NtfyRequest &req, uint32_t sequence = 0U,
+                              uint32_t backoff_ms = kNtfyBackoffInitialMs) {
   if (!g_ntfy_config.enabled) {
     Serial.println(F("[NTFY] disabled; ignoring request"));
     return;
   }
 
-  if (WiFi.status() != WL_CONNECTED) {
-    if (req.cache_when_offline) {
-      QueueNtfyRequest(req);
-    } else {
-      Serial.println(F("[NTFY] Wi-Fi down; dropping uncached request"));
-    }
+  const bool wifi_up = (WiFi.status() == WL_CONNECTED);
+  if (!wifi_up && !req.cache_when_offline) {
+    Serial.println(F("[NTFY] Wi-Fi down; dropping uncached request"));
     return;
   }
 
-  const bool ok = SendNtfyHttp(req);
-  if (!ok && req.cache_when_offline) {
-    QueueNtfyRequest(req);
-  }
+  QueueNtfyRequest(req, sequence, backoff_ms);
 }
 
-static void FlushNtfyQueue() {
-  if (!g_ntfy_config.enabled) return;
-  if (WiFi.status() != WL_CONNECTED) return;
+static size_t PickNextNtfyIndex(uint32_t now_ms) {
+  size_t chosen_idx = SIZE_MAX;
+  bool chosen_is_alert = false;
 
-  size_t idx = 0;
-  while (idx < g_ntfy_queue.size()) {
-    const NtfyRequest req = g_ntfy_queue[idx];
-    if (SendNtfyHttp(req)) {
-      g_ntfy_queue.erase(g_ntfy_queue.begin() + idx);
-    } else {
-      // Stop trying if the send failed while connected.
-      break;
+  for (size_t i = 0; i < g_ntfy_queue.size(); ++i) {
+    const PendingNtfy &pending = g_ntfy_queue[i];
+    if (pending.next_attempt_ms > now_ms) {
+      continue;
     }
+
+    const bool is_alert = !pending.req.is_summary;
+    if (chosen_idx == SIZE_MAX) {
+      chosen_idx = i;
+      chosen_is_alert = is_alert;
+      continue;
+    }
+
+    // Alerts take priority over summaries for all transmissions.
+    if (is_alert && !chosen_is_alert) {
+      chosen_idx = i;
+      chosen_is_alert = true;
+      continue;
+    }
+
+    // Otherwise, pick the earliest due item.
+    if (pending.next_attempt_ms < g_ntfy_queue[chosen_idx].next_attempt_ms) {
+      chosen_idx = i;
+      chosen_is_alert = is_alert;
+    }
+  }
+
+  return chosen_idx;
+}
+
+static void MaybeSendQueuedNtfy() {
+  if (!g_ntfy_config.enabled) return;
+  if (g_ntfy_queue.empty()) return;
+
+  const uint32_t now_ms = millis();
+  if (g_ntfy_last_attempt_ms != 0U &&
+      (now_ms - g_ntfy_last_attempt_ms) < kNtfyMinAttemptSpacingMs) {
+    return;
+  }
+
+  const size_t idx = PickNextNtfyIndex(now_ms);
+  if (idx == SIZE_MAX) {
+    return; // nothing ready to send yet
+  }
+
+  PendingNtfy &pending = g_ntfy_queue[idx];
+  if (WiFi.status() != WL_CONNECTED) {
+    pending.next_attempt_ms = now_ms + pending.backoff_ms;
+    pending.backoff_ms = std::min(pending.backoff_ms * 2, kNtfyBackoffMaxMs);
+    return;
+  }
+
+  const bool ok = SendNtfyHttp(pending.req);
+  g_ntfy_last_attempt_ms = now_ms;
+  if (ok) {
+    SendNtfyAck(pending.sequence);
+    g_ntfy_queue.erase(g_ntfy_queue.begin() + idx);
+  } else {
+    pending.next_attempt_ms = now_ms + pending.backoff_ms;
+    pending.backoff_ms = std::min(pending.backoff_ms * 2, kNtfyBackoffMaxMs);
   }
 }
 
@@ -630,21 +703,24 @@ static void HandleGuiNtfyRequest(const JsonDocument &doc) {
                                               : false;
   req.cache_when_offline = doc["cache"].is<bool>() ? doc["cache"].as<bool>()
                                                     : false;
+  const uint32_t sequence = doc["seq"].is<uint32_t>() ? doc["seq"].as<uint32_t>()
+                                                       : 0U;
 
   const bool wifi_up = (WiFi.status() == WL_CONNECTED);
   if (g_debug_verbose) {
     Serial.printf(
-        "[NTFY] GUI req len=%u cache=%s summary=%s title=%s enabled=%s wifi=%s "
+        "[NTFY] GUI req len=%u cache=%s summary=%s title=%s seq=%lu enabled=%s wifi=%s "
         "queue=%u raw=%s\n",
         static_cast<unsigned>(req.message.length()),
         req.cache_when_offline ? "yes" : "no", req.is_summary ? "yes" : "no",
-        req.title.c_str(), g_ntfy_config.enabled ? "yes" : "no",
+        req.title.c_str(), static_cast<unsigned long>(sequence),
+        g_ntfy_config.enabled ? "yes" : "no",
         wifi_up ? "up" : "down",
         static_cast<unsigned>(g_ntfy_queue.size()),
         doc.as<String>().c_str());
   }
 
-  TrySendOrQueueNtfy(req);
+  TrySendOrQueueNtfy(req, sequence);
 }
 
 static void ProcessGuiSerial() {
@@ -858,7 +934,7 @@ static void WifiLoop() {
     SendJsonLineWithEcho(doc);
 
     if (connected) {
-      FlushNtfyQueue();
+      MaybeSendQueuedNtfy();
     }
     if (g_debug_verbose) {
       Serial.printf("[WiFi] %s ssid=\"%s\" ip=%s\n",
@@ -869,7 +945,7 @@ static void WifiLoop() {
   }
 
   if (connected && !g_ntfy_queue.empty()) {
-    FlushNtfyQueue();
+    MaybeSendQueuedNtfy();
   }
 }
 
