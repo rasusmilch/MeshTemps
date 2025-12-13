@@ -6830,6 +6830,20 @@ void OnConnectionsChangedRoot() {
 HardwareSerial bridge_serial(0);
 static String g_bridge_rx_line;
 
+static void SendLineToBridge(const String &line,
+                             const __FlashStringHelper *tag = nullptr) {
+  if (g_bridge_passthrough || g_debug_enabled) {
+    Serial.print(F("[GUI->BRIDGE] "));
+    if (tag != nullptr) {
+      Serial.print(tag);
+      Serial.print(F(": "));
+    }
+    Serial.println(line);
+  }
+
+  bridge_serial.println(line);
+}
+
 static void HandleBridgeFrame(const JsonDocument &doc) {
   if (!doc["payload"].is<JsonVariantConst>()) {
     return;
@@ -6908,12 +6922,9 @@ static void SendTimeRequestToBridge(const char *reason, bool force_ntp) {
 
   String line;
   serializeJson(doc, line);
-  bridge_serial.println(line);
+  SendLineToBridge(line, /*tag=*/F("time_request"));
 
-  if (g_bridge_passthrough) {
-    Serial.print(F("[GUI->BRIDGE] "));
-    Serial.println(line);
-  } else if (g_debug_enabled) {
+  if (!g_bridge_passthrough && g_debug_enabled) {
     const char *why = (reason != nullptr && reason[0] != '\0') ? reason : "";
     Serial.printf("[GUI->BRIDGE] time_request force=%s reason=%s\n",
                   force_ntp ? "true" : "false", why);
@@ -6943,7 +6954,7 @@ static void SendNtfyRequestToBridge(const String &message,
 
   String line;
   serializeJson(doc, line);
-  bridge_serial.println(line);
+  SendLineToBridge(line, /*tag=*/F("ntfy_request"));
 
   Serial.printf(
       "[NTFY] queued for bridge len=%u cache=%s summary=%s title=%s\n",
@@ -6952,10 +6963,7 @@ static void SendNtfyRequestToBridge(const String &message,
       is_summary ? "yes" : "no",
       (title != nullptr && title[0] != '\0') ? title : "");
 
-  if (g_bridge_passthrough) {
-    Serial.print(F("[GUI->BRIDGE] "));
-    Serial.println(line);
-  } else if (g_debug_enabled) {
+  if (!g_bridge_passthrough && g_debug_enabled) {
     Serial.printf("[GUI->BRIDGE] ntfy_request cache=%s summary=%s title=%s len=%u\n",
                   cache_when_offline ? "yes" : "no",
                   is_summary ? "yes" : "no",
@@ -6990,7 +6998,11 @@ static void ProcessBridgeSerial() {
       }
 
       JsonDocument doc;
-      if (deserializeJson(doc, g_bridge_rx_line) == DeserializationError::Ok) {
+      const auto err = deserializeJson(doc, g_bridge_rx_line);
+      if (err != DeserializationError::Ok) {
+        Serial.printf("[BRIDGE JSON] parse error=%s raw=%s\n", err.c_str(),
+                      g_bridge_rx_line.c_str());
+      } else {
         const char *type = doc["type"] | "";
         if (strcmp(type, "mesh_frame") == 0) {
           HandleBridgeFrame(doc);
@@ -6998,6 +7010,9 @@ static void ProcessBridgeSerial() {
           HandleBridgeStatus(doc);
         } else if (strcmp(type, "time_sync") == 0) {
           HandleBridgeTimeSync(doc);
+        } else {
+          Serial.printf("[BRIDGE JSON] unknown type=%s raw=%s\n", type,
+                        g_bridge_rx_line.c_str());
         }
       }
 
@@ -7067,6 +7082,7 @@ void setup() {
   Serial.printf("ESP-IDF version        : %s\n", esp_get_idf_version());
 
   RootInitStorage();
+  RootInitNetwork();
 
   DisplayInit();
   GuiInit();

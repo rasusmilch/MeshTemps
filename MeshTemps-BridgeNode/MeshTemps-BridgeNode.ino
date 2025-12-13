@@ -222,15 +222,19 @@ static void FlushNtfyQueue() {
   }
 }
 
-static void SendJsonLineWithEcho(HardwareSerial &port, const JsonDocument &doc) {
-  String line;
-  serializeJson(doc, line);
-  port.println(line);
-
+static void SendLineToGui(const String &line) {
   if (g_gui_passthrough || g_debug_verbose) {
     Serial.print(F("[BRIDGE->GUI] "));
     Serial.println(line);
   }
+
+  gui_serial.println(line);
+}
+
+static void SendJsonLineWithEcho(const JsonDocument &doc) {
+  String line;
+  serializeJson(doc, line);
+  SendLineToGui(line);
 }
 
 // Extract everything after the 2nd token (command + subcommand) as-is,
@@ -410,7 +414,7 @@ static void SendBridgeHello() {
   doc["rootId"] = mesh.getNodeId();
   doc["uptimeMs"] = static_cast<uint32_t>(millis());
   doc["note"] = "mesh->gui headless bridge";
-  SendJsonLineWithEcho(gui_serial, doc);
+  SendJsonLineWithEcho(doc);
   DebugPrintln(F("[BRIDGE] sent bridge_hello"));
 }
 
@@ -434,7 +438,7 @@ static void SendBridgeStatus(const char *reason = nullptr) {
   if (reason != nullptr) {
     doc["reason"] = reason;
   }
-  SendJsonLineWithEcho(gui_serial, doc);
+  SendJsonLineWithEcho(doc);
   DebugPrintf("[BRIDGE] status connections=%u\n",
               static_cast<unsigned>(node_list.size()));
 }
@@ -466,7 +470,7 @@ static bool SendTimeSyncToGui(const char *source, bool allow_stale_time = false)
   doc["tzMinutes"] = g_network_config.timezone_minutes;
   doc["dst"] = g_network_config.dst_enabled;
   doc["source"] = source;
-  SendJsonLineWithEcho(gui_serial, doc);
+  SendJsonLineWithEcho(doc);
   DebugPrintf("[TIME] forwarded time_sync source=%s epoch=%ld tzMin=%ld dst=%s\n",
               source, static_cast<long>(g_ntp_last_sync_epoch),
               static_cast<long>(g_network_config.timezone_minutes),
@@ -480,7 +484,7 @@ static void ForwardMeshPayload(uint32_t from, const JsonDocument &payload) {
   envelope["from"] = from;
   envelope["rxMs"] = static_cast<uint32_t>(millis());
   envelope["payload"] = payload.as<JsonVariantConst>();
-  SendJsonLineWithEcho(gui_serial, envelope);
+  SendJsonLineWithEcho(envelope);
   DebugPrintf("[MESH] fwd temps from=0x%08lX\n", static_cast<unsigned long>(from));
 }
 
@@ -513,13 +517,20 @@ static void HandleGuiJsonLine(const String &line) {
   }
 
   JsonDocument doc;
-  if (deserializeJson(doc, line) == DeserializationError::Ok) {
-    const char *type = doc["type"] | "";
-    if (strcmp(type, "time_request") == 0) {
-      HandleGuiTimeRequest(doc);
-    } else if (strcmp(type, "ntfy_request") == 0) {
-      HandleGuiNtfyRequest(doc);
-    }
+  const auto err = deserializeJson(doc, line);
+  if (err != DeserializationError::Ok) {
+    Serial.printf("[GUI JSON] parse error=%s raw=%s\n", err.c_str(),
+                  line.c_str());
+    return;
+  }
+
+  const char *type = doc["type"] | "";
+  if (strcmp(type, "time_request") == 0) {
+    HandleGuiTimeRequest(doc);
+  } else if (strcmp(type, "ntfy_request") == 0) {
+    HandleGuiNtfyRequest(doc);
+  } else {
+    Serial.printf("[GUI JSON] unknown type=%s raw=%s\n", type, line.c_str());
   }
 }
 
@@ -623,12 +634,13 @@ static void HandleGuiNtfyRequest(const JsonDocument &doc) {
   const bool wifi_up = (WiFi.status() == WL_CONNECTED);
   Serial.printf(
       "[NTFY] GUI req len=%u cache=%s summary=%s title=%s enabled=%s wifi=%s "
-      "queue=%u\n",
+      "queue=%u raw=%s\n",
       static_cast<unsigned>(req.message.length()),
       req.cache_when_offline ? "yes" : "no", req.is_summary ? "yes" : "no",
       req.title.c_str(), g_ntfy_config.enabled ? "yes" : "no",
       wifi_up ? "up" : "down",
-      static_cast<unsigned>(g_ntfy_queue.size()));
+      static_cast<unsigned>(g_ntfy_queue.size()),
+      doc.as<String>().c_str());
 
   TrySendOrQueueNtfy(req);
 }
@@ -836,7 +848,7 @@ static void WifiLoop() {
     doc["type"] = connected ? "wifi_connected" : "wifi_disconnected";
     doc["ssid"] = g_network_config.ssid;
     doc["ip"] = connected ? WiFi.localIP().toString() : "";
-    SendJsonLineWithEcho(gui_serial, doc);
+    SendJsonLineWithEcho(doc);
 
     if (connected) {
       FlushNtfyQueue();
