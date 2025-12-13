@@ -2210,7 +2210,8 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
 
 static void EmitStateNotification(const String &key, AlertState new_state,
                                   const String &subject, const String &detail,
-                                  const String &normal_detail, bool cache) {
+                                  const String &normal_detail, bool cache,
+                                  bool include_normal_detail_on_resolve = true) {
   AlertState prev = AlertState::kNormal;
   auto it = g_ntfy_states.find(key);
   if (it != g_ntfy_states.end()) {
@@ -2227,7 +2228,9 @@ static void EmitStateNotification(const String &key, AlertState new_state,
       msg += AlertStateName(prev);
       msg += "): ";
       msg += subject;
-      if (normal_detail.length() > 0) {
+      const bool append_normal_detail =
+          include_normal_detail_on_resolve || (prev == AlertState::kMissing);
+      if (append_normal_detail && normal_detail.length() > 0) {
         msg += " - ";
         msg += normal_detail;
       }
@@ -4124,6 +4127,7 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
 
     bool node_has_alert = false;
     bool node_has_warning = false;
+    bool sensor_has_warning = false;
     String node_normal_detail;
 
     for (const auto &sensor : node->sensors()) {
@@ -4133,7 +4137,7 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
       if (state == AlertState::kAlert) {
         node_has_alert = true;
       } else if (state == AlertState::kWarning) {
-        node_has_warning = true;
+        sensor_has_warning = true;
       }
 
       if (node_normal_detail.isEmpty() && sensor.has_value && !isnan(sensor.temp_c)) {
@@ -4189,14 +4193,16 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
         node_detail = "sequence stuck";
       } else if (is_stale) {
         node_detail = "data stale (" + String(age_min) + " min)";
-      } else {
-        node_detail = "sensor near limits";
       }
+    } else if (sensor_has_warning) {
+      // Sensor warnings are reported per-sensor; avoid node-level noise.
+      node_state = AlertState::kNormal;
     }
 
     const String node_key = String("N:") + node->node_id_str();
     EmitStateNotification(node_key, node_state, NodeDisplayName(node), node_detail,
-                          node_normal_detail, /*cache=*/true);
+                          node_normal_detail, /*cache=*/true,
+                          /*include_normal_detail_on_resolve=*/false);
   }
 }
 
