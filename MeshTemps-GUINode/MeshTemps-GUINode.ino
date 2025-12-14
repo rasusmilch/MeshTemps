@@ -66,7 +66,7 @@ constexpr size_t kConsoleDefaultMaxLineLen = 2048;
 static bool g_nvs_restore_raw_active = false;
 static String g_nvs_restore_raw_json;
 
-static SerialConsole g_console(kConsoleDefaultMaxLineLen);
+static SerialConsole g_console(kNvsRestoreMaxBytes);
 
 // ---------------------------------------------------------------------------
 // Map view definitions (root)
@@ -6407,7 +6407,7 @@ static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
 
 static void ResetNvsRestoreRawMode() {
   g_console.EndRawMode();
-  g_console.SetMaxLineLen(kConsoleDefaultMaxLineLen);
+  // g_console.SetMaxLineLen(kConsoleDefaultMaxLineLen);
   g_nvs_restore_raw_active = false;
   g_nvs_restore_raw_json = "";
 }
@@ -6473,7 +6473,7 @@ static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
 static void StartNvsRestoreRawMode(Print &out) {
   g_nvs_restore_raw_active = true;
   g_nvs_restore_raw_json = "";
-  g_console.SetMaxLineLen(kNvsRestoreMaxBytes);
+  // g_console.SetMaxLineLen(kNvsRestoreMaxBytes);
   g_console.BeginRawMode(&NvsRestoreRawLine, nullptr);
   out.println(F("nvs restore: raw mode enabled"));
   out.println(F("Paste JSON (multi-line ok)."));
@@ -8786,7 +8786,7 @@ static void ProcessBridgePassthroughTx() {
 void setup() {
 #if defined(ARDUINO_ARCH_ESP32)
   // Must be before Serial.begin() to reliably take effect.
-  Serial.setRxBufferSize(2000);
+  Serial.setRxBufferSize(2048);
 #endif
 
   Serial.begin(DBG_BAUD);
