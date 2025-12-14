@@ -237,29 +237,21 @@ constexpr uint32_t kDefaultGapAlertMs = 5000; // ms between alert beeps
 constexpr const char kKeyBeepLen[] = "beep_len_ms";
 constexpr const char kKeyBeepWarnGap[] = "beep_warn_gap";
 constexpr const char kKeyBeepAlertGap[] = "beep_alert_gap";
-constexpr const char kKeyBeepCooldown[] = "beep_cooldown";
 // Legacy keys from the monolithic root sketch (too long for NVS but kept for
 // read-back in case they were ever persisted on compatible builds).
 constexpr const char kKeyBeepWarnLegacy[] = "beep_gap_warn_ms";
 constexpr const char kKeyBeepAlertLegacy[] = "beep_gap_alert_ms";
-constexpr const char kKeyBeepCooldownLegacy[] = "beep_cooldown_ms";
 
 uint32_t g_beep_len_ms = kDefaultBeepLenMs;
 uint32_t g_beep_gap_warn_ms = kDefaultGapWarnMs;
 uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
 
-// Global silence / cooldown for the buzzer.
-constexpr uint32_t kDefaultBuzzerCooldownMs = 5UL * 60UL * 1000UL; // 5 min
-uint32_t g_buzzer_cooldown_ms = kDefaultBuzzerCooldownMs;
-
 enum BuzzerSilenceState : uint8_t {
   kBuzzerSilenceIdle = 0,      // normal operation, buzzer allowed
   kBuzzerSilenceActive = 1,    // user pressed "Silence"; current alerts suppressed
-  kBuzzerSilenceCooldown = 2,  // alerts have cleared; ignore retriggers until cooldown ends
 };
 
 BuzzerSilenceState g_buzzer_silence_state = kBuzzerSilenceIdle;
-uint32_t g_buzzer_silence_rearm_at_ms = 0;  // millis when we can re-arm (0 = not scheduled)
 
 // Runtime buzzer state (moved out of BuzzerLoop so the UI handler can touch it).
 bool g_buzzer_on = false;
@@ -314,6 +306,8 @@ float g_limit_hysteresis_c = kDefaultLimitHysteresisC;
 // Aggregate state for buzzer.
 bool g_any_warning = false;
 bool g_any_alert = false;
+bool g_buzzer_any_warning = false; // hysteresis-aware alert evaluation for buzzer
+bool g_buzzer_any_alert = false;
 
 // ntfy notifications
 struct NtfyConfig {
@@ -1712,10 +1706,6 @@ void SaveBuzzerSettings() {
   is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepAlertGap,
                                       g_beep_gap_alert_ms) &&
                   is_successful;
-  // NEW: cooldown between alert episodes
-  is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepCooldown,
-                                      g_buzzer_cooldown_ms) &&
-                  is_successful;
 
   g_root_preferences.end();
 
@@ -1738,15 +1728,11 @@ void LoadBuzzerSettings() {
                                               kKeyBeepAlertGap,
                                               kKeyBeepAlertLegacy,
                                               kDefaultGapAlertMs);
-  const uint32_t cd = NvsGetULongWithFallback(
-      g_root_preferences, kKeyBeepCooldown, kKeyBeepCooldownLegacy,
-      kDefaultBuzzerCooldownMs);
   g_root_preferences.end();
 
   g_beep_len_ms = (len > 0) ? len : kDefaultBeepLenMs;
   g_beep_gap_warn_ms = gw;
   g_beep_gap_alert_ms = ga;
-  g_buzzer_cooldown_ms = cd;  // allow 0 to mean "no extra cooldown"
 }
 
 
@@ -1992,9 +1978,6 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
   const uint32_t beep_alert =
       NvsGetULongWithFallback(g_root_preferences, kKeyBeepAlertGap,
                               kKeyBeepAlertLegacy, kDefaultGapAlertMs);
-  const uint32_t beep_cd = NvsGetULongWithFallback(
-      g_root_preferences, kKeyBeepCooldown, kKeyBeepCooldownLegacy,
-      kDefaultBuzzerCooldownMs);
   const uint32_t flash_ms = NvsGetULongWithFallback(
       g_root_preferences, kKeyFlashInterval, kKeyFlashIntervalLegacy,
       kDefaultFlashIntervalMs);
@@ -2048,7 +2031,6 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
   buzzer_obj["beep_ms"] = beep_len;
   buzzer_obj["warn_gap_ms"] = beep_warn;
   buzzer_obj["alert_gap_ms"] = beep_alert;
-  buzzer_obj["cooldown_ms"] = beep_cd;
 
   doc["flash_ms"] = flash_ms;
 
@@ -2225,12 +2207,10 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
     const uint32_t len = buzzer["beep_ms"].as<uint32_t>();
     const uint32_t warn_gap = buzzer["warn_gap_ms"].as<uint32_t>();
     const uint32_t alert_gap = buzzer["alert_gap_ms"].as<uint32_t>();
-    const uint32_t cd = buzzer["cooldown_ms"].as<uint32_t>();
 
     if (len > 0) g_beep_len_ms = len;
     g_beep_gap_warn_ms = warn_gap;
     g_beep_gap_alert_ms = alert_gap;
-    g_buzzer_cooldown_ms = cd;
 
     SaveBuzzerSettings();
     ++applied_sections;
@@ -2705,7 +2685,8 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
 static void EmitStateNotification(const String &key, AlertState new_state,
                                   const String &subject, const String &detail,
                                   const String &normal_detail, bool cache,
-                                  bool include_normal_detail_on_resolve = true) {
+                                  bool include_normal_detail_on_resolve = true,
+                                  bool send_notification = true) {
   AlertState prev = AlertState::kNormal;
   auto it = g_ntfy_states.find(key);
   if (it != g_ntfy_states.end()) {
@@ -2728,11 +2709,13 @@ static void EmitStateNotification(const String &key, AlertState new_state,
         msg += " - ";
         msg += normal_detail;
       }
-      if (g_debug_enabled) {
+      if (send_notification && g_debug_enabled) {
         Serial.printf("[NTFY] %s -> normal (%s)\n", key.c_str(),
                       normal_detail.c_str());
       }
-      SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
+      if (send_notification) {
+        SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
+      }
     }
     g_ntfy_states.erase(key);
     return;
@@ -2747,18 +2730,21 @@ static void EmitStateNotification(const String &key, AlertState new_state,
     msg += detail;
   }
 
-  if (g_debug_enabled) {
+  if (send_notification && g_debug_enabled) {
     Serial.printf("[NTFY] %s: %s -> %s\n", key.c_str(),
                   AlertStateName(prev), AlertStateName(new_state));
   }
-  SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
+  if (send_notification) {
+    SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
+  }
   g_ntfy_states[key] = new_state;
 }
 
 static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
-                                      uint8_t node_mute, bool *low_alert,
-                                      bool *high_alert, bool *low_warn,
-                                      bool *high_warn) {
+                                      uint8_t node_mute,
+                                      AlertState prev_state,
+                                      bool *low_alert, bool *high_alert,
+                                      bool *low_warn, bool *high_warn) {
   if (low_alert) *low_alert = false;
   if (high_alert) *high_alert = false;
   if (low_warn) *low_warn = false;
@@ -2768,14 +2754,30 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     return AlertState::kNormal;
   }
 
-  const float alert_low_thresh =
+  const float alert_low_trigger =
       isnan(g_alert_low_c) ? NAN : (g_alert_low_c - g_limit_hysteresis_c);
-  const float alert_high_thresh =
+  const float alert_low_clear =
+      isnan(g_alert_low_c) ? NAN : (g_alert_low_c + g_limit_hysteresis_c);
+  const float alert_high_trigger =
       isnan(g_alert_high_c) ? NAN : (g_alert_high_c + g_limit_hysteresis_c);
-  bool la = (!isnan(alert_low_thresh) && sensor.temp_c < alert_low_thresh);
-  bool ha = (!isnan(alert_high_thresh) && sensor.temp_c > alert_high_thresh);
-  if (la && (node_mute & kMuteLow)) la = false;
-  if (ha && (node_mute & kMuteHigh)) ha = false;
+  const float alert_high_clear =
+      isnan(g_alert_high_c) ? NAN : (g_alert_high_c - g_limit_hysteresis_c);
+  bool la = false;
+  bool ha = false;
+  if (!isnan(alert_low_trigger) && !(node_mute & kMuteLow)) {
+    if (sensor.temp_c < alert_low_trigger) {
+      la = true;
+    } else if (sensor.temp_c <= alert_low_clear) {
+      la = (prev_state == AlertState::kAlert);
+    }
+  }
+  if (!isnan(alert_high_trigger) && !(node_mute & kMuteHigh)) {
+    if (sensor.temp_c > alert_high_trigger) {
+      ha = true;
+    } else if (sensor.temp_c >= alert_high_clear) {
+      ha = (prev_state == AlertState::kAlert);
+    }
+  }
 
   if (low_alert) *low_alert = la;
   if (high_alert) *high_alert = ha;
@@ -2784,14 +2786,31 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     return AlertState::kAlert;
   }
 
-  const float warn_low_thresh =
+  const float warn_low_trigger =
       isnan(g_warn_low_c) ? NAN : (g_warn_low_c - g_limit_hysteresis_c);
-  const float warn_high_thresh =
+  const float warn_low_clear =
+      isnan(g_warn_low_c) ? NAN : (g_warn_low_c + g_limit_hysteresis_c);
+  const float warn_high_trigger =
       isnan(g_warn_high_c) ? NAN : (g_warn_high_c + g_limit_hysteresis_c);
-  bool lw = (!isnan(warn_low_thresh) && sensor.temp_c < warn_low_thresh);
-  bool hw = (!isnan(warn_high_thresh) && sensor.temp_c > warn_high_thresh);
-  if (lw && (node_mute & kMuteLow)) lw = false;
-  if (hw && (node_mute & kMuteHigh)) hw = false;
+  const float warn_high_clear =
+      isnan(g_warn_high_c) ? NAN : (g_warn_high_c - g_limit_hysteresis_c);
+  const bool prev_warning = (prev_state == AlertState::kWarning);
+  bool lw = false;
+  bool hw = false;
+  if (!isnan(warn_low_trigger) && !(node_mute & kMuteLow)) {
+    if (sensor.temp_c < warn_low_trigger) {
+      lw = true;
+    } else if (sensor.temp_c <= warn_low_clear) {
+      lw = prev_warning;
+    }
+  }
+  if (!isnan(warn_high_trigger) && !(node_mute & kMuteHigh)) {
+    if (sensor.temp_c > warn_high_trigger) {
+      hw = true;
+    } else if (sensor.temp_c >= warn_high_clear) {
+      hw = prev_warning;
+    }
+  }
 
   if (low_warn) *low_warn = lw;
   if (high_warn) *high_warn = hw;
@@ -3081,11 +3100,9 @@ static void UpdateSilenceButtonAppearance() {
     return;
   }
 
-  const bool silenced =
-      (g_buzzer_silence_state == kBuzzerSilenceActive ||
-       g_buzzer_silence_state == kBuzzerSilenceCooldown);
+  const bool silenced = (g_buzzer_silence_state == kBuzzerSilenceActive);
 
-  // Neutral dark when idle, red when silenced/cooldown.
+  // Neutral dark when idle, red when silenced.
   lv_color_t bg_color =
       silenced ? lv_color_make(0xC0, 0x20, 0x20)   // red
                : lv_color_make(0x40, 0x40, 0x40);  // dark gray
@@ -4541,19 +4558,18 @@ static void SilenceButtonEvent(lv_event_t *e) {
 
   // --- Existing behaviour for real alerts/warnings -------------------------
 
-  // Do nothing if already in a silenced / cooldown state.
+  // Do nothing if already in a silenced state.
   if (g_buzzer_silence_state != kBuzzerSilenceIdle) {
     return;
   }
 
   // Only makes sense to silence if something is actually alarming or warning.
-  if (!g_any_alert && !g_any_warning) {
+  if (!g_buzzer_any_alert && !g_buzzer_any_warning) {
     return;
   }
 
   // Enter "active silence" for the current alert episode.
   g_buzzer_silence_state = kBuzzerSilenceActive;
-  g_buzzer_silence_rearm_at_ms = 0;
 
   // Immediately force the buzzer off and reset its timing.
   digitalWrite(kBuzzerPin, LOW);
@@ -4595,9 +4611,10 @@ static void ViewButtonEvent(lv_event_t *e) {
 }
 
 static void ProcessNtfyAlerts(uint32_t now_ms) {
-  if (!g_ntfy_config.enabled || g_use_dummy_data) {
-    return;
-  }
+  const bool send_notifications = g_ntfy_config.enabled && !g_use_dummy_data;
+
+  g_buzzer_any_alert = false;
+  g_buzzer_any_warning = false;
 
   auto mesh_node_list = mesh.getNodeList();
   std::vector<uint32_t> connected_ids(mesh_node_list.begin(), mesh_node_list.end());
@@ -4633,21 +4650,30 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
     String node_normal_detail;
 
     for (const auto &sensor : node->sensors()) {
+      const String sensor_key = String("S:") + node->node_id_str() + ":" +
+                                CanonAddr16(sensor.address);
+      AlertState prev_state = AlertState::kNormal;
+      auto prev_it = g_ntfy_states.find(sensor_key);
+      if (prev_it != g_ntfy_states.end()) {
+        prev_state = prev_it->second;
+      }
+
       bool low_alert = false, high_alert = false, low_warn = false, high_warn = false;
-      const AlertState state = EvaluateSensorState(sensor, node_mute, &low_alert,
-                                                  &high_alert, &low_warn, &high_warn);
+      const AlertState state = EvaluateSensorState(sensor, node_mute, prev_state,
+                                                  &low_alert, &high_alert, &low_warn,
+                                                  &high_warn);
       if (state == AlertState::kAlert) {
         node_has_alert = true;
+        g_buzzer_any_alert = true;
       } else if (state == AlertState::kWarning) {
         sensor_has_warning = true;
+        g_buzzer_any_warning = true;
       }
 
       if (node_normal_detail.isEmpty() && sensor.has_value && !isnan(sensor.temp_c)) {
         node_normal_detail = FormatTempForMessage(sensor.temp_c);
       }
 
-      const String sensor_key = String("S:") + node->node_id_str() + ":" +
-                                CanonAddr16(sensor.address);
       const String subject = NodeDisplayName(node) + " / " + SensorDisplayName(sensor);
 
       String detail;
@@ -4671,14 +4697,17 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
       }
 
       EmitStateNotification(sensor_key, state, subject, detail, resolved_detail,
-                            /*cache=*/true);
+                            /*cache=*/true, /*include_normal_detail_on_resolve=*/true,
+                            send_notifications);
     }
 
     if (sequence_stuck && !node_has_alert) {
       node_has_warning = true;
+      g_buzzer_any_warning = true;
     }
     if (is_stale && !node_has_alert) {
       node_has_warning = true;
+      g_buzzer_any_warning = true;
     }
 
     AlertState node_state = AlertState::kNormal;
@@ -4704,7 +4733,8 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
     const String node_key = String("N:") + node->node_id_str();
     EmitStateNotification(node_key, node_state, NodeDisplayName(node), node_detail,
                           node_normal_detail, /*cache=*/true,
-                          /*include_normal_detail_on_resolve=*/false);
+                          /*include_normal_detail_on_resolve=*/false,
+                          send_notifications);
   }
 }
 
@@ -4931,9 +4961,8 @@ static void BuzzerStartTestInternal(bool use_alert_profile) {
   g_buzzer_test_use_alert_pattern = use_alert_profile;
   g_buzzer_test_active = true;
 
-  // Test should not be blocked by any prior silence/cooldown state.
+  // Test should not be blocked by any prior silence state.
   g_buzzer_silence_state = kBuzzerSilenceIdle;
-  g_buzzer_silence_rearm_at_ms = 0;
 
   // Reset scheduler so the first test beep comes quickly.
   digitalWrite(kBuzzerPin, LOW);
@@ -4963,39 +4992,15 @@ void BuzzerLoop() {
   const uint32_t now_ms = millis();
 
   // Real alert/warning state from the tile/map logic.
-  const bool any_real_active = (g_any_alert || g_any_warning);
+  const bool any_real_active = (g_buzzer_any_alert || g_buzzer_any_warning);
 
-  // --- Silence / cooldown state machine (real alerts only) ------------------
-  switch (g_buzzer_silence_state) {
-  case kBuzzerSilenceIdle:
-    // Normal operation; nothing special.
-    break;
-
-  case kBuzzerSilenceActive:
-    // User has pressed "Silence" for the current episode.
-    // Stay here while there are active alerts/warnings.
-    if (!any_real_active) {
-      // Alerts cleared → start cooldown timer.
-      g_buzzer_silence_state = kBuzzerSilenceCooldown;
-      g_buzzer_silence_rearm_at_ms = now_ms + g_buzzer_cooldown_ms;
-    }
-    break;
-
-  case kBuzzerSilenceCooldown:
-    // Ignore any new alerts until both:
-    //   - cooldown has expired, AND
-    //   - there are no active alerts/warnings.
-    if (!any_real_active && g_buzzer_silence_rearm_at_ms != 0U &&
-        now_ms >= g_buzzer_silence_rearm_at_ms) {
-      g_buzzer_silence_state = kBuzzerSilenceIdle;
-      g_buzzer_silence_rearm_at_ms = 0;
-    }
-    break;
+  // --- Silence state machine (real alerts only) -----------------------------
+  if (g_buzzer_silence_state == kBuzzerSilenceActive && !any_real_active) {
+    // Alerts fully cleared (past hysteresis); re-arm the buzzer.
+    g_buzzer_silence_state = kBuzzerSilenceIdle;
   }
 
-  const bool silence_in_effect =
-      (g_buzzer_silence_state == kBuzzerSilenceActive ||
-       g_buzzer_silence_state == kBuzzerSilenceCooldown);
+  const bool silence_in_effect = (g_buzzer_silence_state == kBuzzerSilenceActive);
 
   // If a real alert episode is active (and not silenced), it owns the buzzer
   // and cancels any console-driven test.
@@ -5010,8 +5015,8 @@ void BuzzerLoop() {
 
   // 1) Real alert/warning pattern (highest priority).
   if (any_real_active && !silence_in_effect) {
-    bool use_alert_profile = g_any_alert;
-    bool use_warn_profile = (!use_alert_profile && g_any_warning);
+    bool use_alert_profile = g_buzzer_any_alert;
+    bool use_warn_profile = (!use_alert_profile && g_buzzer_any_warning);
 
     if (use_alert_profile) {
       beep_should_run = true;
@@ -6105,8 +6110,6 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
                static_cast<unsigned long>(g_beep_gap_warn_ms));
     out.printf("  alert_gap : %lu ms\n",
                static_cast<unsigned long>(g_beep_gap_alert_ms));
-    out.printf("  cooldown  : %lu ms\n",
-               static_cast<unsigned long>(g_buzzer_cooldown_ms));
 
     const char *silence_str = "idle";
     switch (g_buzzer_silence_state) {
@@ -6116,15 +6119,12 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
     case kBuzzerSilenceActive:
       silence_str = "active";
       break;
-    case kBuzzerSilenceCooldown:
-      silence_str = "cooldown";
-      break;
     }
 
     out.printf("buzzer state:\n");
     out.printf("  alerts    : %s (warn=%s)\n",
-               g_any_alert ? "YES" : "no",
-               g_any_warning ? "YES" : "no");
+               g_buzzer_any_alert ? "YES" : "no",
+               g_buzzer_any_warning ? "YES" : "no");
     out.printf("  silence   : %s\n", silence_str);
     out.printf("  test_mode : %s (%s pattern)\n",
                g_buzzer_test_active ? "ON" : "off",
@@ -6191,26 +6191,6 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   // -------------------------------------------------------------------------
-  // Set cooldown:  buzzer cooldown <ms>
-  // -------------------------------------------------------------------------
-  if (sub.equalsIgnoreCase("cooldown") || sub.equalsIgnoreCase("cd")) {
-    if (argc < 3) {
-      out.println(F("ERR: usage: buzzer cooldown <ms>"));
-      return;
-    }
-    uint32_t ms = 0;
-    if (!ParseMsArgument(argv[2], &ms, out)) {
-      return;
-    }
-    // Allow 0 to mean "no extra cooldown".
-    g_buzzer_cooldown_ms = ms;
-    SaveBuzzerSettings();
-    out.printf("buzzer cooldown set to %lu ms\n",
-               static_cast<unsigned long>(ms));
-    return;
-  }
-
-  // -------------------------------------------------------------------------
   // Test mode:  buzzer test [alert|warn|off]
   //   - uses beep_len_ms and the configured gaps
   //   - runs until "buzzer test off" or "buzzer stop"
@@ -6251,29 +6231,26 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   // Silence:  buzzer silence
   //   Same semantics as pressing the on-screen Silence button:
   //   - only works if a real alert/warning is active
-  //   - starts a silence/cooldown episode
+  //   - stays silenced until alerts clear beyond hysteresis band
   // -------------------------------------------------------------------------
   if (sub.equalsIgnoreCase("silence")) {
     if (g_buzzer_silence_state != kBuzzerSilenceIdle) {
-      out.println(F("buzzer: already silenced / in cooldown"));
+      out.println(F("buzzer: already silenced"));
       return;
     }
-    if (!g_any_alert && !g_any_warning) {
+    if (!g_buzzer_any_alert && !g_buzzer_any_warning) {
       out.println(F("buzzer: no active alerts/warnings to silence"));
       return;
     }
 
     g_buzzer_silence_state = kBuzzerSilenceActive;
-    g_buzzer_silence_rearm_at_ms = 0;
 
     digitalWrite(kBuzzerPin, LOW);
     g_buzzer_on = false;
     g_buzzer_beep_start_ms = 0;
     g_buzzer_last_beep_ms = 0;
 
-    out.println(
-        F("buzzer: silence ACTIVE (will auto re-arm after alerts clear + "
-          "cooldown)"));
+    out.println(F("buzzer: silence ACTIVE (will auto re-arm after alerts clear)"));
     return;
   }
 
@@ -6281,7 +6258,7 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   // Hard stop:  buzzer stop
   //   - turn off test mode (if any)
   //   - force buzzer output low and clear timing
-  //   (does NOT alter silence/cooldown state)
+  //   (does NOT alter silence state)
   // -------------------------------------------------------------------------
   if (sub.equalsIgnoreCase("stop")) {
     BuzzerStopTestInternal();
@@ -6302,7 +6279,6 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("  buzzer len <ms>           - set beep length"));
   out.println(F("  buzzer warn <ms>          - set warning gap"));
   out.println(F("  buzzer alert <ms>         - set alert gap"));
-  out.println(F("  buzzer cooldown <ms>      - set cooldown between episodes"));
   out.println(F("  buzzer test [alert|warn|off]"));
   out.println(F("                            - start/stop buzzer test pattern"));
   out.println(F("  buzzer silence            - same as GUI Silence button"));
@@ -7919,7 +7895,7 @@ void setup() {
   g_console.RegisterCommand("ntfy", &CmdNtfy,
                             "ntfy show|enable|summary|freq|test [msg]");
   g_console.RegisterCommand("buzzer", &CmdBuzzer,
-                            "buzzer len | warn | alert | cooldown | test | silence | stop");
+                            "buzzer len | warn | alert | test | silence | stop");
   g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");
   g_console.RegisterCommand("order", &CmdOrder, "sensor global order");
   g_console.RegisterCommand("norder", &CmdNorder, "tile order");
