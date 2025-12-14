@@ -3418,11 +3418,17 @@ void GuiInit() {
   lv_chart_set_update_mode(g_ui_chart, LV_CHART_UPDATE_MODE_CIRCULAR);
   lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_50, 0);
   lv_obj_set_style_bg_color(g_ui_chart, lv_color_make(0x18, 0x18, 0x18), 0);
+  lv_obj_set_style_text_color(g_ui_chart, lv_color_white(), LV_PART_TICKS);
+  lv_obj_set_style_text_opa(g_ui_chart, LV_OPA_COVER, LV_PART_TICKS);
+  lv_obj_set_style_line_color(g_ui_chart, lv_color_make(0x40, 0x40, 0x40),
+                              LV_PART_GRID);
+  lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_40, LV_PART_GRID);
   lv_obj_add_event_cb(g_ui_chart, ChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN,
                       nullptr);
   g_ui_chart_series =
       lv_chart_add_series(g_ui_chart, lv_color_make(0x80, 0xD0, 0xFF),
                           LV_CHART_AXIS_PRIMARY_Y);
+  lv_chart_set_series_line_width(g_ui_chart, g_ui_chart_series, 3);
 
   g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
   lv_label_set_text(g_ui_chart_empty_label, "No history for this range");
