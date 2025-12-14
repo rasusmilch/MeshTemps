@@ -59,8 +59,8 @@ using esp_panel::drivers::LCD;
 
 using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
 
-constexpr size_t kConsoleMaxLineLen = 8192; // allow large raw JSON pastes
-static SerialConsole g_console(kConsoleMaxLineLen);
+constexpr size_t kConsoleDefaultMaxLineLen = 256;
+static SerialConsole g_console(kConsoleDefaultMaxLineLen);
 
 // ---------------------------------------------------------------------------
 // Map view definitions (root)
@@ -6340,6 +6340,13 @@ static constexpr size_t kNvsRestoreMaxBytes = 20000;
 static bool g_nvs_restore_raw_active = false;
 static String g_nvs_restore_raw_json;
 
+static void ResetNvsRestoreRawMode() {
+  g_console.EndRawMode();
+  g_console.SetMaxLineLen(kConsoleDefaultMaxLineLen);
+  g_nvs_restore_raw_active = false;
+  g_nvs_restore_raw_json = "";
+}
+
 static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
   (void)ctx;
 
@@ -6349,18 +6356,14 @@ static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
   trimmed.trim();
 
   if (trimmed.equals(kNvsRestoreAbortSentinel)) {
-    g_console.EndRawMode();
-    g_nvs_restore_raw_active = false;
-    g_nvs_restore_raw_json = "";
+    ResetNvsRestoreRawMode();
     out.println(F("nvs restore: canceled"));
     return;
   }
 
   if (trimmed.equals(kNvsRestoreEndSentinel)) {
-    g_console.EndRawMode();
-    g_nvs_restore_raw_active = false;
-
     String payload = g_nvs_restore_raw_json;
+    ResetNvsRestoreRawMode();
     if (payload.endsWith("\n")) payload.remove(payload.length() - 1);
     g_nvs_restore_raw_json = "";
 
@@ -6380,9 +6383,7 @@ static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
 
   if (g_nvs_restore_raw_json.length() + line.length() + 1 >
       kNvsRestoreMaxBytes) {
-    g_console.EndRawMode();
-    g_nvs_restore_raw_active = false;
-    g_nvs_restore_raw_json = "";
+    ResetNvsRestoreRawMode();
     out.println(F("ERR nvs restore (input too large)"));
     return;
   }
@@ -6394,6 +6395,7 @@ static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
 static void StartNvsRestoreRawMode(Print &out) {
   g_nvs_restore_raw_active = true;
   g_nvs_restore_raw_json = "";
+  g_console.SetMaxLineLen(kNvsRestoreMaxBytes);
   g_console.BeginRawMode(&NvsRestoreRawLine, nullptr);
   out.println(F("nvs restore: raw mode enabled"));
   out.println(F("Paste JSON (multi-line ok)."));

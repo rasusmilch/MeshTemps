@@ -43,6 +43,17 @@ class SerialConsole {
     buffer_ = "";
   }
 
+  void SetMaxLineLen(size_t max_len) {
+    if (max_len == 0) max_len = 1;
+    max_line_len_ = max_len;
+    buffer_.reserve(max_line_len_);
+    if (buffer_.length() > max_line_len_) {
+      const int excess =
+          static_cast<int>(buffer_.length()) - static_cast<int>(max_line_len_);
+      buffer_.remove(0, excess);
+    }
+  }
+
   bool InRawMode() const { return raw_mode_; }
 
   // Register a command (e.g., "debug", "units", etc.).
