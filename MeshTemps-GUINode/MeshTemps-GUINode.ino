@@ -5782,20 +5782,38 @@ static void CmdI2cScan(void *ctx, int argc, const String argv[], Print &out) {
   constexpr i2c_port_t kPort = static_cast<i2c_port_t>(
       ESP_PANEL_BOARD_TOUCH_I2C_HOST_ID);
 
-  if (!i2c_is_driver_installed(kPort)) {
-    out.println(F("[I2C] Driver not installed; init display/touch first."));
-    return;
-  }
-
   out.printf("[I2C] host=%d SDA=%d SCL=%d freq=%uHz\n", static_cast<int>(kPort),
              ESP_PANEL_BOARD_TOUCH_I2C_IO_SDA, ESP_PANEL_BOARD_TOUCH_I2C_IO_SCL,
              ESP_PANEL_BOARD_TOUCH_I2C_CLK_HZ);
 
   bool found[128] = {};
+  bool driver_missing = false;
   for (uint8_t addr = 0x03; addr <= 0x77; ++addr) {
-    const esp_err_t err = i2c_master_probe(kPort, addr, pdMS_TO_TICKS(20));
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    esp_err_t err = ESP_FAIL;
+
+    if (cmd) {
+      err = i2c_master_start(cmd);
+      if (err == ESP_OK) {
+        err = i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE,
+                                    true /*expect ack*/);
+      }
+      if (err == ESP_OK) err = i2c_master_stop(cmd);
+      if (err == ESP_OK) {
+        err = i2c_master_cmd_begin(kPort, cmd, pdMS_TO_TICKS(20));
+      }
+      i2c_cmd_link_delete(cmd);
+    }
+
+    if (err == ESP_ERR_INVALID_STATE) {
+      out.println(F("[I2C] Driver not installed; init display/touch first."));
+      driver_missing = true;
+      break;
+    }
     if (err == ESP_OK) found[addr] = true;
   }
+
+  if (driver_missing) return;
 
   out.println(F("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f"));
   for (int base = 0; base < 128; base += 16) {
