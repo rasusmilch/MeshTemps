@@ -4796,6 +4796,8 @@ static void HideChartMessage() {
 static void BuildHistoryChartForSelection() {
   UpdateRangeButtonStates();
 
+  g_chart_axis_ctx = {};
+
   if (g_ui_chart == nullptr || g_ui_chart_series == nullptr ||
       !g_chart_selection.active) {
     return;
@@ -5022,15 +5024,17 @@ static void ChartDrawEvent(lv_event_t *e) {
   if (dsc == nullptr || dsc->class_p != &lv_chart_class) {
     return;
   }
-  if (dsc->type != LV_CHART_DRAW_PART_TICK_LABEL || dsc->text == nullptr ||
-      dsc->text_length <= 0) {
+  if (dsc->type != LV_CHART_DRAW_PART_TICK_LABEL || dsc->text_length <= 0) {
     return;
   }
 
   if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
     const float temp = static_cast<float>(dsc->value) / kChartTempScale;
-    lv_snprintf(dsc->text, dsc->text_length, "%.1f%s",
-                static_cast<double>(temp), DisplayUnitsLabel());
+    static char y_label[32];
+    lv_snprintf(y_label, sizeof(y_label), "%.1f%s", static_cast<double>(temp),
+                DisplayUnitsLabel());
+    dsc->text = y_label;
+    dsc->text_length = sizeof(y_label);
     return;
   }
 
@@ -5046,13 +5050,17 @@ static void ChartDrawEvent(lv_event_t *e) {
       if (localtime_r(&tick_epoch, &tm_info) != nullptr) {
         const bool show_time = (g_chart_active_range_index <= 1);
         const char *fmt = show_time ? "%m/%d\n%H:%M" : "%m/%d";
-        char buf[32];
-        if (strftime(buf, sizeof(buf), fmt, &tm_info) > 0) {
-          lv_snprintf(dsc->text, dsc->text_length, "%s", buf);
+        static char x_label[32];
+        if (strftime(x_label, sizeof(x_label), fmt, &tm_info) > 0) {
+          dsc->text = x_label;
+          dsc->text_length = sizeof(x_label);
         }
       }
     } else {
-      lv_snprintf(dsc->text, dsc->text_length, "%.0fh", hours);
+      static char x_label[24];
+      lv_snprintf(x_label, sizeof(x_label), "%.0fh", hours);
+      dsc->text = x_label;
+      dsc->text_length = sizeof(x_label);
     }
   }
 }
