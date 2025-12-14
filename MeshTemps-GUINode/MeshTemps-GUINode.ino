@@ -7736,8 +7736,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       }
 
       out.print(F(" temp="));
-      out.print(ToDisplayUnits(sample.temp_c), 3);
-      out.print('');
+      out.print(ToDisplayUnits(sample.temp_c), 2);
       out.print(DisplayUnitsLabel());
 
       if (!sample.has_value) {
