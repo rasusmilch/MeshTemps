@@ -5,7 +5,7 @@
 #include <vector>
 
 class SerialConsole {
- public:
+public:
   // Handler receives a user-provided context, argc, argv tokens (argv[0] is the
   // command name). Handlers print to 'out'.
   typedef void (*CommandHandler)(void* ctx, int argc, const String argv[],
@@ -19,7 +19,7 @@ class SerialConsole {
   };
 
   explicit SerialConsole(size_t max_line_len = 256)
-      : max_line_len_(max_line_len) {
+    : max_line_len_(max_line_len) {
     buffer_.reserve(max_line_len_);
   }
 
@@ -33,7 +33,7 @@ class SerialConsole {
     for (const auto& cmd : commands_) {
       if (strcmp(cmd.name, name) == 0) return false;
     }
-    commands_.push_back(Command{name, help, handler, user_ctx});
+    commands_.push_back(Command{ name, help, handler, user_ctx });
     return true;
   }
 
@@ -49,7 +49,7 @@ class SerialConsole {
         if (buffer_.length() > max_line_len_) {
           // Keep tail within limit (simple ring-behavior).
           const int excess =
-              static_cast<int>(buffer_.length()) - static_cast<int>(max_line_len_);
+            static_cast<int>(buffer_.length()) - static_cast<int>(max_line_len_);
           buffer_.remove(0, excess);
         }
         continue;
@@ -85,13 +85,14 @@ class SerialConsole {
     }
   }
 
- private:
+private:
   static void Tokenize(const String& line, std::vector<String>& out_tokens) {
     out_tokens.clear();
     String current;
     current.reserve(32);
 
-    enum State { kDefault, kInQuote } state = kDefault;
+    enum State { kDefault,
+                 kInQuote } state = kDefault;
 
     for (size_t i = 0; i < line.length(); ++i) {
       char c = line[i];

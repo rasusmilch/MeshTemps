@@ -31,7 +31,7 @@
 //
 // Pins/baud can be overridden before including this header.
 #ifndef BRIDGE_GUI_BAUD
-#define BRIDGE_GUI_BAUD 115200
+#define BRIDGE_GUI_BAUD 9600
 #endif
 
 #ifndef BRIDGE_GUI_TX_PIN
