@@ -5033,8 +5033,9 @@ static void ChartDrawEvent(lv_event_t *e) {
     static char y_label[32];
     lv_snprintf(y_label, sizeof(y_label), "%.1f%s", static_cast<double>(temp),
                 DisplayUnitsLabel());
+    const size_t len = strlen(y_label);
     dsc->text = y_label;
-    dsc->text_length = sizeof(y_label);
+    dsc->text_length = static_cast<lv_coord_t>(len);
     return;
   }
 
@@ -5051,16 +5052,17 @@ static void ChartDrawEvent(lv_event_t *e) {
         const bool show_time = (g_chart_active_range_index <= 1);
         const char *fmt = show_time ? "%m/%d\n%H:%M" : "%m/%d";
         static char x_label[32];
-        if (strftime(x_label, sizeof(x_label), fmt, &tm_info) > 0) {
+        const size_t len = strftime(x_label, sizeof(x_label), fmt, &tm_info);
+        if (len > 0) {
           dsc->text = x_label;
-          dsc->text_length = sizeof(x_label);
+          dsc->text_length = static_cast<lv_coord_t>(len);
         }
       }
     } else {
       static char x_label[24];
       lv_snprintf(x_label, sizeof(x_label), "%.0fh", hours);
       dsc->text = x_label;
-      dsc->text_length = sizeof(x_label);
+      dsc->text_length = static_cast<lv_coord_t>(strlen(x_label));
     }
   }
 }
