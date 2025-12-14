@@ -47,6 +47,7 @@
 #include <limits>
 #include <lvgl.h>
 #include <map>
+#include <driver/i2c.h>
 #include <sys/time.h> // for settimeofday()
 #include <time.h>
 
@@ -5772,6 +5773,65 @@ static void CmdPassthru(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ERR passthru (use on|off)"));
 }
 
+static void CmdI2cScan(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  (void)argc;
+  (void)argv;
+  PrintCommandHeader(out, argc, argv);
+
+  constexpr i2c_port_t kPort = static_cast<i2c_port_t>(
+      ESP_PANEL_BOARD_TOUCH_I2C_HOST_ID);
+
+  out.printf("[I2C] host=%d SDA=%d SCL=%d freq=%uHz\n", static_cast<int>(kPort),
+             ESP_PANEL_BOARD_TOUCH_I2C_IO_SDA, ESP_PANEL_BOARD_TOUCH_I2C_IO_SCL,
+             ESP_PANEL_BOARD_TOUCH_I2C_CLK_HZ);
+
+  bool found[128] = {};
+  bool driver_missing = false;
+  for (uint8_t addr = 0x03; addr <= 0x77; ++addr) {
+    i2c_cmd_handle_t cmd = i2c_cmd_link_create();
+    esp_err_t err = ESP_FAIL;
+
+    if (cmd) {
+      err = i2c_master_start(cmd);
+      if (err == ESP_OK) {
+        err = i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE,
+                                    true /*expect ack*/);
+      }
+      if (err == ESP_OK) err = i2c_master_stop(cmd);
+      if (err == ESP_OK) {
+        err = i2c_master_cmd_begin(kPort, cmd, pdMS_TO_TICKS(20));
+      }
+      i2c_cmd_link_delete(cmd);
+    }
+
+    if (err == ESP_ERR_INVALID_STATE) {
+      out.println(F("[I2C] Driver not installed; init display/touch first."));
+      driver_missing = true;
+      break;
+    }
+    if (err == ESP_OK) found[addr] = true;
+  }
+
+  if (driver_missing) return;
+
+  out.println(F("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f"));
+  for (int base = 0; base < 128; base += 16) {
+    out.printf("%02x:", base);
+    for (int off = 0; off < 16; ++off) {
+      const int addr = base + off;
+      if (addr < 0x03 || addr > 0x77) {
+        out.print(F("   "));
+      } else if (found[addr]) {
+        out.printf(" %02x", addr);
+      } else {
+        out.print(F(" --"));
+      }
+    }
+    out.println();
+  }
+}
+
 static void CmdTime(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -8546,6 +8606,7 @@ void setup() {
   g_console.RegisterCommand("buzzer", &CmdBuzzer,
                             "buzzer len | warn | alert | test | silence | stop");
   g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");
+  g_console.RegisterCommand("i2cscan", &CmdI2cScan, "scan I2C bus");
   g_console.RegisterCommand("order", &CmdOrder, "sensor global order");
   g_console.RegisterCommand("norder", &CmdNorder, "tile order");
   g_console.RegisterCommand("sorder", &CmdSorder, "per-node sensor order");
