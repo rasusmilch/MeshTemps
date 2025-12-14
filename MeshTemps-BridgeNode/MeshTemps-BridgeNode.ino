@@ -339,6 +339,17 @@ static bool ExtractRawTailAfterSecondToken(const String &line, String *out_value
   return !out_value->isEmpty();
 }
 
+static String JoinArgs(int argc, const String argv[], int start_idx) {
+  String out;
+  for (int i = start_idx; i < argc; ++i) {
+    if (i > start_idx) {
+      out += ' ';
+    }
+    out += argv[i];
+  }
+  return out;
+}
+
 static void LoadNetworkConfigFromNVS() {
   Preferences prefs;
   if (!prefs.begin("wifi", true)) {
@@ -391,6 +402,104 @@ static void SaveNtfyConfigToNvs() {
   prefs.putString("summary_topic", g_ntfy_config.summary_topic);
 
   prefs.end();
+}
+
+static bool BuildBridgeNvsBackup(String *out_json, Print &out) {
+  if (out_json == nullptr) return false;
+
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+  JsonDocument doc;
+#else
+  StaticJsonDocument<2048> doc;
+#endif
+
+  doc.clear();
+  doc["kind"] = "meshtemps-nvs";
+  doc["node"] = "bridge";
+  doc["version"] = 1;
+
+  Preferences wifi;
+  if (wifi.begin("wifi", true)) {
+    JsonObject wifi_obj = doc["wifi"].to<JsonObject>();
+    wifi_obj["tz_min"] = wifi.getInt("tz_min", 0);
+    wifi_obj["tz_dst"] = wifi.getInt("tz_dst", 0) != 0;
+    wifi.end();
+  }
+
+  Preferences ntfy;
+  if (ntfy.begin("ntfy", true)) {
+    JsonObject ntfy_obj = doc["ntfy"].to<JsonObject>();
+    ntfy_obj["enabled"] = ntfy.getInt("enabled", 1) != 0;
+    ntfy_obj["server"] = ntfy.getString("server", g_ntfy_config.server_url);
+    ntfy_obj["alert_topic"] =
+        ntfy.getString("alert_topic", g_ntfy_config.alert_topic);
+    ntfy_obj["summary_topic"] =
+        ntfy.getString("summary_topic", g_ntfy_config.summary_topic);
+    ntfy.end();
+  }
+
+  out_json->clear();
+  serializeJson(doc, *out_json);
+  return true;
+}
+
+static bool RestoreBridgeNvsFromJson(const String &json, Print &out) {
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+  JsonDocument doc;
+#else
+  StaticJsonDocument<2048> doc;
+#endif
+
+  const DeserializationError err = deserializeJson(doc, json);
+  if (err) {
+    out.printf("nvs restore: invalid JSON (%s)\n", err.c_str());
+    return false;
+  }
+
+  int applied = 0;
+
+  if (doc.containsKey("wifi")) {
+    JsonObject wifi_obj = doc["wifi"];
+    bool changed = false;
+
+    // Start from existing values so omitted fields are preserved.
+    LoadNetworkConfigFromNVS();
+
+    if (wifi_obj.containsKey("ssid")) {
+      g_network_config.ssid = wifi_obj["ssid"].as<String>();
+      changed = true;
+    }
+    if (wifi_obj.containsKey("pwd")) {
+      g_network_config.password = wifi_obj["pwd"].as<String>();
+      changed = true;
+    }
+    if (wifi_obj.containsKey("tz_min")) {
+      g_network_config.timezone_minutes = wifi_obj["tz_min"].as<int32_t>();
+      changed = true;
+    }
+    if (wifi_obj.containsKey("tz_dst")) {
+      g_network_config.dst_enabled = wifi_obj["tz_dst"].as<bool>();
+      changed = true;
+    }
+
+    if (changed) {
+      SaveNetworkConfigToNVS();
+      ++applied;
+    }
+  }
+
+  if (doc.containsKey("ntfy")) {
+    JsonObject ntfy_obj = doc["ntfy"];
+    g_ntfy_config.enabled = ntfy_obj["enabled"].as<bool>();
+    g_ntfy_config.server_url = ntfy_obj["server"].as<String>();
+    g_ntfy_config.alert_topic = ntfy_obj["alert_topic"].as<String>();
+    g_ntfy_config.summary_topic = ntfy_obj["summary_topic"].as<String>();
+    SaveNtfyConfigToNvs();
+    ++applied;
+  }
+
+  out.printf("nvs restore: applied %d section(s)\n", applied);
+  return applied > 0;
 }
 
 static const char *WifiStatusToString(wl_status_t st) {
@@ -1210,6 +1319,45 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("ERR wifi (use: wifi status|scan|connect|ssid|password|clear)"));
 }
 
+static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  if (argc < 2) {
+    out.println(F("usage: nvs dump | nvs restore <json>"));
+    return;
+  }
+
+  const String sub = argv[1];
+  if (sub.equalsIgnoreCase("dump")) {
+    String json;
+    if (BuildBridgeNvsBackup(&json, out)) {
+      out.println(json);
+      out.println(F("nvs dump: copy the JSON above for restore"));
+    } else {
+      out.println(F("ERR nvs dump"));
+    }
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("restore")) {
+    if (argc < 3) {
+      out.println(F("ERR nvs restore (provide JSON)"));
+      return;
+    }
+
+    const String payload = JoinArgs(argc, argv, 2);
+    if (RestoreBridgeNvsFromJson(payload, out)) {
+      out.println(F("nvs restore: ok"));
+    } else {
+      out.println(F("nvs restore: no changes"));
+    }
+    return;
+  }
+
+  out.println(F("ERR nvs (use dump|restore)"));
+}
+
 static void CmdTime(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -1336,6 +1484,7 @@ void setup() {
                             "mirror GUI UART (17/18) to USB");
   g_console.RegisterCommand("ntfy", &CmdNtfy,
                             "ntfy show|enable|server|topic|clearqueue|test [msg]");
+  g_console.RegisterCommand("nvs", &CmdNvs, "nvs dump|restore <json>");
   g_console.RegisterCommand("wifi", &CmdWifi, "wifi status|scan|connect|ssid|password|clear");
   g_console.RegisterCommand("tz", &CmdTz, "tz show|set <minutes> [dst on|off]");
   g_console.RegisterCommand("time", &CmdTime, "time now|sync");
