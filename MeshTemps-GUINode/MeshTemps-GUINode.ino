@@ -2130,7 +2130,11 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
 
 static bool RestoreNvsFromJson(const String &json, Print &out) {
 #if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
-  JsonDocument doc;
+  // Allocate enough capacity for the full payload plus parser overhead; without
+  // this, ArduinoJson v7 silently drops trailing keys when the default pool is
+  // too small, which prevented labels from being restored.
+  const size_t json_capacity = json.length() + 1024;
+  DynamicJsonDocument doc(json_capacity);
 #else
   // Allow larger dumps (labels, node meta) without truncation.
   // Add a safety margin to handle parser overhead.
@@ -2297,7 +2301,9 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
     if (labels_c != nullptr) {
       const String labels_str(labels_c);
 #if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
-      JsonDocument labels_doc;
+      // Ensure the validator has enough capacity for the full labels payload.
+      const size_t labels_capacity = labels_str.length() + 512;
+      DynamicJsonDocument labels_doc(labels_capacity);
 #else
       StaticJsonDocument<12288> labels_doc;
 #endif
