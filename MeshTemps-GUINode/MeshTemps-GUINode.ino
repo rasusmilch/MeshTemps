@@ -2470,7 +2470,9 @@ static float ToDisplayUnits(float temp_c) {
   return g_display_fahrenheit ? (temp_c * 9.0f / 5.0f + 32.0f) : temp_c;
 }
 
-static const char *DisplayUnitsLabel() { return g_display_fahrenheit ? "°F" : "°C"; }
+static const char* DisplayUnitsLabel() {
+  return g_display_fahrenheit ? "\xC2\xB0""F" : "\xC2\xB0""C";  // UTF-8 "°F"/"°C"
+}
 
 static String FormatTempForMessage(float temp_c) {
   if (isnan(temp_c)) {
@@ -3374,6 +3376,7 @@ void GuiInit() {
   lv_obj_clear_flag(range_row, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_style_pad_row(range_row, 0, 0);
   lv_obj_set_style_pad_column(range_row, 4, 0);
+  lv_obj_set_size(range_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
 
   for (size_t i = 0; i < kChartRangeCount; ++i) {
     lv_obj_t *btn = lv_btn_create(range_row);
@@ -5024,47 +5027,66 @@ static void ChartDrawEvent(lv_event_t *e) {
   if (dsc == nullptr || dsc->class_p != &lv_chart_class) {
     return;
   }
-  if (dsc->type != LV_CHART_DRAW_PART_TICK_LABEL || dsc->text_length <= 0) {
+  if (dsc->type != LV_CHART_DRAW_PART_TICK_LABEL ||
+      dsc->text == nullptr || dsc->text_length <= 0) {
     return;
   }
 
+  // dsc->text points to a writable buffer owned by LVGL.
+  // dsc->text_length is that buffer's capacity in bytes.
+
   if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
-    const float temp = static_cast<float>(dsc->value) / kChartTempScale;
-    static char y_label[32];
-    lv_snprintf(y_label, sizeof(y_label), "%.1f%s", static_cast<double>(temp),
+    const int32_t temp_scale_tenths =
+        static_cast<int32_t>(kChartTempScale + 0.5f);  // 10
+    const int32_t scaled_temp = static_cast<int32_t>(dsc->value);  // 0.1 units
+
+    const int32_t whole = scaled_temp / temp_scale_tenths;
+    int32_t frac = scaled_temp % temp_scale_tenths;
+    if (frac < 0) {
+      frac = -frac;
+    }
+
+    lv_snprintf(dsc->text, dsc->text_length,
+                "%ld.%01ld%s",
+                static_cast<long>(whole),
+                static_cast<long>(frac),
                 DisplayUnitsLabel());
-    const size_t len_bytes = strlen(y_label);
-    const uint32_t len_chars = lv_txt_get_encoded_length(y_label, len_bytes);
-    dsc->text = y_label;
-    dsc->text_length = static_cast<lv_coord_t>(len_chars);
     return;
   }
 
   if (dsc->id == LV_CHART_AXIS_PRIMARY_X) {
-    const double hours = static_cast<double>(dsc->value) / kChartHoursScale;
+    const int32_t hours_scale_tenths =
+        static_cast<int32_t>(kChartHoursScale + 0.5);  // 10
+    const int32_t scaled_hours = static_cast<int32_t>(dsc->value);  // 0.1h units
 
     if (g_chart_axis_ctx.has_epoch && g_chart_axis_ctx.range_start_epoch > 0) {
+      // Convert 0.1h ticks to seconds without floating point:
+      // seconds = scaled_hours * 3600 / hours_scale_tenths  (exact for scale=10)
+      const int64_t delta_seconds =
+          (static_cast<int64_t>(scaled_hours) * 3600LL) /
+          static_cast<int64_t>(hours_scale_tenths);
+
       const time_t tick_epoch =
-          g_chart_axis_ctx.range_start_epoch +
-          static_cast<time_t>(hours * 3600.0);
+          g_chart_axis_ctx.range_start_epoch + static_cast<time_t>(delta_seconds);
 
       struct tm tm_info;
       if (localtime_r(&tick_epoch, &tm_info) != nullptr) {
         const bool show_time = (g_chart_active_range_index <= 1);
         const char *fmt = show_time ? "%m/%d\n%H:%M" : "%m/%d";
-        static char x_label[32];
-        const size_t len = strftime(x_label, sizeof(x_label), fmt, &tm_info);
-        if (len > 0) {
-          dsc->text = x_label;
-          dsc->text_length = static_cast<lv_coord_t>(len);
-        }
+        (void)strftime(dsc->text, static_cast<size_t>(dsc->text_length), fmt, &tm_info);
       }
     } else {
-      static char x_label[24];
-      lv_snprintf(x_label, sizeof(x_label), "%.0fh", hours);
-      dsc->text = x_label;
-      dsc->text_length = static_cast<lv_coord_t>(strlen(x_label));
+      // Match "%.0fh" rounding (nearest int) using integers.
+      const int32_t half = hours_scale_tenths / 2;
+      const int32_t rounded_hours =
+          (scaled_hours >= 0)
+              ? (scaled_hours + half) / hours_scale_tenths
+              : (scaled_hours - half) / hours_scale_tenths;
+
+      lv_snprintf(dsc->text, dsc->text_length, "%ldh",
+                  static_cast<long>(rounded_hours));
     }
+    return;
   }
 }
 
