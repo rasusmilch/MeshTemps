@@ -4198,22 +4198,94 @@ static void CmdMute(void *ctx, int argc, const String argv[], Print &out) {
   GuiRequestRender();
 }
 
+static int CompareLabelsIgnoreCase(const String &a, const String &b) {
+  String lower_a = a;
+  String lower_b = b;
+  lower_a.toLowerCase();
+  lower_b.toLowerCase();
+
+  const int ci_cmp = lower_a.compareTo(lower_b);
+  if (ci_cmp != 0) {
+    return ci_cmp;
+  }
+  return a.compareTo(b);
+}
+
+static std::vector<MeshNode *> SortedNodesByLabelOrId() {
+  std::vector<MeshNode *> nodes;
+  const auto ids = GetAllMeshNodeIds();
+  nodes.reserve(ids.size());
+  for (uint32_t id : ids) {
+    MeshNode *node = FindMeshNode(id);
+    if (node != nullptr) {
+      nodes.push_back(node);
+    }
+  }
+
+  std::sort(nodes.begin(), nodes.end(), [](MeshNode *a, MeshNode *b) {
+    const bool a_has_label = (a != nullptr) && (a->label().length() > 0);
+    const bool b_has_label = (b != nullptr) && (b->label().length() > 0);
+    if (a_has_label != b_has_label) {
+      // Unlabeled nodes first.
+      return !a_has_label;
+    }
+
+    if (!a_has_label && !b_has_label) {
+      return a->node_id() < b->node_id();
+    }
+
+    const int cmp = CompareLabelsIgnoreCase(a->label(), b->label());
+    if (cmp != 0) {
+      return cmp < 0;
+    }
+    return a->node_id() < b->node_id();
+  });
+
+  return nodes;
+}
+
+static std::vector<const MeshNode::Sensor *> SortedSensorsByLabelOrId(
+    const MeshNode &node) {
+  std::vector<const MeshNode::Sensor *> sensors;
+  sensors.reserve(node.sensors().size());
+  for (const auto &sensor : node.sensors()) {
+    sensors.push_back(&sensor);
+  }
+
+  std::sort(sensors.begin(), sensors.end(),
+            [](const MeshNode::Sensor *a, const MeshNode::Sensor *b) {
+              const bool a_has_label = (a != nullptr) && (a->label.length() > 0);
+              const bool b_has_label = (b != nullptr) && (b->label.length() > 0);
+              if (a_has_label != b_has_label) {
+                // Unlabeled sensors first.
+                return !a_has_label;
+              }
+
+              if (!a_has_label && !b_has_label) {
+                return a->address < b->address;
+              }
+
+              const int cmp = CompareLabelsIgnoreCase(a->label, b->label);
+              if (cmp != 0) {
+                return cmp < 0;
+              }
+              return a->address < b->address;
+            });
+
+  return sensors;
+}
+
 static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
 
   const uint32_t now_ms = millis();
-  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
-  if (ids.empty()) {
+  const auto nodes = SortedNodesByLabelOrId();
+  if (nodes.empty()) {
     out.println(F("(no nodes)"));
   }
 
-  for (uint32_t id : ids) {
-    MeshNode *node = FindMeshNode(id);
-    if (node == nullptr) {
-      continue;
-    }
-
+  for (MeshNode *node : nodes) {
     const String node_hex = node->node_key_hex();
     const String node_label = node->label();
     const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
@@ -4254,36 +4326,36 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
           stuck ? "YES" : "no");
     }
 
-    const auto &sensors = node->sensors();
+    const auto sensors = SortedSensorsByLabelOrId(*node);
     if (sensors.empty()) {
       out.println(F("  (no sensors)"));
       continue;
     }
 
-    for (const auto &sensor : sensors) {
-      const String &addr16 = sensor.address;
-      const String sensor_label = sensor.label;
+    for (const auto *sensor : sensors) {
+      const String &addr16 = sensor->address;
+      const String sensor_label = sensor->label;
 
       String temp_s;
-      if (!sensor.has_value || isnan(sensor.temp_c)) {
+      if (!sensor->has_value || isnan(sensor->temp_c)) {
         temp_s = String("NaN");
       } else {
-        temp_s = String(sensor.temp_c, 2);
+        temp_s = String(sensor->temp_c, 2);
       }
 
       uint32_t age_sensor_min = 0U;
-      if (sensor.last_ms != 0U && now_ms >= sensor.last_ms) {
-        age_sensor_min = (now_ms - sensor.last_ms) / 60000U;
+      if (sensor->last_ms != 0U && now_ms >= sensor->last_ms) {
+        age_sensor_min = (now_ms - sensor->last_ms) / 60000U;
       }
 
       if (sensor_label.length() > 0) {
         out.printf("  %s \"%s\" : %s%s (age=%lu min)\n", addr16.c_str(),
                    sensor_label.c_str(), temp_s.c_str(),
-                   sensor.corrected ? " (corr)" : "",
+                   sensor->corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       } else {
         out.printf("  %s : %s%s (age=%lu min)\n", addr16.c_str(),
-                   temp_s.c_str(), sensor.corrected ? " (corr)" : "",
+                   temp_s.c_str(), sensor->corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       }
     }
