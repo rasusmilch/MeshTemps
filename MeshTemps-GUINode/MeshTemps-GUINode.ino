@@ -7123,26 +7123,27 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
 
     for (size_t i = start_index; i < total; ++i) {
       const MeshNode::SensorHistorySample &sample = samples[i];
-      const uint32_t sample_ts = sample.timestamp_ms;
+      const uint32_t sample_ms = sample.timestamp_ms;
+      const time_t sample_epoch = sample.timestamp_epoch;
       uint32_t age_s = 0U;
 
-      if (sample.has_epoch && now_epoch > 0) {
-        const time_t sample_epoch = static_cast<time_t>(sample_ts);
+      if (sample.has_epoch && now_epoch > 0 && sample_epoch > 0) {
         age_s = (now_epoch >= sample_epoch)
                     ? static_cast<uint32_t>(now_epoch - sample_epoch)
                     : 0U;
-      } else if (!sample.has_epoch && now_ms >= sample_ts) {
-        age_s = (now_ms - sample_ts) / 1000U;
+      } else if (!sample.has_epoch && now_ms >= sample_ms) {
+        age_s = (now_ms - sample_ms) / 1000U;
       }
 
       out.print(F("  #"));
       out.print(static_cast<unsigned long>(i));
       if (sample.has_epoch) {
         out.print(F(": t_epoch="));
+        out.print(static_cast<unsigned long>(sample_epoch));
       } else {
         out.print(F(": t_ms="));
+        out.print(static_cast<unsigned long>(sample_ms));
       }
-      out.print(static_cast<unsigned long>(sample_ts));
       out.print(F(" (age="));
       out.print(static_cast<unsigned long>(age_s));
       out.print(F(" s)"));
@@ -7680,6 +7681,7 @@ static void HandleBridgeTimeSync(const JsonDocument &doc) {
   const time_t epoch = doc["epoch"] | 0;
   const int32_t tz_min = doc["tzMinutes"] | 0;
   const bool dst = doc["dst"] | false;
+  const bool ntp_ok = doc["ntp"] | false;
 
   if (epoch <= 0) {
     return;
@@ -7697,13 +7699,18 @@ static void HandleBridgeTimeSync(const JsonDocument &doc) {
   settimeofday(&tv, nullptr);
 
   g_ntp_sync_in_progress = false;
-  g_ntp_time_valid = true;
-  g_last_ntp_ok_ms = millis();
-  g_ntp_retry_period_ms = kNtpResyncPeriodMs;
-  g_ntp_last_sync_epoch = epoch;
+  if (ntp_ok) {
+    const uint32_t now_ms = millis();
+    g_ntp_time_valid = true;
+    g_last_ntp_ok_ms = now_ms;
+    g_ntp_retry_period_ms = kNtpResyncPeriodMs;
+    g_ntp_last_sync_epoch = epoch;
 
-  if (!g_history_time_backfilled) {
-    OnFirstNtpTimeSync(epoch, g_last_ntp_ok_ms);
+    if (!g_history_time_backfilled) {
+      OnFirstNtpTimeSync(epoch, now_ms);
+    }
+  } else {
+    g_ntp_time_valid = false;
   }
 
   GuiUpdateNtpStatusIcon();

@@ -652,6 +652,7 @@ static bool SendTimeSyncToGui(const char *source, bool allow_stale_time = false)
   doc["tzMinutes"] = g_network_config.timezone_minutes;
   doc["dst"] = g_network_config.dst_enabled;
   doc["source"] = source;
+  doc["ntp"] = g_ntp_time_valid;
   SendJsonLineWithEcho(doc);
   DebugPrintf("[TIME] forwarded time_sync source=%s epoch=%ld tzMin=%ld dst=%s\n",
               source, static_cast<long>(g_ntp_last_sync_epoch),

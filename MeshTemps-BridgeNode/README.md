@@ -16,6 +16,8 @@ connection separate from the bridge/GUI traffic.
 The bridge also listens for `time_request` envelopes from the GUI; on receipt
 it re-sends the latest `time_sync` (if available) and can force an NTP sync
 ahead of the normal resync interval so a rebooted GUI can quickly regain time.
+Each `time_sync` advertises whether the bridge's clock is currently backed by
+an NTP fix so the GUI can ignore stale RTC values when backfilling history.
 
 `bridge_status` envelopes now include the current node list plus `lastSeenMs`
 per node. If you see `connections` briefly flip between 0 and 1 while temps
