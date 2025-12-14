@@ -47,14 +47,10 @@ void MeshNode::PrintSensorHistorySampleLayout(Print& output) {
            static_cast<unsigned>(offsetof(Sample, timestamp_ms)));
   PrintfTo(output, "offsetof(timestamp_epoch)            = %u\r\n",
            static_cast<unsigned>(offsetof(Sample, timestamp_epoch)));
-  PrintfTo(output, "offsetof(has_epoch)                  = %u\r\n",
-           static_cast<unsigned>(offsetof(Sample, has_epoch)));
   PrintfTo(output, "offsetof(temp_c)                     = %u\r\n",
            static_cast<unsigned>(offsetof(Sample, temp_c)));
-  PrintfTo(output, "offsetof(has_value)                  = %u\r\n",
-           static_cast<unsigned>(offsetof(Sample, has_value)));
-  PrintfTo(output, "offsetof(corrected)                  = %u\r\n",
-           static_cast<unsigned>(offsetof(Sample, corrected)));
+  PrintfTo(output, "offsetof(flags)                      = %u\r\n",
+           static_cast<unsigned>(offsetof(Sample, flags)));
 
   output.println("===========================================");
 }
@@ -135,14 +131,14 @@ void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
     SensorHistorySample sample;
     sample.timestamp_ms = now_ms;
     sample.timestamp_epoch = 0;
-    sample.has_epoch = false;
+    sample.set_has_epoch(false);
     sample.temp_c = sensor.temp_c;
-    sample.has_value = sensor.has_value;
-    sample.corrected = sensor.corrected;
+    sample.set_has_value(sensor.has_value);
+    sample.set_corrected(sensor.corrected);
 
     if (has_time_sync_) {
       sample.timestamp_epoch = ComputeEpochFromMillis(now_ms);
-      sample.has_epoch = true;
+      sample.set_has_epoch(true);
     }
 
     // Write to ring buffer at head_index.
@@ -522,12 +518,12 @@ void MeshNode::OnFirstTimeSync(time_t epoch_now, uint32_t now_ms) {
       for (size_t i = 0; i < sensor.history_size; ++i) {
         const size_t idx = (start_index + i) % capacity;
         auto& sample = sensor.history[idx];
-        if (sample.has_epoch) {
+        if (sample.has_epoch()) {
           continue;
         }
 
         sample.timestamp_epoch = ComputeEpochFromMillis(sample.timestamp_ms);
-        sample.has_epoch = true;
+        sample.set_has_epoch(true);
         ++backfilled_samples;
 
         if (example_ms == 0U) {

@@ -21,12 +21,37 @@ class MeshNode {
  public:
   // One time-series sample for a single sensor.
   struct SensorHistorySample {
-    uint32_t timestamp_ms;  // monotonic millis() at time of sample
-    time_t timestamp_epoch; // optional wall-clock time at sample
-    bool has_epoch;         // true if timestamp_epoch is valid
+    enum Flag : uint8_t {
+      kHasEpoch = 1 << 0,
+      kHasValue = 1 << 1,
+      kCorrected = 1 << 2,
+    };
+
+    uint32_t timestamp_ms;   // monotonic millis() at time of sample
+    time_t timestamp_epoch;  // optional wall-clock time at sample
     float temp_c;
-    bool has_value;
-    bool corrected;
+    uint8_t flags;
+
+    SensorHistorySample()
+        : timestamp_ms(0), timestamp_epoch(0), temp_c(NAN), flags(0) {}
+
+    bool has_epoch() const { return flags & kHasEpoch; }
+    void set_has_epoch(bool value) { UpdateFlag(kHasEpoch, value); }
+
+    bool has_value() const { return flags & kHasValue; }
+    void set_has_value(bool value) { UpdateFlag(kHasValue, value); }
+
+    bool corrected() const { return flags & kCorrected; }
+    void set_corrected(bool value) { UpdateFlag(kCorrected, value); }
+
+   private:
+    void UpdateFlag(Flag flag, bool set) {
+      if (set) {
+        flags |= flag;
+      } else {
+        flags &= static_cast<uint8_t>(~flag);
+      }
+    }
   };
 
   struct Sensor {

@@ -6038,18 +6038,18 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       const uint32_t sample_ts = sample.timestamp_ms;
       uint32_t age_s = 0U;
 
-      if (sample.has_epoch && now_epoch > 0) {
+      if (sample.has_epoch() && now_epoch > 0) {
         const time_t sample_epoch = static_cast<time_t>(sample_ts);
         age_s = (now_epoch >= sample_epoch)
                     ? static_cast<uint32_t>(now_epoch - sample_epoch)
                     : 0U;
-      } else if (!sample.has_epoch && now_ms >= sample_ts) {
+      } else if (!sample.has_epoch() && now_ms >= sample_ts) {
         age_s = (now_ms - sample_ts) / 1000U;
       }
 
       out.print(F("  #"));
       out.print(static_cast<unsigned long>(i));
-      if (sample.has_epoch) {
+      if (sample.has_epoch()) {
         out.print(F(": t_epoch="));
       } else {
         out.print(F(": t_ms="));
@@ -6059,7 +6059,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       out.print(static_cast<unsigned long>(age_s));
       out.print(F(" s)"));
 
-      if (sample.has_epoch) {
+      if (sample.has_epoch()) {
         struct tm tm_buf;
         char time_buf[32];
         if (localtime_r(&sample.timestamp_epoch, &tm_buf) != nullptr &&
@@ -6077,10 +6077,10 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       out.print(sample.temp_c, 3);
       out.print(F(" C"));
 
-      if (!sample.has_value) {
+      if (!sample.has_value()) {
         out.print(F(" [invalid]"));
       }
-      if (sample.corrected) {
+      if (sample.corrected()) {
         out.print(F(" [corrected]"));
       }
       out.println();

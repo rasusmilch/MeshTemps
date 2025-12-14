@@ -4903,7 +4903,7 @@ static void BuildHistoryChartForSelection() {
   time_t latest_epoch = 0;
   uint32_t latest_ms = 0;
   for (const auto &sample : history) {
-    if (sample.has_epoch && sample.timestamp_epoch > latest_epoch) {
+    if (sample.has_epoch() && sample.timestamp_epoch > latest_epoch) {
       latest_epoch = sample.timestamp_epoch;
     }
     if (sample.timestamp_ms > latest_ms) {
@@ -4928,7 +4928,7 @@ static void BuildHistoryChartForSelection() {
     bool in_range = false;
     double x_hours = 0.0;
 
-    if (use_epoch && sample.has_epoch) {
+    if (use_epoch && sample.has_epoch()) {
       if (sample.timestamp_epoch < start_epoch) {
         continue;
       }
@@ -4945,7 +4945,7 @@ static void BuildHistoryChartForSelection() {
       x_hours = static_cast<double>(elapsed_ms) / 3600000.0;
     }
 
-    if (!in_range || !sample.has_value || isnan(sample.temp_c)) {
+    if (!in_range || !sample.has_value() || isnan(sample.temp_c)) {
       continue;
     }
 
@@ -7888,17 +7888,17 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       const time_t sample_epoch = sample.timestamp_epoch;
       uint32_t age_s = 0U;
 
-      if (sample.has_epoch && now_epoch > 0 && sample_epoch > 0) {
+      if (sample.has_epoch() && now_epoch > 0 && sample_epoch > 0) {
         age_s = (now_epoch >= sample_epoch)
                     ? static_cast<uint32_t>(now_epoch - sample_epoch)
                     : 0U;
-      } else if (!sample.has_epoch && now_ms >= sample_ms) {
+      } else if (!sample.has_epoch() && now_ms >= sample_ms) {
         age_s = (now_ms - sample_ms) / 1000U;
       }
 
       out.print(F("  #"));
       out.print(static_cast<unsigned long>(i));
-      if (sample.has_epoch) {
+      if (sample.has_epoch()) {
         out.print(F(": t_epoch="));
         out.print(static_cast<unsigned long>(sample_epoch));
       } else {
@@ -7909,7 +7909,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       out.print(static_cast<unsigned long>(age_s));
       out.print(F(" s)"));
 
-      if (sample.has_epoch) {
+      if (sample.has_epoch()) {
         struct tm tm_buf;
         char time_buf[32];
         if (localtime_r(&sample.timestamp_epoch, &tm_buf) != nullptr &&
@@ -7927,10 +7927,10 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       out.print(ToDisplayUnits(sample.temp_c), 2);
       out.print(DisplayUnitsLabel());
 
-      if (!sample.has_value) {
+      if (!sample.has_value()) {
         out.print(F(" [invalid]"));
       }
-      if (sample.corrected) {
+      if (sample.corrected()) {
         out.print(F(" [corrected]"));
       }
       out.println();
