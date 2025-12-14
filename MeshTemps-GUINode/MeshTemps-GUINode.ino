@@ -59,7 +59,8 @@ using esp_panel::drivers::LCD;
 
 using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
 
-static SerialConsole g_console;
+constexpr size_t kConsoleMaxLineLen = 8192; // allow large raw JSON pastes
+static SerialConsole g_console(kConsoleMaxLineLen);
 
 // ---------------------------------------------------------------------------
 // Map view definitions (root)
@@ -6333,6 +6334,73 @@ static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
   out.printf("labels NVS size=%u bytes\n", static_cast<unsigned>(labels_bytes));
 }
 
+static constexpr const char *kNvsRestoreEndSentinel = "<<<END-JSON>>>";
+static constexpr const char *kNvsRestoreAbortSentinel = "<<<CANCEL>>>";
+static constexpr size_t kNvsRestoreMaxBytes = 20000;
+static bool g_nvs_restore_raw_active = false;
+static String g_nvs_restore_raw_json;
+
+static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
+  (void)ctx;
+
+  if (!g_nvs_restore_raw_active) return;
+
+  String trimmed = line;
+  trimmed.trim();
+
+  if (trimmed.equals(kNvsRestoreAbortSentinel)) {
+    g_console.EndRawMode();
+    g_nvs_restore_raw_active = false;
+    g_nvs_restore_raw_json = "";
+    out.println(F("nvs restore: canceled"));
+    return;
+  }
+
+  if (trimmed.equals(kNvsRestoreEndSentinel)) {
+    g_console.EndRawMode();
+    g_nvs_restore_raw_active = false;
+
+    String payload = g_nvs_restore_raw_json;
+    if (payload.endsWith("\n")) payload.remove(payload.length() - 1);
+    g_nvs_restore_raw_json = "";
+
+    if (payload.length() == 0) {
+      out.println(F("ERR nvs restore (no JSON received)"));
+      return;
+    }
+
+    out.println(F("nvs restore: processing JSON..."));
+    if (RestoreNvsFromJson(payload, out)) {
+      out.println(F("nvs restore: ok"));
+    } else {
+      out.println(F("nvs restore: no changes"));
+    }
+    return;
+  }
+
+  if (g_nvs_restore_raw_json.length() + line.length() + 1 >
+      kNvsRestoreMaxBytes) {
+    g_console.EndRawMode();
+    g_nvs_restore_raw_active = false;
+    g_nvs_restore_raw_json = "";
+    out.println(F("ERR nvs restore (input too large)"));
+    return;
+  }
+
+  g_nvs_restore_raw_json += line;
+  g_nvs_restore_raw_json += '\n';
+}
+
+static void StartNvsRestoreRawMode(Print &out) {
+  g_nvs_restore_raw_active = true;
+  g_nvs_restore_raw_json = "";
+  g_console.BeginRawMode(&NvsRestoreRawLine, nullptr);
+  out.println(F("nvs restore: raw mode enabled"));
+  out.println(F("Paste JSON (multi-line ok)."));
+  out.printf("End with %s on its own line, or %s to abort.\n",
+             kNvsRestoreEndSentinel, kNvsRestoreAbortSentinel);
+}
+
 static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -6355,8 +6423,13 @@ static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   if (sub.equalsIgnoreCase("restore")) {
+    if (g_console.InRawMode()) {
+      out.println(F("ERR nvs restore (console busy)"));
+      return;
+    }
+
     if (argc < 3) {
-      out.println(F("ERR nvs restore (provide JSON)"));
+      StartNvsRestoreRawMode(out);
       return;
     }
 

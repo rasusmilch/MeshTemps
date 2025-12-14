@@ -6,6 +6,9 @@
 
 class SerialConsole {
  public:
+  // Handler for raw line capture mode. Implementations may call EndRawMode()
+  // directly when finished.
+  typedef void (*RawLineHandler)(void* ctx, const String& line, Print& out);
   // Handler receives a user-provided context, argc, argv tokens (argv[0] is the
   // command name). Handlers print to 'out'.
   typedef void (*CommandHandler)(void* ctx, int argc, const String argv[],
@@ -22,6 +25,25 @@ class SerialConsole {
       : max_line_len_(max_line_len) {
     buffer_.reserve(max_line_len_);
   }
+
+  // Enter raw mode: lines are delivered un-tokenized to 'handler'. Normal
+  // command dispatch is paused until EndRawMode() is called by the handler or
+  // user.
+  void BeginRawMode(RawLineHandler handler, void* user_ctx = nullptr) {
+    raw_mode_ = true;
+    raw_handler_ = handler;
+    raw_ctx_ = user_ctx;
+    buffer_ = "";
+  }
+
+  void EndRawMode() {
+    raw_mode_ = false;
+    raw_handler_ = nullptr;
+    raw_ctx_ = nullptr;
+    buffer_ = "";
+  }
+
+  bool InRawMode() const { return raw_mode_; }
 
   // Register a command (e.g., "debug", "units", etc.).
   bool RegisterCommand(const char* name,
@@ -56,18 +78,25 @@ class SerialConsole {
       }
 
       // Got a line.
-      buffer_.trim();
-      if (buffer_.length() == 0) {
+      const String line = buffer_;
+      buffer_ = "";
+
+      if (raw_mode_ && raw_handler_) {
+        raw_handler_(raw_ctx_, line, out);
+        continue;
+      }
+
+      String trimmed = line;
+      trimmed.trim();
+      if (trimmed.length() == 0) {
         out.println(F("ok"));
-        buffer_ = "";
         continue;
       }
 
       // Tokenize and dispatch.
       tokens_.clear();
-      Tokenize(buffer_, tokens_);
+      Tokenize(trimmed, tokens_);
       Dispatch(tokens_, out);
-      buffer_ = "";
     }
   }
 
@@ -176,6 +205,9 @@ class SerialConsole {
   std::vector<Command> commands_;
   String buffer_;
   size_t max_line_len_;
+  bool raw_mode_ = false;
+  RawLineHandler raw_handler_ = nullptr;
+  void* raw_ctx_ = nullptr;
 
   // Token and argv caches reused per line to avoid heap churn.
   std::vector<String> tokens_;
