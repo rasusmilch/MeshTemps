@@ -2756,9 +2756,10 @@ static void EmitStateNotification(const String &key, AlertState new_state,
 }
 
 static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
-                                      uint8_t node_mute, bool *low_alert,
-                                      bool *high_alert, bool *low_warn,
-                                      bool *high_warn) {
+                                      uint8_t node_mute,
+                                      AlertState prev_state,
+                                      bool *low_alert, bool *high_alert,
+                                      bool *low_warn, bool *high_warn) {
   if (low_alert) *low_alert = false;
   if (high_alert) *high_alert = false;
   if (low_warn) *low_warn = false;
@@ -2768,14 +2769,30 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     return AlertState::kNormal;
   }
 
-  const float alert_low_thresh =
+  const float alert_low_trigger =
       isnan(g_alert_low_c) ? NAN : (g_alert_low_c - g_limit_hysteresis_c);
-  const float alert_high_thresh =
+  const float alert_low_clear =
+      isnan(g_alert_low_c) ? NAN : (g_alert_low_c + g_limit_hysteresis_c);
+  const float alert_high_trigger =
       isnan(g_alert_high_c) ? NAN : (g_alert_high_c + g_limit_hysteresis_c);
-  bool la = (!isnan(alert_low_thresh) && sensor.temp_c < alert_low_thresh);
-  bool ha = (!isnan(alert_high_thresh) && sensor.temp_c > alert_high_thresh);
-  if (la && (node_mute & kMuteLow)) la = false;
-  if (ha && (node_mute & kMuteHigh)) ha = false;
+  const float alert_high_clear =
+      isnan(g_alert_high_c) ? NAN : (g_alert_high_c - g_limit_hysteresis_c);
+  bool la = false;
+  bool ha = false;
+  if (!isnan(alert_low_trigger) && !(node_mute & kMuteLow)) {
+    if (sensor.temp_c < alert_low_trigger) {
+      la = true;
+    } else if (sensor.temp_c <= alert_low_clear) {
+      la = (prev_state == AlertState::kAlert);
+    }
+  }
+  if (!isnan(alert_high_trigger) && !(node_mute & kMuteHigh)) {
+    if (sensor.temp_c > alert_high_trigger) {
+      ha = true;
+    } else if (sensor.temp_c >= alert_high_clear) {
+      ha = (prev_state == AlertState::kAlert);
+    }
+  }
 
   if (low_alert) *low_alert = la;
   if (high_alert) *high_alert = ha;
@@ -2784,14 +2801,31 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     return AlertState::kAlert;
   }
 
-  const float warn_low_thresh =
+  const float warn_low_trigger =
       isnan(g_warn_low_c) ? NAN : (g_warn_low_c - g_limit_hysteresis_c);
-  const float warn_high_thresh =
+  const float warn_low_clear =
+      isnan(g_warn_low_c) ? NAN : (g_warn_low_c + g_limit_hysteresis_c);
+  const float warn_high_trigger =
       isnan(g_warn_high_c) ? NAN : (g_warn_high_c + g_limit_hysteresis_c);
-  bool lw = (!isnan(warn_low_thresh) && sensor.temp_c < warn_low_thresh);
-  bool hw = (!isnan(warn_high_thresh) && sensor.temp_c > warn_high_thresh);
-  if (lw && (node_mute & kMuteLow)) lw = false;
-  if (hw && (node_mute & kMuteHigh)) hw = false;
+  const float warn_high_clear =
+      isnan(g_warn_high_c) ? NAN : (g_warn_high_c - g_limit_hysteresis_c);
+  const bool prev_warning = (prev_state == AlertState::kWarning);
+  bool lw = false;
+  bool hw = false;
+  if (!isnan(warn_low_trigger) && !(node_mute & kMuteLow)) {
+    if (sensor.temp_c < warn_low_trigger) {
+      lw = true;
+    } else if (sensor.temp_c <= warn_low_clear) {
+      lw = prev_warning;
+    }
+  }
+  if (!isnan(warn_high_trigger) && !(node_mute & kMuteHigh)) {
+    if (sensor.temp_c > warn_high_trigger) {
+      hw = true;
+    } else if (sensor.temp_c >= warn_high_clear) {
+      hw = prev_warning;
+    }
+  }
 
   if (low_warn) *low_warn = lw;
   if (high_warn) *high_warn = hw;
@@ -4633,9 +4667,18 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
     String node_normal_detail;
 
     for (const auto &sensor : node->sensors()) {
+      const String sensor_key = String("S:") + node->node_id_str() + ":" +
+                                CanonAddr16(sensor.address);
+      AlertState prev_state = AlertState::kNormal;
+      auto prev_it = g_ntfy_states.find(sensor_key);
+      if (prev_it != g_ntfy_states.end()) {
+        prev_state = prev_it->second;
+      }
+
       bool low_alert = false, high_alert = false, low_warn = false, high_warn = false;
-      const AlertState state = EvaluateSensorState(sensor, node_mute, &low_alert,
-                                                  &high_alert, &low_warn, &high_warn);
+      const AlertState state = EvaluateSensorState(sensor, node_mute, prev_state,
+                                                  &low_alert, &high_alert, &low_warn,
+                                                  &high_warn);
       if (state == AlertState::kAlert) {
         node_has_alert = true;
       } else if (state == AlertState::kWarning) {
@@ -4646,8 +4689,6 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
         node_normal_detail = FormatTempForMessage(sensor.temp_c);
       }
 
-      const String sensor_key = String("S:") + node->node_id_str() + ":" +
-                                CanonAddr16(sensor.address);
       const String subject = NodeDisplayName(node) + " / " + SensorDisplayName(sensor);
 
       String detail;
