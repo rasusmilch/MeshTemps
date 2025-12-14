@@ -7,6 +7,7 @@
 #include <vector>
 #include <limits>
 
+
 // Small POD used by the root to persist node metadata in NVS.
 struct NodeMetaRecord {
   uint32_t node_id;
@@ -77,8 +78,9 @@ class MeshNode {
     }
   };
 
-
-
+  // Call from setup() after Serial.begin().
+  static void PrintSensorHistorySampleLayout(Print& output);
+  
   explicit MeshNode(uint32_t node_id);
 
   uint32_t node_id() const { return node_id_; }

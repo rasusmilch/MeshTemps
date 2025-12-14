@@ -4,11 +4,60 @@
 #include <map>
 #include <limits>
 #include <time.h>
+#include <cstddef>   // offsetof
+#include <cstdarg>   // va_list, va_start, va_end
+#include <cstdio>    // vsnprintf
+
+namespace {
+
+void PrintfTo(Print& output, const char* format, ...) {
+  char buffer[192];
+
+  va_list arguments;
+  va_start(arguments, format);
+  const int written = vsnprintf(buffer, sizeof(buffer), format, arguments);
+  va_end(arguments);
+
+  if (written > 0) {
+    output.print(buffer);
+  }
+}
+
+}  // namespace
 
 MeshNode::MeshNode(uint32_t node_id)
     : node_id_(node_id),
       node_id_str_(FormatNodeKeyHex(node_id)),   // hex for any user-facing use
       node_key_hex_(FormatNodeKeyHex(node_id)) {}
+
+void MeshNode::PrintSensorHistorySampleLayout(Print& output) {
+  using Sample = MeshNode::SensorHistorySample;
+
+  output.println();
+  output.println("=== MeshNode::SensorHistorySample layout ===");
+
+  PrintfTo(output, "sizeof(time_t)                       = %u\r\n",
+           static_cast<unsigned>(sizeof(time_t)));
+  PrintfTo(output, "sizeof(MeshNode::SensorHistorySample) = %u\r\n",
+           static_cast<unsigned>(sizeof(Sample)));
+  PrintfTo(output, "alignof(MeshNode::SensorHistorySample)= %u\r\n",
+           static_cast<unsigned>(alignof(Sample)));
+
+  PrintfTo(output, "offsetof(timestamp_ms)               = %u\r\n",
+           static_cast<unsigned>(offsetof(Sample, timestamp_ms)));
+  PrintfTo(output, "offsetof(timestamp_epoch)            = %u\r\n",
+           static_cast<unsigned>(offsetof(Sample, timestamp_epoch)));
+  PrintfTo(output, "offsetof(has_epoch)                  = %u\r\n",
+           static_cast<unsigned>(offsetof(Sample, has_epoch)));
+  PrintfTo(output, "offsetof(temp_c)                     = %u\r\n",
+           static_cast<unsigned>(offsetof(Sample, temp_c)));
+  PrintfTo(output, "offsetof(has_value)                  = %u\r\n",
+           static_cast<unsigned>(offsetof(Sample, has_value)));
+  PrintfTo(output, "offsetof(corrected)                  = %u\r\n",
+           static_cast<unsigned>(offsetof(Sample, corrected)));
+
+  output.println("===========================================");
+}
 
 void MeshNode::SetHistoryConfig(uint32_t interval_ms,
                                 uint32_t retention_days) {

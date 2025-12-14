@@ -3352,7 +3352,15 @@ void GuiInit() {
   g_ui_chart_container = lv_obj_create(screen);
   lv_obj_set_size(g_ui_chart_container, lv_pct(100), cont_h);
   lv_obj_align_to(g_ui_chart_container, bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
-  lv_obj_set_style_pad_all(g_ui_chart_container, 8, 0);
+  // Tight layout: buttons just under top bar, chart just under buttons
+  lv_obj_set_style_pad_top(g_ui_chart_container, 2, 0);
+  lv_obj_set_style_pad_left(g_ui_chart_container, 6, 0);
+  lv_obj_set_style_pad_right(g_ui_chart_container, 6, 0);
+  lv_obj_set_style_pad_bottom(g_ui_chart_container, 6, 0);
+
+  // Vertical spacing between children in the column (buttons row -> chart holder)
+  lv_obj_set_style_pad_row(g_ui_chart_container, 4, 0);
+
   lv_obj_set_style_bg_opa(g_ui_chart_container, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(g_ui_chart_container, 0, 0);
   lv_obj_clear_flag(g_ui_chart_container, LV_OBJ_FLAG_SCROLLABLE);
@@ -3362,11 +3370,14 @@ void GuiInit() {
                         LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
   lv_obj_add_flag(g_ui_chart_container, LV_OBJ_FLAG_HIDDEN);
 
-  g_ui_chart_title = lv_label_create(g_ui_chart_container);
-  lv_label_set_text(g_ui_chart_title, "History");
-  lv_obj_set_style_text_font(g_ui_chart_title, &lv_font_montserrat_22, 0);
-
   lv_obj_t *range_row = lv_obj_create(g_ui_chart_container);
+  // Make the row span full width so we can center buttons reliably.
+  lv_obj_set_width(range_row, lv_pct(100));
+  lv_obj_set_flex_align(range_row,
+                        LV_FLEX_ALIGN_CENTER,  // center buttons horizontally
+                        LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
   lv_obj_set_style_pad_all(range_row, 0, 0);
   lv_obj_set_style_border_width(range_row, 0, 0);
   lv_obj_set_style_bg_opa(range_row, LV_OPA_TRANSP, 0);
@@ -3393,6 +3404,11 @@ void GuiInit() {
   }
 
   // Holder that overlays the chart bands + chart widget.
+  // Band (part that deliniates days) must match chart object
+  static constexpr lv_coord_t kChartWidth = 84;
+  static constexpr lv_coord_t kChartHeight = 70;
+  static constexpr lv_coord_t kChartTopPadPx = 2;
+
   g_ui_chart_holder = lv_obj_create(g_ui_chart_container);
   lv_obj_set_style_pad_all(g_ui_chart_holder, 0, 0);
   lv_obj_set_style_bg_opa(g_ui_chart_holder, LV_OPA_TRANSP, 0);
@@ -3402,33 +3418,42 @@ void GuiInit() {
   lv_obj_set_flex_grow(g_ui_chart_holder, 1);
 
   g_ui_chart_band_layer = lv_obj_create(g_ui_chart_holder);
-  lv_obj_set_size(g_ui_chart_band_layer, lv_pct(100), lv_pct(100));
+  lv_obj_set_size(g_ui_chart_band_layer, lv_pct(kChartWidth), lv_pct(kChartHeight));
   lv_obj_set_style_bg_opa(g_ui_chart_band_layer, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(g_ui_chart_band_layer, 0, 0);
   lv_obj_clear_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_IGNORE_LAYOUT);
-  lv_obj_align(g_ui_chart_band_layer, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_align(g_ui_chart_band_layer, LV_ALIGN_TOP_MID, 0, kChartTopPadPx);
 
   g_ui_chart = lv_chart_create(g_ui_chart_holder);
-  lv_obj_set_size(g_ui_chart, lv_pct(100), lv_pct(100));
-  lv_obj_add_flag(g_ui_chart, LV_OBJ_FLAG_IGNORE_LAYOUT);
-  lv_obj_align(g_ui_chart, LV_ALIGN_CENTER, 0, 0);
-  lv_chart_set_type(g_ui_chart, LV_CHART_TYPE_LINE);
+
+  // Give ticks room (prevents clipping headaches)
+  lv_obj_set_size(g_ui_chart, lv_pct(kChartWidth), lv_pct(kChartHeight));
+  lv_obj_align(g_ui_chart, LV_ALIGN_TOP_MID, 0, kChartTopPadPx);
+
+  lv_chart_set_type(g_ui_chart, LV_CHART_TYPE_SCATTER);   // <-- critical for *_value2
   lv_chart_set_div_line_count(g_ui_chart, 6, 4);
-  lv_chart_set_update_mode(g_ui_chart, LV_CHART_UPDATE_MODE_CIRCULAR);
+
+  // Make labels readable on dark background
+  lv_obj_set_style_text_color(g_ui_chart, lv_color_white(), LV_PART_TICKS);
+  lv_obj_set_style_line_color(g_ui_chart, lv_color_make(0x80, 0x80, 0x80), LV_PART_TICKS);
+
   lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_50, 0);
   lv_obj_set_style_bg_color(g_ui_chart, lv_color_make(0x18, 0x18, 0x18), 0);
-  lv_obj_set_style_text_color(g_ui_chart, lv_color_white(), LV_PART_TICKS);
-  lv_obj_set_style_text_opa(g_ui_chart, LV_OPA_COVER, LV_PART_TICKS);
-  lv_obj_set_style_line_color(g_ui_chart, lv_color_make(0x40, 0x40, 0x40),
-                              LV_PART_GRID);
-  lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_40, LV_PART_GRID);
-  lv_obj_add_event_cb(g_ui_chart, ChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN,
-                      nullptr);
+
+  lv_obj_add_event_cb(g_ui_chart, ChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN, nullptr);
+
   g_ui_chart_series =
       lv_chart_add_series(g_ui_chart, lv_color_make(0x80, 0xD0, 0xFF),
                           LV_CHART_AXIS_PRIMARY_Y);
-  lv_chart_set_series_line_width(g_ui_chart, g_ui_chart_series, 3);
+
+  // Make the plotted series visible (width applies to the line/points drawn for items)
+  lv_obj_set_style_line_width(g_ui_chart, 3, LV_PART_ITEMS);
+  lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_COVER, LV_PART_ITEMS);
+
+  // Optional: if you want points to stand out more in scatter mode
+  lv_obj_set_style_size(g_ui_chart, 6, LV_PART_ITEMS);  // point size (dot radius-ish)
+
 
   g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
   lv_label_set_text(g_ui_chart_empty_label, "No history for this range");
@@ -8470,7 +8495,7 @@ void setup() {
   Serial.begin(DBG_BAUD);
   bridge_serial.begin(BRIDGE_GUI_BAUD, SERIAL_8N1, BRIDGE_GUI_RX_PIN,
                       BRIDGE_GUI_TX_PIN);
-  delay(200);
+  delay(2000);
 
   #ifdef ESP_ARDUINO_VERSION_STR
     Serial.printf("ESP32 Arduino core version: %s\n", ESP_ARDUINO_VERSION_STR);
@@ -8479,6 +8504,8 @@ void setup() {
   #endif
 
   Serial.printf("ESP-IDF version        : %s\n", esp_get_idf_version());
+
+  MeshNode::PrintSensorHistorySampleLayout(Serial);
 
   RootInitStorage();
   RootInitNetwork();
