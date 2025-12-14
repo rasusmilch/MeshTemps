@@ -6409,7 +6409,8 @@ static void ResetNvsRestoreRawMode() {
 static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
   (void)ctx;
 
-  if (!g_nvs_restore_raw_active) return;
+  if (!g_nvs_restore_raw_active)
+    return;
 
   String trimmed = line;
   trimmed.trim();
@@ -6423,7 +6424,8 @@ static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
   if (trimmed.equals(kNvsRestoreEndSentinel)) {
     String payload = g_nvs_restore_raw_json;
     ResetNvsRestoreRawMode();
-    if (payload.endsWith("\n")) payload.remove(payload.length() - 1);
+    if (payload.endsWith("\n"))
+      payload.remove(payload.length() - 1);
     g_nvs_restore_raw_json = "";
 
     if (payload.length() == 0) {
@@ -6432,6 +6434,17 @@ static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
     }
 
     out.println(F("nvs restore: processing JSON..."));
+    out.printf("nvs restore: received bytes=%u\n",
+               static_cast<unsigned>(payload.length()));
+
+    const size_t tail_len = 120;
+    if (payload.length() > tail_len) {
+      out.printf("nvs restore: tail=...%s\n",
+                 payload.c_str() + (payload.length() - tail_len));
+    } else {
+      out.printf("nvs restore: tail=%s\n", payload.c_str());
+    }
+
     if (RestoreNvsFromJson(payload, out)) {
       out.println(F("nvs restore: ok"));
     } else {
@@ -6498,6 +6511,9 @@ static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     const String payload = JoinArgs(argc, argv, 2);
+    out.printf("nvs restore: received %u bytes\n",
+               static_cast<unsigned>(payload.length()));
+
     if (RestoreNvsFromJson(payload, out)) {
       out.println(F("nvs restore: ok"));
     } else {
