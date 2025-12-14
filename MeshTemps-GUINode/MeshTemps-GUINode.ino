@@ -3368,72 +3368,6 @@ void GuiInit() {
                         LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
   lv_obj_add_flag(g_ui_chart_container, LV_OBJ_FLAG_HIDDEN);
 
-  // lv_obj_t *range_row = lv_obj_create(g_ui_chart_container);
-  // // Make the row span full width so we can center buttons reliably.
-  // lv_obj_set_width(range_row, lv_pct(100));
-  // lv_obj_set_flex_align(range_row,
-  //                       LV_FLEX_ALIGN_CENTER,  // center buttons horizontally
-  //                       LV_FLEX_ALIGN_CENTER,
-  //                       LV_FLEX_ALIGN_CENTER);
-
-  // lv_obj_set_style_pad_all(range_row, 0, 0);
-  // lv_obj_set_style_border_width(range_row, 0, 0);
-  // lv_obj_set_style_bg_opa(range_row, LV_OPA_TRANSP, 0);
-  // lv_obj_set_flex_flow(range_row, LV_FLEX_FLOW_ROW);
-  // lv_obj_set_flex_align(range_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-  //                       LV_FLEX_ALIGN_CENTER);
-  // lv_obj_clear_flag(range_row, LV_OBJ_FLAG_SCROLLABLE);
-  // lv_obj_set_style_pad_row(range_row, 0, 0);
-  // lv_obj_set_style_pad_column(range_row, 4, 0);
-  // lv_obj_set_size(range_row, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  // lv_obj_align(range_row, LV_ALIGN_CENTER, 0, 0);
-
-  // for (size_t i = 0; i < kChartRangeCount; ++i) {
-  //   lv_obj_t *btn = lv_btn_create(range_row);
-  //   lv_obj_set_size(btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  //   lv_obj_add_event_cb(btn, ChartRangeButtonEvent, LV_EVENT_CLICKED,
-  //                       reinterpret_cast<void *>(i));
-
-  //   lv_obj_t *label = lv_label_create(btn);
-  //   lv_label_set_text(label, kChartRanges[i].label);
-  //   lv_obj_set_style_text_color(label, lv_color_white(), 0);
-  //   lv_obj_center(label);
-
-  //   g_ui_chart_range_buttons[i] = btn;
-  // }
-
-  // // Holder that overlays the chart bands + chart widget.
-  // // Band (part that deliniates days) must match chart object
-  // static constexpr lv_coord_t kChartWidth = 84;
-  // static constexpr lv_coord_t kChartHeight = 80;
-  // static constexpr lv_coord_t kChartTopPadPx = 2;
-
-  // g_ui_chart_holder = lv_obj_create(g_ui_chart_container);
-  // lv_obj_set_style_pad_all(g_ui_chart_holder, 0, 0);
-  // lv_obj_set_style_bg_opa(g_ui_chart_holder, LV_OPA_TRANSP, 0);
-  // lv_obj_set_style_border_width(g_ui_chart_holder, 0, 0);
-  // lv_obj_clear_flag(g_ui_chart_holder, LV_OBJ_FLAG_SCROLLABLE);
-  // lv_obj_set_width(g_ui_chart_holder, lv_pct(100));
-  // lv_obj_set_flex_grow(g_ui_chart_holder, 1);
-
-  // g_ui_chart_band_layer = lv_obj_create(g_ui_chart_holder);
-  // lv_obj_set_size(g_ui_chart_band_layer, lv_pct(kChartWidth), lv_pct(kChartHeight));
-  // // Make the band layer the real background.
-  // lv_obj_set_style_bg_color(g_ui_chart_band_layer, lv_color_make(0x18, 0x18, 0x18), 0);
-  // lv_obj_set_style_bg_opa(g_ui_chart_band_layer, LV_OPA_COVER, 0);
-  // lv_obj_set_style_border_width(g_ui_chart_band_layer, 0, 0);
-  // lv_obj_clear_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_SCROLLABLE);
-  // lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_IGNORE_LAYOUT);
-  // lv_obj_align(g_ui_chart_band_layer, LV_ALIGN_TOP_RIGHT, 0, kChartTopPadPx);
-
-  // g_ui_chart = lv_chart_create(g_ui_chart_holder);
-
-  // // Give ticks room (prevents clipping headaches)
-  // lv_obj_set_size(g_ui_chart, lv_pct(kChartWidth), lv_pct(kChartHeight));
-  // lv_obj_align(g_ui_chart, LV_ALIGN_TOP_RIGHT, 0, kChartTopPadPx);
-
-  // lv_chart_set_type(g_ui_chart, LV_CHART_TYPE_SCATTER);   // <-- critical for *_value2
-
   // ---------------------------------------------------------------------------
   // Chart body: [range buttons column] [chart holder]
   // ---------------------------------------------------------------------------
@@ -3506,9 +3440,10 @@ void GuiInit() {
   g_ui_chart_band_layer = lv_obj_create(g_ui_chart_holder);
   lv_obj_set_size(g_ui_chart_band_layer, lv_pct(100), lv_pct(100));
   lv_obj_align(g_ui_chart_band_layer, LV_ALIGN_TOP_LEFT, 0, 0);
-  lv_obj_set_style_bg_opa(g_ui_chart_band_layer, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(g_ui_chart_band_layer, 0, 0);
   lv_obj_clear_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_bg_color(g_ui_chart_band_layer, lv_color_make(0x18, 0x18, 0x18), 0);
+  lv_obj_set_style_bg_opa(g_ui_chart_band_layer, LV_OPA_COVER, 0);
 
   // Chart on top
   g_ui_chart = lv_chart_create(g_ui_chart_holder);
@@ -3529,7 +3464,10 @@ void GuiInit() {
   // Let the chart be transparent so the band layer is visible.
   lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_TRANSP, 0);  // belt-and-suspenders
-  lv_obj_set_style_bg_color(g_ui_chart, lv_color_make(0x18, 0x18, 0x18), 0);
+  // lv_obj_set_style_bg_color(g_ui_chart, lv_color_make(0x18, 0x18, 0x18), 0);
+
+  // Ensure the chart stays above the band layer.
+  lv_obj_move_foreground(g_ui_chart);
 
   lv_obj_add_event_cb(g_ui_chart, ChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN, nullptr);
 
@@ -3542,7 +3480,7 @@ void GuiInit() {
   lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_COVER, LV_PART_ITEMS);
 
   // Optional: if you want points to stand out more in scatter mode
-  lv_obj_set_style_size(g_ui_chart, 4, LV_PART_ITEMS);  // point size (dot radius-ish)
+  // lv_obj_set_style_size(g_ui_chart, 3, LV_PART_ITEMS);  // point size (dot radius-ish)
 
 
   g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
@@ -4875,11 +4813,21 @@ static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
     lv_obj_add_flag(band, LV_OBJ_FLAG_IGNORE_LAYOUT);
 
     const bool light = (band_index % 2 == 0);
+
     lv_obj_set_style_bg_color(band,
-                              light ? lv_color_make(0x28, 0x28, 0x28)
-                                    : lv_color_make(0x30, 0x30, 0x30),
-                              0);
-    lv_obj_set_style_bg_opa(band, LV_OPA_50, 0);
+        light ? lv_color_make(0x1C, 0x1C, 0x1C)
+              : lv_color_make(0x26, 0x26, 0x26),
+        0);
+
+    // Solid fill is easiest to see
+    lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
+
+    // Optional: add a subtle right-edge divider so day boundaries pop
+    lv_obj_set_style_border_width(band, 1, 0);
+    lv_obj_set_style_border_side(band, LV_BORDER_SIDE_RIGHT, 0);
+    lv_obj_set_style_border_color(band, lv_color_make(0x3A, 0x3A, 0x3A), 0);
+    lv_obj_set_style_border_opa(band, LV_OPA_80, 0);
+
     ++band_index;
   }
 }
