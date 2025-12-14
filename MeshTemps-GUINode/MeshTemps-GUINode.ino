@@ -59,7 +59,13 @@ using esp_panel::drivers::LCD;
 
 using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
 
-constexpr size_t kConsoleDefaultMaxLineLen = 256;
+static constexpr const char *kNvsRestoreEndSentinel = "<<<END-JSON>>>";
+static constexpr const char *kNvsRestoreAbortSentinel = "<<<CANCEL>>>";
+static constexpr size_t kNvsRestoreMaxBytes = 2048;
+constexpr size_t kConsoleDefaultMaxLineLen = 2048;
+static bool g_nvs_restore_raw_active = false;
+static String g_nvs_restore_raw_json;
+
 static SerialConsole g_console(kConsoleDefaultMaxLineLen);
 
 // ---------------------------------------------------------------------------
@@ -6393,12 +6399,6 @@ static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
   out.printf("labels NVS size=%u bytes\n", static_cast<unsigned>(labels_bytes));
 }
 
-static constexpr const char *kNvsRestoreEndSentinel = "<<<END-JSON>>>";
-static constexpr const char *kNvsRestoreAbortSentinel = "<<<CANCEL>>>";
-static constexpr size_t kNvsRestoreMaxBytes = 20000;
-static bool g_nvs_restore_raw_active = false;
-static String g_nvs_restore_raw_json;
-
 static void ResetNvsRestoreRawMode() {
   g_console.EndRawMode();
   g_console.SetMaxLineLen(kConsoleDefaultMaxLineLen);
@@ -8778,6 +8778,11 @@ static void ProcessBridgePassthroughTx() {
 // -----------------------------------------------------------------------------
 
 void setup() {
+#if defined(ARDUINO_ARCH_ESP32)
+  // Must be before Serial.begin() to reliably take effect.
+  Serial.setRxBufferSize(2000);
+#endif
+
   Serial.begin(DBG_BAUD);
   bridge_serial.begin(BRIDGE_GUI_BAUD, SERIAL_8N1, BRIDGE_GUI_RX_PIN,
                       BRIDGE_GUI_TX_PIN);
@@ -8868,13 +8873,14 @@ void setup() {
 }
 
 void loop() {
-  ProcessBridgeSerial();
-  NtfyLoop();
-  DisplayLoop();
-  BuzzerLoop();
   if (g_bridge_passthrough) {
     ProcessBridgePassthroughTx();
   } else {
     g_console.Poll(Serial, Serial);
   }
+
+  ProcessBridgeSerial();
+  NtfyLoop();
+  DisplayLoop();
+  BuzzerLoop();
 }
