@@ -421,8 +421,6 @@ static bool BuildBridgeNvsBackup(String *out_json, Print &out) {
   Preferences wifi;
   if (wifi.begin("wifi", true)) {
     JsonObject wifi_obj = doc["wifi"].to<JsonObject>();
-    wifi_obj["ssid"] = wifi.getString("ssid", "");
-    wifi_obj["pwd"] = wifi.getString("pwd", "");
     wifi_obj["tz_min"] = wifi.getInt("tz_min", 0);
     wifi_obj["tz_dst"] = wifi.getInt("tz_dst", 0) != 0;
     wifi.end();
@@ -462,12 +460,32 @@ static bool RestoreBridgeNvsFromJson(const String &json, Print &out) {
 
   if (doc.containsKey("wifi")) {
     JsonObject wifi_obj = doc["wifi"];
-    g_network_config.ssid = wifi_obj["ssid"].as<String>();
-    g_network_config.password = wifi_obj["pwd"].as<String>();
-    g_network_config.timezone_minutes = wifi_obj["tz_min"].as<int32_t>();
-    g_network_config.dst_enabled = wifi_obj["tz_dst"].as<bool>();
-    SaveNetworkConfigToNVS();
-    ++applied;
+    bool changed = false;
+
+    // Start from existing values so omitted fields are preserved.
+    LoadNetworkConfigFromNVS();
+
+    if (wifi_obj.containsKey("ssid")) {
+      g_network_config.ssid = wifi_obj["ssid"].as<String>();
+      changed = true;
+    }
+    if (wifi_obj.containsKey("pwd")) {
+      g_network_config.password = wifi_obj["pwd"].as<String>();
+      changed = true;
+    }
+    if (wifi_obj.containsKey("tz_min")) {
+      g_network_config.timezone_minutes = wifi_obj["tz_min"].as<int32_t>();
+      changed = true;
+    }
+    if (wifi_obj.containsKey("tz_dst")) {
+      g_network_config.dst_enabled = wifi_obj["tz_dst"].as<bool>();
+      changed = true;
+    }
+
+    if (changed) {
+      SaveNetworkConfigToNVS();
+      ++applied;
+    }
   }
 
   if (doc.containsKey("ntfy")) {

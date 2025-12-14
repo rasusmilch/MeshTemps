@@ -1959,13 +1959,10 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
   doc["version"] = 1;
 
   String labels_json;
-  std::vector<uint8_t> node_meta_bytes;
   std::vector<uint8_t> known_bytes;
 
   // Read all meshroot-scoped values in one pass.
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const String wifi_ssid = g_root_preferences.getString("wifi_ssid", "");
-  const String wifi_pwd = g_root_preferences.getString("wifi_pwd", "");
   const int32_t tz_min = g_root_preferences.getInt("tz_min", 0);
   const bool tz_dst = g_root_preferences.getInt("tz_dst", 0) != 0;
   const bool topo_persist = g_root_preferences.getInt("topo_persist", 1) != 0;
@@ -2004,13 +2001,6 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
 
   labels_json = g_root_preferences.getString("labels", "");
 
-  const size_t node_meta_len = g_root_preferences.getBytesLength("node_meta");
-  if (node_meta_len > 0 && (node_meta_len % sizeof(NodeMetaRecord)) == 0) {
-    node_meta_bytes.resize(node_meta_len);
-    g_root_preferences.getBytes("node_meta", node_meta_bytes.data(),
-                                node_meta_bytes.size());
-  }
-
   const size_t known_len = g_root_preferences.getBytesLength("known_bin");
   if (known_len > 0 && (known_len % sizeof(uint32_t)) == 0) {
     known_bytes.resize(known_len);
@@ -2020,8 +2010,6 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
   g_root_preferences.end();
 
   JsonObject wifi_obj = doc["wifi"].to<JsonObject>();
-  wifi_obj["ssid"] = wifi_ssid;
-  wifi_obj["pwd"] = wifi_pwd;
   wifi_obj["tz_min"] = tz_min;
   wifi_obj["tz_dst"] = tz_dst;
 
@@ -2091,9 +2079,12 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
     }
   }
 
-  if (!node_meta_bytes.empty()) {
-    doc["node_meta_hex"] = BytesToHex(node_meta_bytes.data(),
-                                       node_meta_bytes.size());
+  std::vector<NodeMetaRecord> meta;
+  BuildCurrentNodeMeta(&meta);
+  if (!meta.empty()) {
+    std::vector<uint8_t> meta_bytes(meta.size() * sizeof(NodeMetaRecord));
+    memcpy(meta_bytes.data(), meta.data(), meta_bytes.size());
+    doc["node_meta_hex"] = BytesToHex(meta_bytes.data(), meta_bytes.size());
   }
   if (!known_bytes.empty()) {
     doc["known_hex"] = BytesToHex(known_bytes.data(), known_bytes.size());
@@ -2122,12 +2113,33 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
   if (doc.containsKey("wifi")) {
     JsonObject wifi = doc["wifi"];
     if (!wifi.isNull()) {
-      g_network_config.ssid = wifi["ssid"].as<String>();
-      g_network_config.password = wifi["pwd"].as<String>();
-      g_network_config.timezone_minutes = wifi["tz_min"].as<int32_t>();
-      g_network_config.dst_enabled = wifi["tz_dst"].as<bool>();
-      SaveNetworkConfigToNVS();
-      ++applied_sections;
+      bool updated = false;
+      if (wifi.containsKey("ssid")) {
+        const char *ssid_c = wifi["ssid"] | nullptr;
+        if (ssid_c != nullptr && ssid_c[0] != '\0') {
+          g_network_config.ssid = ssid_c;
+          updated = true;
+        }
+      }
+      if (wifi.containsKey("pwd")) {
+        const char *pwd_c = wifi["pwd"] | nullptr;
+        if (pwd_c != nullptr && pwd_c[0] != '\0') {
+          g_network_config.password = pwd_c;
+          updated = true;
+        }
+      }
+      if (wifi.containsKey("tz_min")) {
+        g_network_config.timezone_minutes = wifi["tz_min"].as<int32_t>();
+        updated = true;
+      }
+      if (wifi.containsKey("tz_dst")) {
+        g_network_config.dst_enabled = wifi["tz_dst"].as<bool>();
+        updated = true;
+      }
+      if (updated) {
+        SaveNetworkConfigToNVS();
+        ++applied_sections;
+      }
     }
   }
 
