@@ -1137,6 +1137,55 @@ static void NtpLoop() {
 // Storage helpers
 // ---------------------------------------------------------------------------
 
+static String JoinArgs(int argc, const String argv[], int start_idx) {
+  String out;
+  for (int i = start_idx; i < argc; ++i) {
+    if (i > start_idx) {
+      out += ' ';
+    }
+    out += argv[i];
+  }
+  return out;
+}
+
+static String BytesToHex(const uint8_t *data, size_t len) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  String hex;
+  hex.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    const uint8_t b = data[i];
+    hex += kHex[(b >> 4) & 0x0F];
+    hex += kHex[b & 0x0F];
+  }
+  return hex;
+}
+
+static int HexDigitToNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+  return -1;
+}
+
+static bool HexToBytes(const String &hex, std::vector<uint8_t> *out_bytes) {
+  if (out_bytes == nullptr || (hex.length() % 2) != 0) {
+    return false;
+  }
+
+  out_bytes->clear();
+  out_bytes->reserve(hex.length() / 2);
+
+  for (size_t i = 0; i < hex.length(); i += 2) {
+    const int hi = HexDigitToNibble(hex[i]);
+    const int lo = HexDigitToNibble(hex[i + 1]);
+    if (hi < 0 || lo < 0) {
+      return false;
+    }
+    out_bytes->push_back(static_cast<uint8_t>((hi << 4) | lo));
+  }
+  return true;
+}
+
 static uint8_t GetNodeMuteMask(const String &node_id) {
   uint32_t id_u32 = 0;
   if (!ParseNodeIdToU32(node_id, &id_u32)) {
@@ -1890,6 +1939,398 @@ void EraseKnownTopology() {
 
   ClearAllMeshNodes();
   MeshTile::DestroyAll();
+}
+
+// Capture persisted NVS settings into a single JSON blob for backup/restore.
+static bool BuildNvsBackupJson(String *out_json, Print &out) {
+  if (out_json == nullptr) {
+    return false;
+  }
+
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+  JsonDocument doc;
+#else
+  StaticJsonDocument<16384> doc;
+#endif
+
+  doc.clear();
+  doc["kind"] = "meshtemps-nvs";
+  doc["node"] = "gui";
+  doc["version"] = 1;
+
+  String labels_json;
+  std::vector<uint8_t> node_meta_bytes;
+  std::vector<uint8_t> known_bytes;
+
+  // Read all meshroot-scoped values in one pass.
+  g_root_preferences.begin("meshroot", /*readOnly=*/true);
+  const String wifi_ssid = g_root_preferences.getString("wifi_ssid", "");
+  const String wifi_pwd = g_root_preferences.getString("wifi_pwd", "");
+  const int32_t tz_min = g_root_preferences.getInt("tz_min", 0);
+  const bool tz_dst = g_root_preferences.getInt("tz_dst", 0) != 0;
+  const bool topo_persist = g_root_preferences.getInt("topo_persist", 1) != 0;
+
+  const float wl = g_root_preferences.getFloat("warn_low_c", g_warn_low_c);
+  const float wh = g_root_preferences.getFloat("warn_high_c", g_warn_high_c);
+  const float al = g_root_preferences.getFloat("alert_low_c", g_alert_low_c);
+  const float ah = g_root_preferences.getFloat("alert_high_c", g_alert_high_c);
+  const float hyst = g_root_preferences.getFloat("limit_hyst_c",
+                                                 g_limit_hysteresis_c);
+
+  const bool fahrenheit = g_root_preferences.getInt("units", 1) != 0;
+  const bool hl_missing = g_root_preferences.getInt("hl_missing", 1) != 0;
+  const int32_t hl_stale = g_root_preferences.getInt("hl_stale_min", 10);
+  const bool ntfy_en = g_root_preferences.getInt("ntfy_en", 1) != 0;
+  const bool ntfy_sum_en = g_root_preferences.getInt("ntfy_sum_en", 1) != 0;
+  const uint32_t ntfy_sum_min =
+      g_root_preferences.getUInt("ntfy_sum_min", g_ntfy_config.summary_period_min);
+  const bool show_labels = g_root_preferences.getInt("show_labels", 1) != 0;
+  const bool show_age = g_root_preferences.getInt("show_age", 1) != 0;
+
+  const uint32_t beep_len =
+      NvsGetULongWithFallback(g_root_preferences, kKeyBeepLen, nullptr,
+                              kDefaultBeepLenMs);
+  const uint32_t beep_warn = NvsGetULongWithFallback(
+      g_root_preferences, kKeyBeepWarnGap, kKeyBeepWarnLegacy, kDefaultGapWarnMs);
+  const uint32_t beep_alert =
+      NvsGetULongWithFallback(g_root_preferences, kKeyBeepAlertGap,
+                              kKeyBeepAlertLegacy, kDefaultGapAlertMs);
+  const uint32_t beep_cd = NvsGetULongWithFallback(
+      g_root_preferences, kKeyBeepCooldown, kKeyBeepCooldownLegacy,
+      kDefaultBuzzerCooldownMs);
+  const uint32_t flash_ms = NvsGetULongWithFallback(
+      g_root_preferences, kKeyFlashInterval, kKeyFlashIntervalLegacy,
+      kDefaultFlashIntervalMs);
+
+  labels_json = g_root_preferences.getString("labels", "");
+
+  const size_t node_meta_len = g_root_preferences.getBytesLength("node_meta");
+  if (node_meta_len > 0 && (node_meta_len % sizeof(NodeMetaRecord)) == 0) {
+    node_meta_bytes.resize(node_meta_len);
+    g_root_preferences.getBytes("node_meta", node_meta_bytes.data(),
+                                node_meta_bytes.size());
+  }
+
+  const size_t known_len = g_root_preferences.getBytesLength("known_bin");
+  if (known_len > 0 && (known_len % sizeof(uint32_t)) == 0) {
+    known_bytes.resize(known_len);
+    g_root_preferences.getBytes("known_bin", known_bytes.data(),
+                                known_bytes.size());
+  }
+  g_root_preferences.end();
+
+  JsonObject wifi_obj = doc["wifi"].to<JsonObject>();
+  wifi_obj["ssid"] = wifi_ssid;
+  wifi_obj["pwd"] = wifi_pwd;
+  wifi_obj["tz_min"] = tz_min;
+  wifi_obj["tz_dst"] = tz_dst;
+
+  doc["topo_persist"] = topo_persist;
+
+  JsonObject limits_obj = doc["limits"].to<JsonObject>();
+  if (wh > wl) {
+    limits_obj["warn_low_c"] = wl;
+    limits_obj["warn_high_c"] = wh;
+  }
+  if (ah > al) {
+    limits_obj["alert_low_c"] = al;
+    limits_obj["alert_high_c"] = ah;
+  }
+  if (hyst >= 0.0f) {
+    limits_obj["limit_hyst_c"] = hyst;
+  }
+
+  JsonObject disp_obj = doc["display"].to<JsonObject>();
+  disp_obj["fahrenheit"] = fahrenheit;
+
+  JsonObject hl_obj = doc["highlight"].to<JsonObject>();
+  hl_obj["missing"] = hl_missing;
+  hl_obj["stale_min"] = hl_stale;
+
+  JsonObject ntfy_obj = doc["ntfy"].to<JsonObject>();
+  ntfy_obj["enabled"] = ntfy_en;
+  ntfy_obj["summary_enabled"] = ntfy_sum_en;
+  ntfy_obj["summary_min"] = ntfy_sum_min;
+
+  JsonObject tile_obj = doc["tile"].to<JsonObject>();
+  tile_obj["sensor_labels"] = show_labels;
+  tile_obj["age_label"] = show_age;
+
+  JsonObject buzzer_obj = doc["buzzer"].to<JsonObject>();
+  buzzer_obj["beep_ms"] = beep_len;
+  buzzer_obj["warn_gap_ms"] = beep_warn;
+  buzzer_obj["alert_gap_ms"] = beep_alert;
+  buzzer_obj["cooldown_ms"] = beep_cd;
+
+  doc["flash_ms"] = flash_ms;
+
+  // History is stored in a separate namespace.
+  Preferences hist;
+  if (hist.begin(kHistoryPrefsNamespace, /*readOnly=*/true)) {
+    const uint32_t interval_ms =
+        hist.getULong(kHistoryKeyIntervalMs, MeshNode::history_interval_ms());
+    const uint32_t retention_days =
+        hist.getUInt(kHistoryKeyRetentionDays, MeshNode::history_retention_days());
+    JsonObject hist_obj = doc["history"].to<JsonObject>();
+    hist_obj["interval_ms"] = interval_ms;
+    hist_obj["retention_days"] = retention_days;
+    hist.end();
+  }
+
+  if (!labels_json.isEmpty()) {
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+    JsonDocument labels_doc;
+#else
+    StaticJsonDocument<12288> labels_doc;
+#endif
+    const DeserializationError err = deserializeJson(labels_doc, labels_json);
+    if (!err) {
+      doc["labels_json"] = labels_json;
+    } else {
+      out.println(F("nvs dump: skipping invalid labels JSON"));
+    }
+  }
+
+  if (!node_meta_bytes.empty()) {
+    doc["node_meta_hex"] = BytesToHex(node_meta_bytes.data(),
+                                       node_meta_bytes.size());
+  }
+  if (!known_bytes.empty()) {
+    doc["known_hex"] = BytesToHex(known_bytes.data(), known_bytes.size());
+  }
+
+  out_json->clear();
+  serializeJson(doc, *out_json);
+  return true;
+}
+
+static bool RestoreNvsFromJson(const String &json, Print &out) {
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+  JsonDocument doc;
+#else
+  StaticJsonDocument<16384> doc;
+#endif
+
+  const DeserializationError err = deserializeJson(doc, json);
+  if (err) {
+    out.printf("nvs restore: invalid JSON (%s)\n", err.c_str());
+    return false;
+  }
+
+  int applied_sections = 0;
+
+  if (doc.containsKey("wifi")) {
+    JsonObject wifi = doc["wifi"];
+    if (!wifi.isNull()) {
+      g_network_config.ssid = wifi["ssid"].as<String>();
+      g_network_config.password = wifi["pwd"].as<String>();
+      g_network_config.timezone_minutes = wifi["tz_min"].as<int32_t>();
+      g_network_config.dst_enabled = wifi["tz_dst"].as<bool>();
+      SaveNetworkConfigToNVS();
+      ++applied_sections;
+    }
+  }
+
+  if (doc.containsKey("topo_persist")) {
+    g_topology_persist_enabled = doc["topo_persist"].as<bool>();
+    SaveTopoPersistFlag();
+    ++applied_sections;
+  }
+
+  if (doc.containsKey("limits")) {
+    JsonObject limits = doc["limits"];
+    const float wl = limits["warn_low_c"].as<float>();
+    const float wh = limits["warn_high_c"].as<float>();
+    const float al = limits["alert_low_c"].as<float>();
+    const float ah = limits["alert_high_c"].as<float>();
+    const float hyst = limits["limit_hyst_c"].as<float>();
+
+    bool valid = true;
+    if (wh > wl) {
+      g_warn_low_c = wl;
+      g_warn_high_c = wh;
+    } else {
+      valid = false;
+    }
+    if (ah > al) {
+      g_alert_low_c = al;
+      g_alert_high_c = ah;
+    } else {
+      valid = false;
+    }
+    if (hyst >= 0.0f) {
+      g_limit_hysteresis_c = hyst;
+    }
+
+    if (valid) {
+      SaveLimits();
+      ++applied_sections;
+    } else {
+      out.println(F("nvs restore: skipped limits (invalid ranges)"));
+    }
+  }
+
+  if (doc.containsKey("display")) {
+    JsonObject disp = doc["display"];
+    g_display_fahrenheit = disp["fahrenheit"].as<bool>();
+    SaveDisplayUnits();
+    ++applied_sections;
+  }
+
+  if (doc.containsKey("highlight")) {
+    JsonObject hl = doc["highlight"];
+    g_highlight_missing_nodes = hl["missing"].as<bool>();
+    const int stale = hl["stale_min"].as<int>();
+    if (stale > 0) {
+      g_stale_minutes_threshold = static_cast<uint32_t>(stale);
+    }
+    SaveHighlightSettings();
+    ++applied_sections;
+  }
+
+  if (doc.containsKey("ntfy")) {
+    JsonObject ntfy = doc["ntfy"];
+    g_ntfy_config.enabled = ntfy["enabled"].as<bool>();
+    g_ntfy_config.summary_enabled = ntfy["summary_enabled"].as<bool>();
+    const uint32_t sum_min = ntfy["summary_min"].as<uint32_t>();
+    if (sum_min > 0) {
+      g_ntfy_config.summary_period_min = sum_min;
+    }
+    SaveNtfySettings();
+    ++applied_sections;
+  }
+
+  if (doc.containsKey("tile")) {
+    JsonObject tile = doc["tile"];
+    g_show_sensor_labels = tile["sensor_labels"].as<bool>();
+    g_show_age_label = tile["age_label"].as<bool>();
+    SaveTileDisplaySettings();
+    ++applied_sections;
+  }
+
+  if (doc.containsKey("buzzer")) {
+    JsonObject buzzer = doc["buzzer"];
+    const uint32_t len = buzzer["beep_ms"].as<uint32_t>();
+    const uint32_t warn_gap = buzzer["warn_gap_ms"].as<uint32_t>();
+    const uint32_t alert_gap = buzzer["alert_gap_ms"].as<uint32_t>();
+    const uint32_t cd = buzzer["cooldown_ms"].as<uint32_t>();
+
+    if (len > 0) g_beep_len_ms = len;
+    g_beep_gap_warn_ms = warn_gap;
+    g_beep_gap_alert_ms = alert_gap;
+    g_buzzer_cooldown_ms = cd;
+
+    SaveBuzzerSettings();
+    ++applied_sections;
+  }
+
+  if (doc.containsKey("flash_ms")) {
+    const uint32_t flash_ms = doc["flash_ms"].as<uint32_t>();
+    g_flash_interval_ms = flash_ms;
+    SaveFlashSettings();
+    ++applied_sections;
+  }
+
+  if (doc.containsKey("history")) {
+    JsonObject hist = doc["history"];
+    const uint32_t interval_ms = hist["interval_ms"].as<uint32_t>();
+    const uint32_t retention_days = hist["retention_days"].as<uint32_t>();
+    if (interval_ms > 0 && retention_days > 0) {
+      MeshNode::SetHistoryConfig(interval_ms, retention_days);
+      SaveHistoryConfigToNvs();
+      ++applied_sections;
+    } else {
+      out.println(F("nvs restore: skipped history (invalid values)"));
+    }
+  }
+
+  bool labels_applied = false;
+  if (doc.containsKey("labels_json")) {
+    const char *labels_c = doc["labels_json"] | nullptr;
+    if (labels_c != nullptr) {
+      const String labels_str(labels_c);
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+      JsonDocument labels_doc;
+#else
+      StaticJsonDocument<12288> labels_doc;
+#endif
+      const DeserializationError lerr = deserializeJson(labels_doc, labels_str);
+      if (!lerr) {
+        g_root_preferences.begin("meshroot", /*readOnly=*/false);
+        const bool ok =
+            NvsPutStringVerified(g_root_preferences, "labels", labels_str);
+        g_root_preferences.end();
+        if (ok) {
+          LoadLabels();
+          labels_applied = true;
+          ++applied_sections;
+        } else {
+          out.println(F("nvs restore: failed to write labels"));
+        }
+      } else {
+        out.println(F("nvs restore: ignored labels_json (invalid JSON)"));
+      }
+    }
+  }
+
+  bool meta_applied = false;
+  if (doc.containsKey("node_meta_hex")) {
+    const char *meta_hex_c = doc["node_meta_hex"] | nullptr;
+    if (meta_hex_c != nullptr) {
+      std::vector<uint8_t> bytes;
+      if (HexToBytes(meta_hex_c, &bytes) &&
+          !bytes.empty() && (bytes.size() % sizeof(NodeMetaRecord)) == 0) {
+        g_root_preferences.begin("meshroot", /*readOnly=*/false);
+        const bool ok = NvsPutBytesVerified(g_root_preferences, "node_meta",
+                                            bytes.data(), bytes.size());
+        g_root_preferences.end();
+        if (ok) {
+          LoadNodeMetaFromNVS();
+          meta_applied = true;
+          ++applied_sections;
+        } else {
+          out.println(F("nvs restore: failed to write node meta"));
+        }
+      } else {
+        out.println(F("nvs restore: ignored node_meta_hex (invalid length)"));
+      }
+    }
+  }
+
+  bool known_applied = false;
+  if (doc.containsKey("known_hex")) {
+    const char *known_hex_c = doc["known_hex"] | nullptr;
+    if (known_hex_c != nullptr) {
+      std::vector<uint8_t> bytes;
+      if (HexToBytes(known_hex_c, &bytes) &&
+          (bytes.size() % sizeof(uint32_t)) == 0) {
+        std::vector<uint32_t> ids;
+        ids.reserve(bytes.size() / sizeof(uint32_t));
+        for (size_t i = 0; i < bytes.size(); i += sizeof(uint32_t)) {
+          uint32_t v = 0;
+          memcpy(&v, bytes.data() + i, sizeof(uint32_t));
+          ids.push_back(v);
+        }
+        WriteKnownToNVS(ids);
+        known_applied = true;
+        ++applied_sections;
+      } else {
+        out.println(F("nvs restore: ignored known_hex (invalid length)"));
+      }
+    }
+  }
+
+  if (known_applied && g_topology_persist_enabled) {
+    LoadKnownTopology();
+  }
+  if (meta_applied || labels_applied) {
+    LoadNodeMetaFromNVS();
+    LoadLabels();
+    GuiRequestRender();
+  }
+
+  out.printf("nvs restore: applied %d section(s)\n", applied_sections);
+  return applied_sections > 0;
 }
 
 // Minimal root storage initialization:
@@ -5021,6 +5462,45 @@ static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
   out.printf("labels NVS size=%u bytes\n", static_cast<unsigned>(labels_bytes));
 }
 
+static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
+  (void)ctx;
+  PrintCommandHeader(out, argc, argv);
+
+  if (argc < 2) {
+    out.println(F("usage: nvs dump | nvs restore <json>"));
+    return;
+  }
+
+  const String sub = argv[1];
+  if (sub.equalsIgnoreCase("dump")) {
+    String json;
+    if (BuildNvsBackupJson(&json, out)) {
+      out.println(json);
+      out.println(F("nvs dump: copy the JSON above for restore"));
+    } else {
+      out.println(F("ERR nvs dump"));
+    }
+    return;
+  }
+
+  if (sub.equalsIgnoreCase("restore")) {
+    if (argc < 3) {
+      out.println(F("ERR nvs restore (provide JSON)"));
+      return;
+    }
+
+    const String payload = JoinArgs(argc, argv, 2);
+    if (RestoreNvsFromJson(payload, out)) {
+      out.println(F("nvs restore: ok"));
+    } else {
+      out.println(F("nvs restore: no changes"));
+    }
+    return;
+  }
+
+  out.println(F("ERR nvs (use dump|restore)"));
+}
+
 static void CmdView(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
   PrintCommandHeader(out, argc, argv);
@@ -7356,6 +7836,7 @@ void setup() {
       "mute", &CmdMute,
       "mute <nodeId> off|low|high|both | mute get <nodeId> | mute list");
   g_console.RegisterCommand("stats", &CmdStats, "json usage + known size");
+  g_console.RegisterCommand("nvs", &CmdNvs, "nvs dump|restore <json>");
   g_console.RegisterCommand("known", &CmdKnown, "known [erase|show]");
   g_console.RegisterCommand("topo", &CmdTopo,
                             "topo show|on|off|save|load|clear");
