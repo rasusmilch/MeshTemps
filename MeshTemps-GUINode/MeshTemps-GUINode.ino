@@ -19,10 +19,10 @@
 // while keeping Serial (USB CDC) for the PC console. Do not remap to the bridge
 // pins (17/18); those are reserved for the bridge firmware's dedicated UART.
 #ifndef BRIDGE_GUI_TX_PIN
-#define BRIDGE_GUI_TX_PIN 43  // U0TXD on ESP32-S3
+#define BRIDGE_GUI_TX_PIN 43 // U0TXD on ESP32-S3
 #endif
 #ifndef BRIDGE_GUI_RX_PIN
-#define BRIDGE_GUI_RX_PIN 44  // U0RXD on ESP32-S3
+#define BRIDGE_GUI_RX_PIN 44 // U0RXD on ESP32-S3
 #endif
 #include "../serial_protocol.h"
 #include <Arduino.h>
@@ -41,13 +41,13 @@
 #include "lvgl_v8_port.h"
 #include <WiFi.h>
 #include <algorithm> // for std::sort
+#include <driver/i2c.h>
 #include <esp_display_panel.hpp>
 #include <esp_sntp.h>
 #include <esp_wifi.h> // for wifi_auth_mode_t and auth enums
 #include <limits>
 #include <lvgl.h>
 #include <map>
-#include <driver/i2c.h>
 #include <sys/time.h> // for settimeofday()
 #include <time.h>
 
@@ -254,13 +254,14 @@ uint32_t g_beep_gap_warn_ms = kDefaultGapWarnMs;
 uint32_t g_beep_gap_alert_ms = kDefaultGapAlertMs;
 
 enum BuzzerSilenceState : uint8_t {
-  kBuzzerSilenceIdle = 0,      // normal operation, buzzer allowed
-  kBuzzerSilenceActive = 1,    // user pressed "Silence"; current alerts suppressed
+  kBuzzerSilenceIdle = 0,   // normal operation, buzzer allowed
+  kBuzzerSilenceActive = 1, // user pressed "Silence"; current alerts suppressed
 };
 
 BuzzerSilenceState g_buzzer_silence_state = kBuzzerSilenceIdle;
 
-// Runtime buzzer state (moved out of BuzzerLoop so the UI handler can touch it).
+// Runtime buzzer state (moved out of BuzzerLoop so the UI handler can touch
+// it).
 bool g_buzzer_on = false;
 uint32_t g_buzzer_beep_start_ms = 0;
 uint32_t g_buzzer_last_beep_ms = 0;
@@ -313,7 +314,8 @@ float g_limit_hysteresis_c = kDefaultLimitHysteresisC;
 // Aggregate state for buzzer.
 bool g_any_warning = false;
 bool g_any_alert = false;
-bool g_buzzer_any_warning = false; // hysteresis-aware alert evaluation for buzzer
+bool g_buzzer_any_warning =
+    false; // hysteresis-aware alert evaluation for buzzer
 bool g_buzzer_any_alert = false;
 
 // ntfy notifications
@@ -329,7 +331,8 @@ NtfyConfig g_ntfy_config;
 std::map<String, AlertState> g_ntfy_states;
 uint32_t g_ntfy_last_summary_ms = 0;
 static uint32_t g_ntfy_next_sequence = 1;
-static constexpr uint32_t kNtfyResendIntervalMs = 5000; // rate limit GUI->bridge reissues
+static constexpr uint32_t kNtfyResendIntervalMs =
+    5000; // rate limit GUI->bridge reissues
 
 struct QueuedNtfy {
   uint32_t sequence = 0;
@@ -368,13 +371,13 @@ struct ChartRangeOption {
   uint32_t days;
 };
 
-constexpr ChartRangeOption kChartRanges[] = {{"1d", 1},  {"2d", 2},
-                                             {"5d", 5},  {"7d", 7},
-                                             {"30d", 30}};
-constexpr size_t kChartRangeCount = sizeof(kChartRanges) / sizeof(kChartRanges[0]);
+constexpr ChartRangeOption kChartRanges[] = {
+    {"1d", 1}, {"2d", 2}, {"5d", 5}, {"7d", 7}, {"30d", 30}};
+constexpr size_t kChartRangeCount =
+    sizeof(kChartRanges) / sizeof(kChartRanges[0]);
 
-lv_obj_t *g_ui_chart_range_buttons[kChartRangeCount] = {nullptr, nullptr, nullptr,
-                                                        nullptr, nullptr};
+lv_obj_t *g_ui_chart_range_buttons[kChartRangeCount] = {
+    nullptr, nullptr, nullptr, nullptr, nullptr};
 size_t g_chart_active_range_index = 0; // default to previous day
 
 struct ChartSelection {
@@ -472,7 +475,6 @@ static bool g_history_time_backfilled = false;
 
 // Forward declaration; implemented below.
 static void OnFirstNtpTimeSync(time_t epoch_now, uint32_t now_ms);
-
 
 // Per-node alert/warning mute under g_labels["mute"][nodeId]:
 // bit0 = LOW side muted; bit1 = HIGH side muted.
@@ -923,19 +925,17 @@ static bool EnsureWifiConnected(Print &out) {
   const wl_status_t status = WiFi.status();
   if (status == WL_CONNECTED) {
     IPAddress ip = WiFi.localIP();
-    out.printf("[WiFi] Connected; IP=%s RSSI=%d dBm\n",
-               ip.toString().c_str(), WiFi.RSSI());
+    out.printf("[WiFi] Connected; IP=%s RSSI=%d dBm\n", ip.toString().c_str(),
+               WiFi.RSSI());
     return true;
   }
 
   // Do not block here – STA connection is managed by painlessMesh.
-  out.printf(
-      "[WiFi] STA credentials applied; current status=%d. "
-      "Root will connect via painlessMesh in the background.\n",
-      static_cast<int>(status));
+  out.printf("[WiFi] STA credentials applied; current status=%d. "
+             "Root will connect via painlessMesh in the background.\n",
+             static_cast<int>(status));
   return false;
 }
-
 
 // Set local clock to a fixed default of 2025-01-01 00:00.
 static void SetDefaultDateTime() {
@@ -992,15 +992,15 @@ static bool SyncTimeFromNtp(Print &out) {
   // If a sync is already in progress, do not start another.
   if (g_ntp_sync_in_progress) {
     out.println(F("[NTP] Sync already in progress"));
-    return true;  // Request is effectively already pending.
+    return true; // Request is effectively already pending.
   }
 
   const long gmt_offset_sec =
       static_cast<long>(g_network_config.timezone_minutes) * 60L;
   const long dst_offset_sec = g_network_config.dst_enabled ? 3600L : 0L;
 
-  out.printf("[NTP] configTime offset=%ld sec dst=%ld sec\n",
-             gmt_offset_sec, dst_offset_sec);
+  out.printf("[NTP] configTime offset=%ld sec dst=%ld sec\n", gmt_offset_sec,
+             dst_offset_sec);
 
   // Install (or re-install) the SNTP callback; this is idempotent.
   sntp_set_time_sync_notification_cb(NtpTimeSyncNotification);
@@ -1016,7 +1016,6 @@ static bool SyncTimeFromNtp(Print &out) {
   out.println(F("[NTP] Sync requested (non-blocking)"));
   return true;
 }
-
 
 static void RootInitNetwork() {
   LoadNetworkConfigFromNVS();
@@ -1035,9 +1034,9 @@ static void RootInitNetwork() {
   // Apply STA configuration to painlessMesh. This does NOT block;
   // the mesh will bring the STA link up when it can.
   EnsureMeshStationConfigApplied(Serial);
-  Serial.println(F(
-      "[WiFi] STA credentials applied; root mesh node will connect to WiFi "
-      "in the background when possible."));
+  Serial.println(
+      F("[WiFi] STA credentials applied; root mesh node will connect to WiFi "
+        "in the background when possible."));
 
   // Start from a sane default local time; NTP will replace this once the
   // first successful sync occurs.
@@ -1071,8 +1070,7 @@ static void OnFirstNtpTimeSync(time_t epoch_now, uint32_t now_ms) {
 
   Serial.printf(
       "[HIST] First NTP sync: epoch_now=%ld now_ms=%lu; backdating history.\n",
-      static_cast<long>(epoch_now),
-      static_cast<unsigned long>(now_ms));
+      static_cast<long>(epoch_now), static_cast<unsigned long>(now_ms));
 
   // Hand off to MeshNode:
   //  - store the mapping epoch_now <-> now_ms, and
@@ -1082,7 +1080,6 @@ static void OnFirstNtpTimeSync(time_t epoch_now, uint32_t now_ms) {
 
   g_history_time_backfilled = true;
 }
-
 
 // Periodic NTP resync – call from loop(). Non-blocking.
 static void NtpLoop() {
@@ -1095,7 +1092,7 @@ static void NtpLoop() {
     g_ntp_sync_in_progress = false;
     g_ntp_time_valid = true;
     g_last_ntp_ok_ms = now_ms;
-    g_ntp_retry_period_ms = kNtpResyncPeriodMs;  // switch to ~24 h
+    g_ntp_retry_period_ms = kNtpResyncPeriodMs; // switch to ~24 h
 
     // Log the time we just synced to, so it matches what "time now" would show.
     struct tm timeinfo;
@@ -1153,7 +1150,7 @@ static void NtpLoop() {
   // 3) Check if it is time to start a new attempt.
   if ((g_last_ntp_attempt_ms != 0U) &&
       ((now_ms - g_last_ntp_attempt_ms) < g_ntp_retry_period_ms)) {
-    return;  // not time yet
+    return; // not time yet
   }
 
   // 4) Ensure WiFi is connected before starting a new sync attempt.
@@ -1174,7 +1171,6 @@ static void NtpLoop() {
   // 5) Start a new non-blocking sync attempt.
   (void)SyncTimeFromNtp(Serial);
 }
-
 
 // ---------------------------------------------------------------------------
 // Storage helpers
@@ -1204,9 +1200,12 @@ static String BytesToHex(const uint8_t *data, size_t len) {
 }
 
 static int HexDigitToNibble(char c) {
-  if (c >= '0' && c <= '9') return c - '0';
-  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return 10 + (c - 'a');
+  if (c >= 'A' && c <= 'F')
+    return 10 + (c - 'A');
   return -1;
 }
 
@@ -1683,10 +1682,11 @@ void SaveHighlightSettings() {
 void LoadNtfySettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
   g_ntfy_config.enabled = (g_root_preferences.getInt("ntfy_en", 1) != 0);
-  g_ntfy_config.summary_enabled = (g_root_preferences.getInt("ntfy_sum_en", 1) != 0);
+  g_ntfy_config.summary_enabled =
+      (g_root_preferences.getInt("ntfy_sum_en", 1) != 0);
   g_ntfy_config.summary_period_min =
-      static_cast<uint32_t>(g_root_preferences.getUInt("ntfy_sum_min",
-                                                       g_ntfy_config.summary_period_min));
+      static_cast<uint32_t>(g_root_preferences.getUInt(
+          "ntfy_sum_min", g_ntfy_config.summary_period_min));
   g_root_preferences.end();
 }
 
@@ -1695,9 +1695,9 @@ void SaveNtfySettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
 
   bool is_successful = true;
-  is_successful =
-      NvsPutIntVerified(g_root_preferences, "ntfy_en", g_ntfy_config.enabled ? 1 : 0) &&
-      is_successful;
+  is_successful = NvsPutIntVerified(g_root_preferences, "ntfy_en",
+                                    g_ntfy_config.enabled ? 1 : 0) &&
+                  is_successful;
   is_successful = NvsPutIntVerified(g_root_preferences, "ntfy_sum_en",
                                     g_ntfy_config.summary_enabled ? 1 : 0) &&
                   is_successful;
@@ -1746,9 +1746,9 @@ void SaveBuzzerSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/false);
 
   bool is_successful = true;
-  is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepLen,
-                                      g_beep_len_ms) &&
-                  is_successful;
+  is_successful =
+      NvsPutULongVerified(g_root_preferences, kKeyBeepLen, g_beep_len_ms) &&
+      is_successful;
   is_successful = NvsPutULongVerified(g_root_preferences, kKeyBeepWarnGap,
                                       g_beep_gap_warn_ms) &&
                   is_successful;
@@ -1763,27 +1763,22 @@ void SaveBuzzerSettings() {
   }
 }
 
-
 void LoadBuzzerSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const uint32_t len =
-      NvsGetULongWithFallback(g_root_preferences, kKeyBeepLen, nullptr,
-                              kDefaultBeepLenMs);
-  const uint32_t gw = NvsGetULongWithFallback(g_root_preferences,
-                                              kKeyBeepWarnGap,
-                                              kKeyBeepWarnLegacy,
-                                              kDefaultGapWarnMs);
-  const uint32_t ga = NvsGetULongWithFallback(g_root_preferences,
-                                              kKeyBeepAlertGap,
-                                              kKeyBeepAlertLegacy,
-                                              kDefaultGapAlertMs);
+  const uint32_t len = NvsGetULongWithFallback(g_root_preferences, kKeyBeepLen,
+                                               nullptr, kDefaultBeepLenMs);
+  const uint32_t gw =
+      NvsGetULongWithFallback(g_root_preferences, kKeyBeepWarnGap,
+                              kKeyBeepWarnLegacy, kDefaultGapWarnMs);
+  const uint32_t ga =
+      NvsGetULongWithFallback(g_root_preferences, kKeyBeepAlertGap,
+                              kKeyBeepAlertLegacy, kDefaultGapAlertMs);
   g_root_preferences.end();
 
   g_beep_len_ms = (len > 0) ? len : kDefaultBeepLenMs;
   g_beep_gap_warn_ms = gw;
   g_beep_gap_alert_ms = ga;
 }
-
 
 void SaveFlashSettings() {
   Serial.println(F("Saving Flash Interval Settings..."));
@@ -1799,9 +1794,9 @@ void SaveFlashSettings() {
 
 void LoadFlashSettings() {
   g_root_preferences.begin("meshroot", /*readOnly=*/true);
-  const uint32_t fi = NvsGetULongWithFallback(
-      g_root_preferences, kKeyFlashInterval, kKeyFlashIntervalLegacy,
-      kDefaultFlashIntervalMs);
+  const uint32_t fi =
+      NvsGetULongWithFallback(g_root_preferences, kKeyFlashInterval,
+                              kKeyFlashIntervalLegacy, kDefaultFlashIntervalMs);
   g_root_preferences.end();
   g_flash_interval_ms = fi;
 }
@@ -2006,30 +2001,30 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
   const float wh = g_root_preferences.getFloat("warn_high_c", g_warn_high_c);
   const float al = g_root_preferences.getFloat("alert_low_c", g_alert_low_c);
   const float ah = g_root_preferences.getFloat("alert_high_c", g_alert_high_c);
-  const float hyst = g_root_preferences.getFloat("limit_hyst_c",
-                                                 g_limit_hysteresis_c);
+  const float hyst =
+      g_root_preferences.getFloat("limit_hyst_c", g_limit_hysteresis_c);
 
   const bool fahrenheit = g_root_preferences.getInt("units", 1) != 0;
   const bool hl_missing = g_root_preferences.getInt("hl_missing", 1) != 0;
   const int32_t hl_stale = g_root_preferences.getInt("hl_stale_min", 10);
   const bool ntfy_en = g_root_preferences.getInt("ntfy_en", 1) != 0;
   const bool ntfy_sum_en = g_root_preferences.getInt("ntfy_sum_en", 1) != 0;
-  const uint32_t ntfy_sum_min =
-      g_root_preferences.getUInt("ntfy_sum_min", g_ntfy_config.summary_period_min);
+  const uint32_t ntfy_sum_min = g_root_preferences.getUInt(
+      "ntfy_sum_min", g_ntfy_config.summary_period_min);
   const bool show_labels = g_root_preferences.getInt("show_labels", 1) != 0;
   const bool show_age = g_root_preferences.getInt("show_age", 1) != 0;
 
-  const uint32_t beep_len =
-      NvsGetULongWithFallback(g_root_preferences, kKeyBeepLen, nullptr,
-                              kDefaultBeepLenMs);
-  const uint32_t beep_warn = NvsGetULongWithFallback(
-      g_root_preferences, kKeyBeepWarnGap, kKeyBeepWarnLegacy, kDefaultGapWarnMs);
+  const uint32_t beep_len = NvsGetULongWithFallback(
+      g_root_preferences, kKeyBeepLen, nullptr, kDefaultBeepLenMs);
+  const uint32_t beep_warn =
+      NvsGetULongWithFallback(g_root_preferences, kKeyBeepWarnGap,
+                              kKeyBeepWarnLegacy, kDefaultGapWarnMs);
   const uint32_t beep_alert =
       NvsGetULongWithFallback(g_root_preferences, kKeyBeepAlertGap,
                               kKeyBeepAlertLegacy, kDefaultGapAlertMs);
-  const uint32_t flash_ms = NvsGetULongWithFallback(
-      g_root_preferences, kKeyFlashInterval, kKeyFlashIntervalLegacy,
-      kDefaultFlashIntervalMs);
+  const uint32_t flash_ms =
+      NvsGetULongWithFallback(g_root_preferences, kKeyFlashInterval,
+                              kKeyFlashIntervalLegacy, kDefaultFlashIntervalMs);
 
   labels_json = g_root_preferences.getString("labels", "");
 
@@ -2088,8 +2083,8 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
   if (hist.begin(kHistoryPrefsNamespace, /*readOnly=*/true)) {
     const uint32_t interval_ms =
         hist.getULong(kHistoryKeyIntervalMs, MeshNode::history_interval_ms());
-    const uint32_t retention_days =
-        hist.getUInt(kHistoryKeyRetentionDays, MeshNode::history_retention_days());
+    const uint32_t retention_days = hist.getUInt(
+        kHistoryKeyRetentionDays, MeshNode::history_retention_days());
     JsonObject hist_obj = doc["history"].to<JsonObject>();
     hist_obj["interval_ms"] = interval_ms;
     hist_obj["retention_days"] = retention_days;
@@ -2257,7 +2252,8 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
     const uint32_t warn_gap = buzzer["warn_gap_ms"].as<uint32_t>();
     const uint32_t alert_gap = buzzer["alert_gap_ms"].as<uint32_t>();
 
-    if (len > 0) g_beep_len_ms = len;
+    if (len > 0)
+      g_beep_len_ms = len;
     g_beep_gap_warn_ms = warn_gap;
     g_beep_gap_alert_ms = alert_gap;
 
@@ -2319,8 +2315,8 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
     const char *meta_hex_c = doc["node_meta_hex"] | nullptr;
     if (meta_hex_c != nullptr) {
       std::vector<uint8_t> bytes;
-      if (HexToBytes(meta_hex_c, &bytes) &&
-          !bytes.empty() && (bytes.size() % sizeof(NodeMetaRecord)) == 0) {
+      if (HexToBytes(meta_hex_c, &bytes) && !bytes.empty() &&
+          (bytes.size() % sizeof(NodeMetaRecord)) == 0) {
         g_root_preferences.begin("meshroot", /*readOnly=*/false);
         const bool ok = NvsPutBytesVerified(g_root_preferences, "node_meta",
                                             bytes.data(), bytes.size());
@@ -2467,12 +2463,16 @@ static String CanonAddr16(const String &addr) {
 }
 
 static float ToDisplayUnits(float temp_c) {
-  if (isnan(temp_c)) return temp_c;
+  if (isnan(temp_c))
+    return temp_c;
   return g_display_fahrenheit ? (temp_c * 9.0f / 5.0f + 32.0f) : temp_c;
 }
 
-static const char* DisplayUnitsLabel() {
-  return g_display_fahrenheit ? "\xC2\xB0""F" : "\xC2\xB0""C";  // UTF-8 "°F"/"°C"
+static const char *DisplayUnitsLabel() {
+  return g_display_fahrenheit ? "\xC2\xB0"
+                                "F"
+                              : "\xC2\xB0"
+                                "C"; // UTF-8 "°F"/"°C"
 }
 
 static String FormatTempForMessage(float temp_c) {
@@ -2481,7 +2481,8 @@ static String FormatTempForMessage(float temp_c) {
   }
   char buf[24];
   const float t = ToDisplayUnits(temp_c);
-  snprintf(buf, sizeof(buf), "%.1f%s", static_cast<double>(t), DisplayUnitsLabel());
+  snprintf(buf, sizeof(buf), "%.1f%s", static_cast<double>(t),
+           DisplayUnitsLabel());
   return String(buf);
 }
 
@@ -2494,14 +2495,15 @@ static String FormatLimitRange(float low_c, float high_c) {
 
   char buf[48];
   if (has_low && has_high) {
-    snprintf(buf, sizeof(buf), "%.1f to %.1f%s", static_cast<double>(ToDisplayUnits(low_c)),
+    snprintf(buf, sizeof(buf), "%.1f to %.1f%s",
+             static_cast<double>(ToDisplayUnits(low_c)),
              static_cast<double>(ToDisplayUnits(high_c)), DisplayUnitsLabel());
   } else if (has_low) {
-    snprintf(buf, sizeof(buf), "below %.1f%s", static_cast<double>(ToDisplayUnits(low_c)),
-             DisplayUnitsLabel());
+    snprintf(buf, sizeof(buf), "below %.1f%s",
+             static_cast<double>(ToDisplayUnits(low_c)), DisplayUnitsLabel());
   } else {
-    snprintf(buf, sizeof(buf), "above %.1f%s", static_cast<double>(ToDisplayUnits(high_c)),
-             DisplayUnitsLabel());
+    snprintf(buf, sizeof(buf), "above %.1f%s",
+             static_cast<double>(ToDisplayUnits(high_c)), DisplayUnitsLabel());
   }
   return String(buf);
 }
@@ -2511,20 +2513,22 @@ static String FormatLimitSummary() {
   String warn = FormatLimitRange(g_warn_low_c, g_warn_high_c);
   String alert = FormatLimitRange(g_alert_low_c, g_alert_high_c);
   if (g_limit_hysteresis_c > 0.0f) {
-    const float hyst_disp =
-        g_display_fahrenheit ? (g_limit_hysteresis_c * 1.8f) : g_limit_hysteresis_c;
+    const float hyst_disp = g_display_fahrenheit ? (g_limit_hysteresis_c * 1.8f)
+                                                 : g_limit_hysteresis_c;
     char buf[32];
     snprintf(buf, sizeof(buf), "hyst=%.2f%s", static_cast<double>(hyst_disp),
              DisplayUnitsLabel());
     parts += buf;
   }
   if (warn.length() > 0) {
-    if (parts.length() > 0) parts += "; ";
+    if (parts.length() > 0)
+      parts += "; ";
     parts += "warn: ";
     parts += warn;
   }
   if (alert.length() > 0) {
-    if (parts.length() > 0) parts += "; ";
+    if (parts.length() > 0)
+      parts += "; ";
     parts += "alert: ";
     parts += alert;
   }
@@ -2546,12 +2550,14 @@ static const char *AlertStateName(AlertState state) {
 }
 
 static String NodeDisplayName(const MeshNode *node) {
-  if (node == nullptr) return String("(unknown node)");
+  if (node == nullptr)
+    return String("(unknown node)");
   if (node->label().length() > 0) {
     return node->label();
   }
   char buf[11];
-  snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(node->node_id()));
+  snprintf(buf, sizeof(buf), "0x%08lX",
+           static_cast<unsigned long>(node->node_id()));
   return String(buf);
 }
 
@@ -2675,7 +2681,8 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
         const float alert_low_thresh =
             isnan(g_alert_low_c) ? NAN : (g_alert_low_c - g_limit_hysteresis_c);
         const float alert_high_thresh =
-            isnan(g_alert_high_c) ? NAN : (g_alert_high_c + g_limit_hysteresis_c);
+            isnan(g_alert_high_c) ? NAN
+                                  : (g_alert_high_c + g_limit_hysteresis_c);
         bool low_alert = (!isnan(alert_low_thresh) && t < alert_low_thresh);
         bool high_alert = (!isnan(alert_high_thresh) && t > alert_high_thresh);
         if (low_alert && (node_mute & kMuteLow)) {
@@ -2691,7 +2698,8 @@ static bool BuildTileContentForNode(const String &node_key_hex, uint32_t now_ms,
           const float warn_low_thresh =
               isnan(g_warn_low_c) ? NAN : (g_warn_low_c - g_limit_hysteresis_c);
           const float warn_high_thresh =
-              isnan(g_warn_high_c) ? NAN : (g_warn_high_c + g_limit_hysteresis_c);
+              isnan(g_warn_high_c) ? NAN
+                                   : (g_warn_high_c + g_limit_hysteresis_c);
           bool low_warn = (!isnan(warn_low_thresh) && t < warn_low_thresh);
           bool high_warn = (!isnan(warn_high_thresh) && t > warn_high_thresh);
           if (low_warn && (node_mute & kMuteLow)) {
@@ -2782,8 +2790,8 @@ static void EmitStateNotification(const String &key, AlertState new_state,
   }
 
   if (send_notification && g_debug_enabled) {
-    Serial.printf("[NTFY] %s: %s -> %s\n", key.c_str(),
-                  AlertStateName(prev), AlertStateName(new_state));
+    Serial.printf("[NTFY] %s: %s -> %s\n", key.c_str(), AlertStateName(prev),
+                  AlertStateName(new_state));
   }
   if (send_notification) {
     SendNtfyRequestToBridge(msg, cache, false, "MeshTemps");
@@ -2792,14 +2800,17 @@ static void EmitStateNotification(const String &key, AlertState new_state,
 }
 
 static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
-                                      uint8_t node_mute,
-                                      AlertState prev_state,
+                                      uint8_t node_mute, AlertState prev_state,
                                       bool *low_alert, bool *high_alert,
                                       bool *low_warn, bool *high_warn) {
-  if (low_alert) *low_alert = false;
-  if (high_alert) *high_alert = false;
-  if (low_warn) *low_warn = false;
-  if (high_warn) *high_warn = false;
+  if (low_alert)
+    *low_alert = false;
+  if (high_alert)
+    *high_alert = false;
+  if (low_warn)
+    *low_warn = false;
+  if (high_warn)
+    *high_warn = false;
 
   if (!sensor.has_value || isnan(sensor.temp_c)) {
     return AlertState::kNormal;
@@ -2830,8 +2841,10 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     }
   }
 
-  if (low_alert) *low_alert = la;
-  if (high_alert) *high_alert = ha;
+  if (low_alert)
+    *low_alert = la;
+  if (high_alert)
+    *high_alert = ha;
 
   if (la || ha) {
     return AlertState::kAlert;
@@ -2863,8 +2876,10 @@ static AlertState EvaluateSensorState(const MeshNode::Sensor &sensor,
     }
   }
 
-  if (low_warn) *low_warn = lw;
-  if (high_warn) *high_warn = hw;
+  if (low_warn)
+    *low_warn = lw;
+  if (high_warn)
+    *high_warn = hw;
 
   if (lw || hw) {
     return AlertState::kWarning;
@@ -3090,14 +3105,14 @@ void DisplayInit() {
     if (lcd != nullptr) {
       lcd->configFrameBufferNumber(LVGL_PORT_DISP_BUFFER_NUM);
 
-      #if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
-            auto *bus = lcd->getBus();
-            if (bus != nullptr &&
-                bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
-              static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(
-                  lcd->getFrameWidth() * 10);
-            }
-      #endif
+#if ESP_PANEL_DRIVERS_BUS_ENABLE_RGB && CONFIG_IDF_TARGET_ESP32S3
+      auto *bus = lcd->getBus();
+      if (bus != nullptr &&
+          bus->getBasicAttributes().type == ESP_PANEL_BUS_TYPE_RGB) {
+        static_cast<BusRGB *>(bus)->configRGB_BounceBufferSize(
+            lcd->getFrameWidth() * 10);
+      }
+#endif
     }
   }
 #endif // LVGL_PORT_AVOID_TEARING_MODE
@@ -3154,16 +3169,14 @@ static void UpdateSilenceButtonAppearance() {
   const bool silenced = (g_buzzer_silence_state == kBuzzerSilenceActive);
 
   // Neutral dark when idle, red when silenced.
-  lv_color_t bg_color =
-      silenced ? lv_color_make(0xC0, 0x20, 0x20)   // red
-               : lv_color_make(0x40, 0x40, 0x40);  // dark gray
+  lv_color_t bg_color = silenced ? lv_color_make(0xC0, 0x20, 0x20)  // red
+                                 : lv_color_make(0x40, 0x40, 0x40); // dark gray
 
   lv_obj_set_style_bg_color(g_ui_button_silence, bg_color, 0);
   lv_obj_set_style_bg_opa(g_ui_button_silence, LV_OPA_COVER, 0);
 
   if (g_ui_button_silence_label != nullptr) {
-    lv_obj_set_style_text_color(g_ui_button_silence_label,
-                                lv_color_white(), 0);
+    lv_obj_set_style_text_color(g_ui_button_silence_label, lv_color_white(), 0);
   }
 }
 
@@ -3240,7 +3253,7 @@ void GuiInit() {
   lv_label_set_text(g_ui_button_silence_label, "Silence");
   lv_obj_center(g_ui_button_silence_label);
 
-    // Ensure initial visual state matches "not silenced".
+  // Ensure initial visual state matches "not silenced".
   UpdateSilenceButtonAppearance();
 
   // Small button to toggle Room / Underbelly view for the map.
@@ -3273,15 +3286,15 @@ void GuiInit() {
   lv_obj_set_height(g_ui_ntp_popup, lv_pct(50));
 
   // Subtle light blue background.
-  lv_obj_set_style_bg_color(g_ui_ntp_popup,
-                            lv_color_make(0x60, 0x90, 0xC0), 0);  // light, not bright
+  lv_obj_set_style_bg_color(g_ui_ntp_popup, lv_color_make(0x60, 0x90, 0xC0),
+                            0); // light, not bright
   lv_obj_set_style_bg_opa(g_ui_ntp_popup, LV_OPA_80, 0);
 
   // Rounded corners, border, and padding.
   lv_obj_set_style_radius(g_ui_ntp_popup, 8, 0);
   lv_obj_set_style_border_width(g_ui_ntp_popup, 2, 0);
-  lv_obj_set_style_border_color(g_ui_ntp_popup,
-                                lv_color_make(0x30, 0x50, 0x80), 0);
+  lv_obj_set_style_border_color(g_ui_ntp_popup, lv_color_make(0x30, 0x50, 0x80),
+                                0);
   lv_obj_set_style_pad_all(g_ui_ntp_popup, 12, 0);
   lv_obj_set_style_shadow_width(g_ui_ntp_popup, 8, 0);
   lv_obj_set_style_shadow_opa(g_ui_ntp_popup, LV_OPA_50, 0);
@@ -3356,7 +3369,8 @@ void GuiInit() {
   lv_obj_set_style_pad_right(g_ui_chart_container, 6, 0);
   lv_obj_set_style_pad_bottom(g_ui_chart_container, 6, 0);
 
-  // Vertical spacing between children in the column (buttons row -> chart holder)
+  // Vertical spacing between children in the column (buttons row -> chart
+  // holder)
   lv_obj_set_style_pad_row(g_ui_chart_container, 4, 0);
 
   lv_obj_set_style_bg_opa(g_ui_chart_container, LV_OPA_TRANSP, 0);
@@ -3376,13 +3390,14 @@ void GuiInit() {
   lv_obj_set_style_bg_opa(chart_body, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(chart_body, 0, 0);
   lv_obj_set_style_pad_all(chart_body, 0, 0);
-  lv_obj_set_style_pad_column(chart_body, 8, 0);  // gap between buttons and chart
+  lv_obj_set_style_pad_column(chart_body, 8,
+                              0); // gap between buttons and chart
   lv_obj_clear_flag(chart_body, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_set_flex_flow(chart_body, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(chart_body,
-                        LV_FLEX_ALIGN_START,   // left-to-right
-                        LV_FLEX_ALIGN_CENTER,  // vertically center children
+                        LV_FLEX_ALIGN_START,  // left-to-right
+                        LV_FLEX_ALIGN_CENTER, // vertically center children
                         LV_FLEX_ALIGN_CENTER);
 
   // Left column: vertical range buttons
@@ -3395,9 +3410,7 @@ void GuiInit() {
   lv_obj_clear_flag(range_col, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_set_flex_flow(range_col, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(range_col,
-                        LV_FLEX_ALIGN_START,
-                        LV_FLEX_ALIGN_CENTER,
+  lv_obj_set_flex_align(range_col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
 
   for (size_t i = 0; i < kChartRangeCount; ++i) {
@@ -3436,13 +3449,15 @@ void GuiInit() {
   lv_obj_set_flex_grow(g_ui_chart_holder, 1);
   lv_obj_set_height(g_ui_chart_holder, lv_pct(100));
 
-  // Band layer matches the chart object size/pos (within the padded content box)
+  // Band layer matches the chart object size/pos (within the padded content
+  // box)
   g_ui_chart_band_layer = lv_obj_create(g_ui_chart_holder);
   lv_obj_set_size(g_ui_chart_band_layer, lv_pct(100), lv_pct(100));
   lv_obj_align(g_ui_chart_band_layer, LV_ALIGN_TOP_LEFT, 0, 0);
   lv_obj_set_style_border_width(g_ui_chart_band_layer, 0, 0);
   lv_obj_clear_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_style_bg_color(g_ui_chart_band_layer, lv_color_make(0x18, 0x18, 0x18), 0);
+  lv_obj_set_style_bg_color(g_ui_chart_band_layer,
+                            lv_color_make(0x18, 0x18, 0x18), 0);
   lv_obj_set_style_bg_opa(g_ui_chart_band_layer, LV_OPA_COVER, 0);
 
   // Chart on top
@@ -3459,35 +3474,39 @@ void GuiInit() {
 
   // Make labels readable on dark background
   lv_obj_set_style_text_color(g_ui_chart, lv_color_white(), LV_PART_TICKS);
-  lv_obj_set_style_line_color(g_ui_chart, lv_color_make(0x80, 0x80, 0x80), LV_PART_TICKS);
+  lv_obj_set_style_line_color(g_ui_chart, lv_color_make(0x80, 0x80, 0x80),
+                              LV_PART_TICKS);
 
   // Let the chart be transparent so the band layer is visible.
   lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_TRANSP, 0);  // belt-and-suspenders
+  lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_TRANSP, 0); // belt-and-suspenders
   // lv_obj_set_style_bg_color(g_ui_chart, lv_color_make(0x18, 0x18, 0x18), 0);
 
   // Ensure the chart stays above the band layer.
   lv_obj_move_foreground(g_ui_chart);
 
-  lv_obj_add_event_cb(g_ui_chart, ChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN, nullptr);
+  lv_obj_add_event_cb(g_ui_chart, ChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN,
+                      nullptr);
 
-  g_ui_chart_series =
-      lv_chart_add_series(g_ui_chart, lv_color_make(0x80, 0xD0, 0xFF),
-                          LV_CHART_AXIS_PRIMARY_Y);
+  g_ui_chart_series = lv_chart_add_series(
+      g_ui_chart, lv_color_make(0x80, 0xD0, 0xFF), LV_CHART_AXIS_PRIMARY_Y);
 
-  // Make the plotted series visible (width applies to the line/points drawn for items)
+  // Make the plotted series visible (width applies to the line/points drawn for
+  // items)
   lv_obj_set_style_line_width(g_ui_chart, 2, LV_PART_ITEMS);
   lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_COVER, LV_PART_ITEMS);
 
   // Optional: if you want points to stand out more in scatter mode
-  // lv_obj_set_style_size(g_ui_chart, 3, LV_PART_ITEMS);  // point size (dot radius-ish)
-
+  // lv_obj_set_style_size(g_ui_chart, 3, LV_PART_ITEMS);  // point size (dot
+  // radius-ish)
 
   g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
   lv_label_set_text(g_ui_chart_empty_label, "No history for this range");
   lv_obj_add_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
   lv_obj_align(g_ui_chart_empty_label, LV_ALIGN_CENTER, 0, 0);
   lv_obj_add_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_set_style_text_color(g_ui_chart_empty_label, lv_color_white(),
+                              LV_PART_MAIN);
 
   // Ensure NTP popup is drawn above tiles/map, but below the top bar.
   if (g_ui_ntp_popup != nullptr) {
@@ -3541,8 +3560,7 @@ void UpdateUptimeLabel() {
   static int last_hour = -1;
   static int last_minute = -1;
 
-  if (local_time.tm_hour == last_hour &&
-      local_time.tm_min == last_minute) {
+  if (local_time.tm_hour == last_hour && local_time.tm_min == last_minute) {
     // No visible change required.
     return;
   }
@@ -3558,7 +3576,6 @@ void UpdateUptimeLabel() {
 
   lv_label_set_text(g_ui_label_clock, buffer);
 }
-
 
 // Dummy data: one node per RoomDef with "Room" and "Underbelly" sensors.
 // This version deliberately creates at least one instance of each "issue":
@@ -4705,8 +4722,8 @@ static void RoomMapLoop(uint32_t now_ms) {
 // History chart overlay (map view)
 // ---------------------------------------------------------------------------
 
-static constexpr float kChartTempScale = 10.0f;   // store temps as 0.1 units
-static constexpr double kChartHoursScale = 10.0;  // store hours as 0.1h units
+static constexpr float kChartTempScale = 10.0f;  // store temps as 0.1 units
+static constexpr double kChartHoursScale = 10.0; // store hours as 0.1h units
 
 static void UpdateRangeButtonStates() {
   const lv_color_t active_bg = lv_color_make(0x50, 0x70, 0x90);
@@ -4769,64 +4786,74 @@ static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
   lv_obj_clear_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
   lv_obj_update_layout(g_ui_chart_holder);
 
-  const lv_coord_t w = lv_obj_get_width(g_ui_chart_band_layer);
-  const lv_coord_t h = lv_obj_get_height(g_ui_chart_band_layer);
-  if (w <= 0 || h <= 0) {
+  const lv_coord_t layer_width = lv_obj_get_width(g_ui_chart_band_layer);
+  const lv_coord_t layer_height = lv_obj_get_height(g_ui_chart_band_layer);
+  if (layer_width <= 0 || layer_height <= 0) {
     return;
   }
 
   const uint32_t stride_days = (range_days > 10U) ? 2U : 1U;
-  const time_t stride = static_cast<time_t>(stride_days) * 24 * 60 * 60;
+  const time_t stride_seconds = static_cast<time_t>(stride_days) * 24 * 60 * 60;
 
-  // Align the first band to the nearest day boundary at or before start.
-  time_t band_start = range_start_epoch;
+  // Align the first band to local midnight at/before start.
+  time_t band_start_epoch = range_start_epoch;
   struct tm start_tm;
   if (localtime_r(&range_start_epoch, &start_tm) != nullptr) {
     start_tm.tm_hour = 0;
     start_tm.tm_min = 0;
     start_tm.tm_sec = 0;
-    band_start = mktime(&start_tm);
+    band_start_epoch = mktime(&start_tm);
   }
 
-  int band_index = 0;
-  for (time_t t = band_start; t < range_end_epoch; t += stride) {
-    const time_t band_end = t + stride;
-    const double start_frac =
-        (static_cast<double>(t - range_start_epoch) /
-         static_cast<double>(range_end_epoch - range_start_epoch));
-    const double end_frac =
-        (static_cast<double>(band_end - range_start_epoch) /
-         static_cast<double>(range_end_epoch - range_start_epoch));
+  const double range_span =
+      static_cast<double>(range_end_epoch - range_start_epoch);
 
-    const lv_coord_t x = static_cast<lv_coord_t>(start_frac * w);
-    lv_coord_t width = static_cast<lv_coord_t>((end_frac - start_frac) * w);
+  // Pick colors that actually separate from the screen bg (0x25) and each
+  // other.
+  const lv_color_t band_light = lv_color_make(0x18, 0x18, 0x18);
+  const lv_color_t band_dark = lv_color_make(0x3A, 0x3A, 0x3A);
+  const lv_opa_t band_opa =
+      LV_OPA_80; // was 50; 80 is still "subtle" but visible
+
+  int band_index = 0;
+  for (time_t t = band_start_epoch; t < range_end_epoch; t += stride_seconds) {
+    const time_t band_end_epoch = t + stride_seconds;
+
+    // Clamp the segment to the visible chart range so we don’t draw oversized
+    // bands.
+    const time_t seg_start = (t < range_start_epoch) ? range_start_epoch : t;
+    const time_t seg_end =
+        (band_end_epoch > range_end_epoch) ? range_end_epoch : band_end_epoch;
+
+    if (seg_end <= seg_start) {
+      ++band_index;
+      continue;
+    }
+
+    const double start_frac =
+        static_cast<double>(seg_start - range_start_epoch) / range_span;
+    const double end_frac =
+        static_cast<double>(seg_end - range_start_epoch) / range_span;
+
+    const lv_coord_t x = static_cast<lv_coord_t>(start_frac * layer_width);
+    lv_coord_t width =
+        static_cast<lv_coord_t>((end_frac - start_frac) * layer_width);
     if (width < 1) {
       width = 1;
     }
 
     lv_obj_t *band = lv_obj_create(g_ui_chart_band_layer);
-    lv_obj_set_size(band, width, h);
     lv_obj_set_pos(band, x, 0);
+    lv_obj_set_size(band, width, layer_height);
+
     lv_obj_set_style_border_width(band, 0, 0);
     lv_obj_set_style_pad_all(band, 0, 0);
     lv_obj_clear_flag(band, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(band, LV_OBJ_FLAG_IGNORE_LAYOUT);
 
-    const bool light = (band_index % 2 == 0);
-
-    lv_obj_set_style_bg_color(band,
-        light ? lv_color_make(0x1C, 0x1C, 0x1C)
-              : lv_color_make(0x26, 0x26, 0x26),
-        0);
-
-    // Solid fill is easiest to see
-    lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
-
-    // Optional: add a subtle right-edge divider so day boundaries pop
-    lv_obj_set_style_border_width(band, 1, 0);
-    lv_obj_set_style_border_side(band, LV_BORDER_SIDE_RIGHT, 0);
-    lv_obj_set_style_border_color(band, lv_color_make(0x3A, 0x3A, 0x3A), 0);
-    lv_obj_set_style_border_opa(band, LV_OPA_80, 0);
+    const bool light = ((band_index % 2) == 0);
+    lv_obj_set_style_bg_color(band, light ? band_light : band_dark, 0);
+    lv_obj_set_style_bg_opa(band, band_opa, 0);
 
     ++band_index;
   }
@@ -4882,7 +4909,8 @@ static void BuildHistoryChartForSelection() {
   }
 
   std::vector<MeshNode::SensorHistorySample> history;
-  if (!node->GetSensorHistoryByLabel(g_chart_selection.sensor_label, &history) ||
+  if (!node->GetSensorHistoryByLabel(g_chart_selection.sensor_label,
+                                     &history) ||
       history.empty()) {
     ShowChartMessage("No history yet");
     return;
@@ -4891,8 +4919,8 @@ static void BuildHistoryChartForSelection() {
   const ChartRangeOption &range =
       kChartRanges[std::min(g_chart_active_range_index, kChartRangeCount - 1)];
 
-  const uint64_t range_ms = static_cast<uint64_t>(range.days) * 24ULL * 60ULL *
-                            60ULL * 1000ULL;
+  const uint64_t range_ms =
+      static_cast<uint64_t>(range.days) * 24ULL * 60ULL * 60ULL * 1000ULL;
 
   const uint32_t now_ms = millis();
   time_t now_epoch = time(nullptr);
@@ -4916,7 +4944,9 @@ static void BuildHistoryChartForSelection() {
   const uint32_t end_ms = (latest_ms > 0) ? latest_ms : now_ms;
 
   const time_t start_epoch =
-      end_epoch > 0 ? end_epoch - static_cast<time_t>(range.days * 24UL * 60UL * 60UL) : 0;
+      end_epoch > 0
+          ? end_epoch - static_cast<time_t>(range.days * 24UL * 60UL * 60UL)
+          : 0;
 
   std::vector<ChartPoint> points;
   points.reserve(history.size());
@@ -4974,7 +5004,8 @@ static void BuildHistoryChartForSelection() {
             });
 
   const double total_hours = static_cast<double>(range.days) * 24.0;
-  const lv_coord_t x_max = static_cast<lv_coord_t>(ceil(total_hours * kChartHoursScale));
+  const lv_coord_t x_max =
+      static_cast<lv_coord_t>(ceil(total_hours * kChartHoursScale));
 
   // Add a small margin around extremes.
   if (min_temp == max_temp) {
@@ -4989,8 +5020,10 @@ static void BuildHistoryChartForSelection() {
   lv_chart_set_point_count(g_ui_chart, points.size());
 
   auto ClampU8 = [](uint32_t value, uint32_t low, uint32_t high) -> uint8_t {
-    if (value < low) return static_cast<uint8_t>(low);
-    if (value > high) return static_cast<uint8_t>(high);
+    if (value < low)
+      return static_cast<uint8_t>(low);
+    if (value > high)
+      return static_cast<uint8_t>(high);
     return static_cast<uint8_t>(value);
   };
 
@@ -4998,16 +5031,22 @@ static void BuildHistoryChartForSelection() {
 
   // X major ticks based on days (keeps it readable)
   uint8_t x_major = 6;
-  if (range.days == 1)      x_major = 7;   // ~every 4h
-  else if (range.days == 2) x_major = 5;   // ~every 12h
-  else if (range.days <= 7) x_major = ClampU8(range.days + 1, 5, 9); // daily-ish
-  else                      x_major = 7;   // ~every 5 days for 30d
+  if (range.days == 1)
+    x_major = 7; // ~every 4h
+  else if (range.days == 2)
+    x_major = 5; // ~every 12h
+  else if (range.days <= 7)
+    x_major = ClampU8(range.days + 1, 5, 9); // daily-ish
+  else
+    x_major = 7; // ~every 5 days for 30d
 
   // Y major ticks based on span
   const float span = max_temp - min_temp;
   float step = 1.0f;
-  if (span > 25.0f) step = 5.0f;
-  else if (span > 12.0f) step = 2.0f;
+  if (span > 25.0f)
+    step = 5.0f;
+  else if (span > 12.0f)
+    step = 2.0f;
 
   uint8_t y_major = ClampU8(static_cast<uint32_t>(ceil(span / step)) + 1, 4, 8);
 
@@ -5015,14 +5054,14 @@ static void BuildHistoryChartForSelection() {
   const uint8_t x_draw_size = show_time ? 90 : 60;
   const uint8_t y_draw_size = 50;
 
-  lv_chart_set_axis_tick(g_ui_chart, LV_CHART_AXIS_PRIMARY_X, 8, 4, 6, 1, true,
-                        x_draw_size);
-  lv_chart_set_axis_tick(g_ui_chart, LV_CHART_AXIS_PRIMARY_Y, 8, 4, 5, 1, true,
-                        y_draw_size);
+  lv_chart_set_axis_tick(g_ui_chart, LV_CHART_AXIS_PRIMARY_X, 8, 4, x_major, 1,
+                         true, x_draw_size);
+
+  lv_chart_set_axis_tick(g_ui_chart, LV_CHART_AXIS_PRIMARY_Y, 8, 4, y_major, 1,
+                         true, y_draw_size);
 
   // Make the grid match the tick density (horizontal, vertical)
-  lv_chart_set_div_line_count(g_ui_chart,
-                              (y_major >= 2) ? (y_major - 1) : 1,
+  lv_chart_set_div_line_count(g_ui_chart, (y_major >= 2) ? (y_major - 1) : 1,
                               (x_major >= 2) ? (x_major - 1) : 1);
 
   lv_chart_set_range(g_ui_chart, LV_CHART_AXIS_PRIMARY_X, 0, x_max);
@@ -5044,7 +5083,8 @@ static void BuildHistoryChartForSelection() {
   g_chart_axis_ctx.x_start_hours = 0.0;
   g_chart_axis_ctx.x_end_hours = total_hours;
   g_chart_axis_ctx.has_epoch = use_epoch && start_epoch > 0;
-  g_chart_axis_ctx.range_start_epoch = g_chart_axis_ctx.has_epoch ? start_epoch : 0;
+  g_chart_axis_ctx.range_start_epoch =
+      g_chart_axis_ctx.has_epoch ? start_epoch : 0;
 
   if (g_chart_axis_ctx.has_epoch) {
     const time_t range_end =
@@ -5079,7 +5119,7 @@ static void RoomChartRequest(const RoomDef &def) {
   }
 
   const String title = String("History: ") + g_chart_selection.room_label +
-                      " / " + g_chart_selection.sensor_label;
+                       " / " + g_chart_selection.sensor_label;
   SetTopBarForChart(true, title);
   BuildHistoryChartForSelection();
 }
@@ -5095,8 +5135,8 @@ static void CloseHistoryChart() {
     lv_obj_clear_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
   }
 
-  const char *title = (g_ui_view_mode == kUiViewModeMap) ? "House Map"
-                                                         : "Room Temps";
+  const char *title =
+      (g_ui_view_mode == kUiViewModeMap) ? "House Map" : "Room Temps";
   SetTopBarForChart(false, title);
 }
 
@@ -5105,8 +5145,7 @@ static void RoomTapEvent(lv_event_t *e) {
     return;
   }
 
-  const RoomDef *def =
-      static_cast<const RoomDef *>(lv_event_get_user_data(e));
+  const RoomDef *def = static_cast<const RoomDef *>(lv_event_get_user_data(e));
   if (def == nullptr) {
     return;
   }
@@ -5133,8 +5172,8 @@ static void ChartDrawEvent(lv_event_t *e) {
   if (dsc == nullptr || dsc->class_p != &lv_chart_class) {
     return;
   }
-  if (dsc->type != LV_CHART_DRAW_PART_TICK_LABEL ||
-      dsc->text == nullptr || dsc->text_length <= 0) {
+  if (dsc->type != LV_CHART_DRAW_PART_TICK_LABEL || dsc->text == nullptr ||
+      dsc->text_length <= 0) {
     return;
   }
 
@@ -5143,8 +5182,8 @@ static void ChartDrawEvent(lv_event_t *e) {
 
   if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
     const int32_t temp_scale_tenths =
-        static_cast<int32_t>(kChartTempScale + 0.5f);  // 10
-    const int32_t scaled_temp = static_cast<int32_t>(dsc->value);  // 0.1 units
+        static_cast<int32_t>(kChartTempScale + 0.5f);             // 10
+    const int32_t scaled_temp = static_cast<int32_t>(dsc->value); // 0.1 units
 
     const int32_t whole = scaled_temp / temp_scale_tenths;
     int32_t frac = scaled_temp % temp_scale_tenths;
@@ -5152,42 +5191,41 @@ static void ChartDrawEvent(lv_event_t *e) {
       frac = -frac;
     }
 
-    lv_snprintf(dsc->text, dsc->text_length,
-                "%ld.%01ld%s",
-                static_cast<long>(whole),
-                static_cast<long>(frac),
+    lv_snprintf(dsc->text, dsc->text_length, "%ld.%01ld%s",
+                static_cast<long>(whole), static_cast<long>(frac),
                 DisplayUnitsLabel());
     return;
   }
 
   if (dsc->id == LV_CHART_AXIS_PRIMARY_X) {
     const int32_t hours_scale_tenths =
-        static_cast<int32_t>(kChartHoursScale + 0.5);  // 10
-    const int32_t scaled_hours = static_cast<int32_t>(dsc->value);  // 0.1h units
+        static_cast<int32_t>(kChartHoursScale + 0.5);              // 10
+    const int32_t scaled_hours = static_cast<int32_t>(dsc->value); // 0.1h units
 
     if (g_chart_axis_ctx.has_epoch && g_chart_axis_ctx.range_start_epoch > 0) {
       // Convert 0.1h ticks to seconds without floating point:
-      // seconds = scaled_hours * 3600 / hours_scale_tenths  (exact for scale=10)
+      // seconds = scaled_hours * 3600 / hours_scale_tenths  (exact for
+      // scale=10)
       const int64_t delta_seconds =
           (static_cast<int64_t>(scaled_hours) * 3600LL) /
           static_cast<int64_t>(hours_scale_tenths);
 
-      const time_t tick_epoch =
-          g_chart_axis_ctx.range_start_epoch + static_cast<time_t>(delta_seconds);
+      const time_t tick_epoch = g_chart_axis_ctx.range_start_epoch +
+                                static_cast<time_t>(delta_seconds);
 
       struct tm tm_info;
       if (localtime_r(&tick_epoch, &tm_info) != nullptr) {
         const bool show_time = (g_chart_active_range_index <= 1);
         const char *fmt = show_time ? "%m/%d\n%H:%M" : "%m/%d";
-        (void)strftime(dsc->text, static_cast<size_t>(dsc->text_length), fmt, &tm_info);
+        (void)strftime(dsc->text, static_cast<size_t>(dsc->text_length), fmt,
+                       &tm_info);
       }
     } else {
       // Match "%.0fh" rounding (nearest int) using integers.
       const int32_t half = hours_scale_tenths / 2;
       const int32_t rounded_hours =
-          (scaled_hours >= 0)
-              ? (scaled_hours + half) / hours_scale_tenths
-              : (scaled_hours - half) / hours_scale_tenths;
+          (scaled_hours >= 0) ? (scaled_hours + half) / hours_scale_tenths
+                              : (scaled_hours - half) / hours_scale_tenths;
 
       lv_snprintf(dsc->text, dsc->text_length, "%ldh",
                   static_cast<long>(rounded_hours));
@@ -5197,7 +5235,8 @@ static void ChartDrawEvent(lv_event_t *e) {
 }
 
 static void RoomMapSetViewMode(UiViewMode mode) {
-  if (g_ui_view_mode == mode && !(g_chart_selection.active && mode != kUiViewModeMap)) {
+  if (g_ui_view_mode == mode &&
+      !(g_chart_selection.active && mode != kUiViewModeMap)) {
     return;
   }
   g_ui_view_mode = mode;
@@ -5217,7 +5256,7 @@ static void RoomMapSetViewMode(UiViewMode mode) {
         lv_obj_clear_flag(g_ui_chart_container, LV_OBJ_FLAG_HIDDEN);
       }
       const String title = String("History: ") + g_chart_selection.room_label +
-                          " / " + g_chart_selection.sensor_label;
+                           " / " + g_chart_selection.sensor_label;
       SetTopBarForChart(true, title);
     }
   }
@@ -5304,8 +5343,6 @@ static void SilenceButtonEvent(lv_event_t *e) {
   UpdateSilenceButtonAppearance();
 }
 
-
-
 static void BellyButtonEvent(lv_event_t *e) {
   (void)e;
   g_map_use_underbelly = !g_map_use_underbelly;
@@ -5340,7 +5377,8 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
   g_buzzer_any_warning = false;
 
   auto mesh_node_list = mesh.getNodeList();
-  std::vector<uint32_t> connected_ids(mesh_node_list.begin(), mesh_node_list.end());
+  std::vector<uint32_t> connected_ids(mesh_node_list.begin(),
+                                      mesh_node_list.end());
   auto is_connected = [&](uint32_t node_id) -> bool {
     for (uint32_t connected_id : connected_ids) {
       if (connected_id == node_id) {
@@ -5359,8 +5397,9 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
 
     const bool node_connected = is_connected(id);
     const uint32_t age_min = node->ComputeAgeMinutes(now_ms);
-    const bool is_missing = !node_connected && (g_stale_minutes_threshold > 0U) &&
-                           (age_min >= g_stale_minutes_threshold);
+    const bool is_missing = !node_connected &&
+                            (g_stale_minutes_threshold > 0U) &&
+                            (age_min >= g_stale_minutes_threshold);
     const bool is_stale = node_connected && (g_stale_minutes_threshold > 0U) &&
                           (age_min >= g_stale_minutes_threshold);
     const bool sequence_stuck =
@@ -5381,10 +5420,11 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
         prev_state = prev_it->second;
       }
 
-      bool low_alert = false, high_alert = false, low_warn = false, high_warn = false;
-      const AlertState state = EvaluateSensorState(sensor, node_mute, prev_state,
-                                                  &low_alert, &high_alert, &low_warn,
-                                                  &high_warn);
+      bool low_alert = false, high_alert = false, low_warn = false,
+           high_warn = false;
+      const AlertState state =
+          EvaluateSensorState(sensor, node_mute, prev_state, &low_alert,
+                              &high_alert, &low_warn, &high_warn);
       if (state == AlertState::kAlert) {
         node_has_alert = true;
         g_buzzer_any_alert = true;
@@ -5393,11 +5433,13 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
         g_buzzer_any_warning = true;
       }
 
-      if (node_normal_detail.isEmpty() && sensor.has_value && !isnan(sensor.temp_c)) {
+      if (node_normal_detail.isEmpty() && sensor.has_value &&
+          !isnan(sensor.temp_c)) {
         node_normal_detail = FormatTempForMessage(sensor.temp_c);
       }
 
-      const String subject = NodeDisplayName(node) + " / " + SensorDisplayName(sensor);
+      const String subject =
+          NodeDisplayName(node) + " / " + SensorDisplayName(sensor);
 
       String detail;
       String resolved_detail;
@@ -5405,12 +5447,17 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
         resolved_detail = FormatTempForMessage(sensor.temp_c);
       }
 
-      if (state != AlertState::kNormal && sensor.has_value && !isnan(sensor.temp_c)) {
+      if (state != AlertState::kNormal && sensor.has_value &&
+          !isnan(sensor.temp_c)) {
         detail = FormatTempForMessage(sensor.temp_c);
-        if (low_alert) detail += " < alert low";
-        if (high_alert) detail += " > alert high";
-        if (low_warn && !low_alert) detail += " < warn low";
-        if (high_warn && !high_alert) detail += " > warn high";
+        if (low_alert)
+          detail += " < alert low";
+        if (high_alert)
+          detail += " > alert high";
+        if (low_warn && !low_alert)
+          detail += " < warn low";
+        if (high_warn && !high_alert)
+          detail += " > warn high";
         const String limits = FormatLimitSummary();
         if (limits.length() > 0) {
           detail += " (";
@@ -5420,7 +5467,8 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
       }
 
       EmitStateNotification(sensor_key, state, subject, detail, resolved_detail,
-                            /*cache=*/true, /*include_normal_detail_on_resolve=*/true,
+                            /*cache=*/true,
+                            /*include_normal_detail_on_resolve=*/true,
                             send_notifications);
     }
 
@@ -5454,8 +5502,8 @@ static void ProcessNtfyAlerts(uint32_t now_ms) {
     }
 
     const String node_key = String("N:") + node->node_id_str();
-    EmitStateNotification(node_key, node_state, NodeDisplayName(node), node_detail,
-                          node_normal_detail, /*cache=*/true,
+    EmitStateNotification(node_key, node_state, NodeDisplayName(node),
+                          node_detail, node_normal_detail, /*cache=*/true,
                           /*include_normal_detail_on_resolve=*/false,
                           send_notifications);
   }
@@ -5507,8 +5555,8 @@ static std::vector<MeshNode *> SortedNodesByLabelOrId() {
   return nodes;
 }
 
-static std::vector<const MeshNode::Sensor *> SortedSensorsByLabelOrId(
-    const MeshNode &node) {
+static std::vector<const MeshNode::Sensor *>
+SortedSensorsByLabelOrId(const MeshNode &node) {
   std::vector<const MeshNode::Sensor *> sensors;
   sensors.reserve(node.sensors().size());
   for (const auto &sensor : node.sensors()) {
@@ -5517,8 +5565,10 @@ static std::vector<const MeshNode::Sensor *> SortedSensorsByLabelOrId(
 
   std::sort(sensors.begin(), sensors.end(),
             [](const MeshNode::Sensor *a, const MeshNode::Sensor *b) {
-              const bool a_has_label = (a != nullptr) && (a->label.length() > 0);
-              const bool b_has_label = (b != nullptr) && (b->label.length() > 0);
+              const bool a_has_label =
+                  (a != nullptr) && (a->label.length() > 0);
+              const bool b_has_label =
+                  (b != nullptr) && (b->label.length() > 0);
               if (a_has_label != b_has_label) {
                 // Unlabeled sensors first.
                 return !a_has_label;
@@ -5539,7 +5589,8 @@ static std::vector<const MeshNode::Sensor *> SortedSensorsByLabelOrId(
 }
 
 static void MaybeSendNtfySummary(uint32_t now_ms) {
-  if (!g_ntfy_config.enabled || !g_ntfy_config.summary_enabled || g_use_dummy_data) {
+  if (!g_ntfy_config.enabled || !g_ntfy_config.summary_enabled ||
+      g_use_dummy_data) {
     return;
   }
   if (g_ntfy_config.summary_period_min == 0U) {
@@ -5675,7 +5726,7 @@ void DisplayLoop() {
   GuiUpdateNtpStatusIcon();
 
   UpdateSilenceButtonAppearance();
-  
+
   lvgl_port_unlock();
 }
 
@@ -5723,7 +5774,8 @@ void BuzzerLoop() {
     g_buzzer_silence_state = kBuzzerSilenceIdle;
   }
 
-  const bool silence_in_effect = (g_buzzer_silence_state == kBuzzerSilenceActive);
+  const bool silence_in_effect =
+      (g_buzzer_silence_state == kBuzzerSilenceActive);
 
   // If a real alert episode is active (and not silenced), it owns the buzzer
   // and cancels any console-driven test.
@@ -5853,8 +5905,8 @@ static void CmdI2cScan(void *ctx, int argc, const String argv[], Print &out) {
   (void)argv;
   PrintCommandHeader(out, argc, argv);
 
-  constexpr i2c_port_t kPort = static_cast<i2c_port_t>(
-      ESP_PANEL_BOARD_TOUCH_I2C_HOST_ID);
+  constexpr i2c_port_t kPort =
+      static_cast<i2c_port_t>(ESP_PANEL_BOARD_TOUCH_I2C_HOST_ID);
 
   out.printf("[I2C] host=%d SDA=%d SCL=%d freq=%uHz\n", static_cast<int>(kPort),
              ESP_PANEL_BOARD_TOUCH_I2C_IO_SDA, ESP_PANEL_BOARD_TOUCH_I2C_IO_SCL,
@@ -5872,7 +5924,8 @@ static void CmdI2cScan(void *ctx, int argc, const String argv[], Print &out) {
         err = i2c_master_write_byte(cmd, (addr << 1) | I2C_MASTER_WRITE,
                                     true /*expect ack*/);
       }
-      if (err == ESP_OK) err = i2c_master_stop(cmd);
+      if (err == ESP_OK)
+        err = i2c_master_stop(cmd);
       if (err == ESP_OK) {
         err = i2c_master_cmd_begin(kPort, cmd, pdMS_TO_TICKS(20));
       }
@@ -5884,10 +5937,12 @@ static void CmdI2cScan(void *ctx, int argc, const String argv[], Print &out) {
       driver_missing = true;
       break;
     }
-    if (err == ESP_OK) found[addr] = true;
+    if (err == ESP_OK)
+      found[addr] = true;
   }
 
-  if (driver_missing) return;
+  if (driver_missing)
+    return;
 
   out.println(F("     0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f"));
   for (int base = 0; base < 128; base += 16) {
@@ -6135,8 +6190,9 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
                    sensor->corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       } else {
-        out.printf("  %s: %s%s%s (age=%lu min)\n", addr16.c_str(), temp_s.c_str(),
-                   unit_label, sensor->corrected ? " (corr)" : "",
+        out.printf("  %s: %s%s%s (age=%lu min)\n", addr16.c_str(),
+                   temp_s.c_str(), unit_label,
+                   sensor->corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       }
     }
@@ -6658,7 +6714,9 @@ static void CmdLimits(void *ctx, int argc, const String argv[], Print &out) {
   auto FromC = [&](float v) {
     return g_display_fahrenheit ? (v * 1.8f + 32.0f) : v;
   };
-  auto DeltaToC = [&](float v) { return g_display_fahrenheit ? (v / 1.8f) : v; };
+  auto DeltaToC = [&](float v) {
+    return g_display_fahrenheit ? (v / 1.8f) : v;
+  };
   auto DeltaFromC = [&](float v) {
     return g_display_fahrenheit ? (v * 1.8f) : v;
   };
@@ -6821,10 +6879,10 @@ static void CmdNtfy(void *ctx, int argc, const String argv[], Print &out) {
       return;
     }
     g_ntfy_config.enabled = argv[2].equalsIgnoreCase("on") ||
-                            argv[2].equalsIgnoreCase("true") ||
-                            argv[2] == "1";
+                            argv[2].equalsIgnoreCase("true") || argv[2] == "1";
     SaveNtfySettings();
-    out.printf("ntfy: enabled=%s (saved)\n", g_ntfy_config.enabled ? "yes" : "no");
+    out.printf("ntfy: enabled=%s (saved)\n",
+               g_ntfy_config.enabled ? "yes" : "no");
     return;
   }
 
@@ -7032,7 +7090,8 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
     g_buzzer_beep_start_ms = 0;
     g_buzzer_last_beep_ms = 0;
 
-    out.println(F("buzzer: silence ACTIVE (will auto re-arm after alerts clear)"));
+    out.println(
+        F("buzzer: silence ACTIVE (will auto re-arm after alerts clear)"));
     return;
   }
 
@@ -7062,9 +7121,11 @@ static void CmdBuzzer(void *ctx, int argc, const String argv[], Print &out) {
   out.println(F("  buzzer warn <ms>          - set warning gap"));
   out.println(F("  buzzer alert <ms>         - set alert gap"));
   out.println(F("  buzzer test [alert|warn|off]"));
-  out.println(F("                            - start/stop buzzer test pattern"));
+  out.println(
+      F("                            - start/stop buzzer test pattern"));
   out.println(F("  buzzer silence            - same as GUI Silence button"));
-  out.println(F("  buzzer stop               - stop test and force buzzer off"));
+  out.println(
+      F("  buzzer stop               - stop test and force buzzer off"));
 }
 
 static void CmdFlash(void *ctx, int argc, const String argv[], Print &out) {
@@ -7455,9 +7516,9 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   if (argc < 2) {
-    out.println(
-        F("usage: wifi status | wifi scan | wifi connect | wifi ssid <value...> | "
-          "wifi password <value...> | wifi clear"));
+    out.println(F("usage: wifi status | wifi scan | wifi connect | wifi ssid "
+                  "<value...> | "
+                  "wifi password <value...> | wifi clear"));
     return;
   }
 
@@ -7472,30 +7533,30 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
     const wl_status_t st = WiFi.status();
     const char *st_str = "UNKNOWN";
     switch (st) {
-      case WL_IDLE_STATUS:
-        st_str = "IDLE";
-        break;
-      case WL_NO_SSID_AVAIL:
-        st_str = "NO_SSID";
-        break;
-      case WL_SCAN_COMPLETED:
-        st_str = "SCAN_DONE";
-        break;
-      case WL_CONNECTED:
-        st_str = "CONNECTED";
-        break;
-      case WL_CONNECT_FAILED:
-        st_str = "CONNECT_FAILED";
-        break;
-      case WL_CONNECTION_LOST:
-        st_str = "CONNECTION_LOST";
-        break;
-      case WL_DISCONNECTED:
-        st_str = "DISCONNECTED";
-        break;
-      default:
-        st_str = "UNKNOWN";
-        break;
+    case WL_IDLE_STATUS:
+      st_str = "IDLE";
+      break;
+    case WL_NO_SSID_AVAIL:
+      st_str = "NO_SSID";
+      break;
+    case WL_SCAN_COMPLETED:
+      st_str = "SCAN_DONE";
+      break;
+    case WL_CONNECTED:
+      st_str = "CONNECTED";
+      break;
+    case WL_CONNECT_FAILED:
+      st_str = "CONNECT_FAILED";
+      break;
+    case WL_CONNECTION_LOST:
+      st_str = "CONNECTION_LOST";
+      break;
+    case WL_DISCONNECTED:
+      st_str = "DISCONNECTED";
+      break;
+    default:
+      st_str = "UNKNOWN";
+      break;
     }
     out.printf("wifi_status=%s (%d)\n", st_str, static_cast<int>(st));
 
@@ -7549,15 +7610,12 @@ static void CmdWifi(void *ctx, int argc, const String argv[], Print &out) {
       const String bssid = WiFi.BSSIDstr(i);
       const String ssid = WiFi.SSID(i);
 
-      out.printf("%3d  %4d  %4d  %-20s  %17s  %s\n", i,
-                 static_cast<int>(rssi),
-                 static_cast<int>(channel),
-                 auth_str,
-                 bssid.c_str(),
+      out.printf("%3d  %4d  %4d  %-20s  %17s  %s\n", i, static_cast<int>(rssi),
+                 static_cast<int>(channel), auth_str, bssid.c_str(),
                  ssid.c_str());
     }
 
-    WiFi.scanDelete();  // free scan results
+    WiFi.scanDelete(); // free scan results
     return;
   }
 
@@ -8072,13 +8130,12 @@ static void HandleRootProbe(uint32_t from, const JsonDocument &probe_doc) {
   reply["type"] = "root_ack";
   reply["rootId"] = mesh.getNodeId();
   reply["uptimeMs"] = static_cast<uint32_t>(now_ms);
-  reply["toNodeId"] = leaf_node_id;  // for debugging on the leaf side
+  reply["toNodeId"] = leaf_node_id; // for debugging on the leaf side
 
   String out;
   serializeJson(reply, out);
 
-  DLOG("[ROOT TX ack] to=0x%08lX: %s\n",
-       static_cast<unsigned long>(from),
+  DLOG("[ROOT TX ack] to=0x%08lX: %s\n", static_cast<unsigned long>(from),
        out.c_str());
 
   // Unicast back to the probing leaf.
@@ -8092,10 +8149,8 @@ static void HandleRootProbe(uint32_t from, const JsonDocument &probe_doc) {
 void OnReceiveRoot(uint32_t from, String &msg) {
   bool structure_changed = false;
 
-  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n",
-       static_cast<unsigned long>(from),
-       static_cast<unsigned>(msg.length()),
-       msg.c_str());
+  DLOG("[ROOT RX] from=0x%08lX len=%u: %s\n", static_cast<unsigned long>(from),
+       static_cast<unsigned>(msg.length()), msg.c_str());
 
   if (g_use_dummy_data) {
     // In dummy mode, ignore real traffic (including probes).
@@ -8151,8 +8206,7 @@ void OnReceiveRoot(uint32_t from, String &msg) {
   }
 
   DLOG("  nodeId=0x%08lX busGpio=%d sensors=%u\n",
-       static_cast<unsigned long>(node_id),
-       bus_gpio,
+       static_cast<unsigned long>(node_id), bus_gpio,
        static_cast<unsigned>(new_sensor_count));
 
   // Apply any persisted per-node metadata (rank, mute, etc.) as soon as a
@@ -8386,16 +8440,16 @@ static void MaybeSendQueuedNtfyToBridge() {
       "[NTFY] queued for bridge len=%u cache=%s summary=%s title=%s seq=%lu\n",
       static_cast<unsigned>(pending.message.length()),
       pending.cache_when_offline ? "yes" : "no",
-      pending.is_summary ? "yes" : "no",
-      pending.title.c_str(), static_cast<unsigned long>(pending.sequence));
+      pending.is_summary ? "yes" : "no", pending.title.c_str(),
+      static_cast<unsigned long>(pending.sequence));
 
   if (!g_bridge_passthrough && g_debug_enabled) {
-    Serial.printf(
-        "[GUI->BRIDGE SENT] ntfy_request cache=%s summary=%s title=%s seq=%lu len=%u\n",
-        pending.cache_when_offline ? "yes" : "no",
-        pending.is_summary ? "yes" : "no",
-        pending.title.c_str(), static_cast<unsigned long>(pending.sequence),
-        static_cast<unsigned>(pending.message.length()));
+    Serial.printf("[GUI->BRIDGE SENT] ntfy_request cache=%s summary=%s "
+                  "title=%s seq=%lu len=%u\n",
+                  pending.cache_when_offline ? "yes" : "no",
+                  pending.is_summary ? "yes" : "no", pending.title.c_str(),
+                  static_cast<unsigned long>(pending.sequence),
+                  static_cast<unsigned>(pending.message.length()));
   }
 }
 
@@ -8405,10 +8459,9 @@ static void HandleNtfyAckFromBridge(const JsonDocument &doc) {
     return;
   }
 
-  auto it = std::find_if(g_ntfy_pending_bridge.begin(), g_ntfy_pending_bridge.end(),
-                         [&](const QueuedNtfy &pending) {
-                           return pending.sequence == seq;
-                         });
+  auto it = std::find_if(
+      g_ntfy_pending_bridge.begin(), g_ntfy_pending_bridge.end(),
+      [&](const QueuedNtfy &pending) { return pending.sequence == seq; });
   if (it == g_ntfy_pending_bridge.end()) {
     if (g_debug_enabled) {
       Serial.printf("[NTFY] ack for unknown seq=%lu\n",
@@ -8503,7 +8556,8 @@ static void SendNtfyRequestToBridge(const String &message,
                                     bool cache_when_offline, bool is_summary,
                                     const char *title) {
   if (!g_ntfy_config.enabled || message.isEmpty()) {
-    Serial.println(F("[NTFY] not sending to bridge (disabled or empty message)"));
+    Serial.println(
+        F("[NTFY] not sending to bridge (disabled or empty message)"));
     return;
   }
 
@@ -8527,7 +8581,7 @@ static void MaybeRequestTimeFromBridge(const char *reason, bool force_ntp) {
   constexpr uint32_t kMinIntervalMs = 2000;
   if (g_last_time_request_ms != 0U &&
       (now_ms - g_last_time_request_ms) < kMinIntervalMs) {
-    return;  // Avoid spamming the bridge.
+    return; // Avoid spamming the bridge.
   }
 
   SendTimeRequestToBridge(reason, force_ntp);
@@ -8582,7 +8636,8 @@ static void ProcessBridgeSerial() {
 }
 
 static void ProcessBridgePassthroughTx() {
-  if (!g_bridge_passthrough) return;
+  if (!g_bridge_passthrough)
+    return;
 
   while (Serial.available() > 0) {
     const char ch = Serial.read();
@@ -8631,11 +8686,12 @@ void setup() {
                       BRIDGE_GUI_TX_PIN);
   delay(2000);
 
-  #ifdef ESP_ARDUINO_VERSION_STR
-    Serial.printf("ESP32 Arduino core version: %s\n", ESP_ARDUINO_VERSION_STR);
-  #else
-    Serial.println("ESP32 Arduino core version macro not defined (likely core < 3.x).");
-  #endif
+#ifdef ESP_ARDUINO_VERSION_STR
+  Serial.printf("ESP32 Arduino core version: %s\n", ESP_ARDUINO_VERSION_STR);
+#else
+  Serial.println(
+      "ESP32 Arduino core version macro not defined (likely core < 3.x).");
+#endif
 
   Serial.printf("ESP-IDF version        : %s\n", esp_get_idf_version());
 
@@ -8677,8 +8733,9 @@ void setup() {
                             "limits show | warn <lo> <hi> | alert <lo> <hi>");
   g_console.RegisterCommand("ntfy", &CmdNtfy,
                             "ntfy show|enable|summary|freq|test [msg]");
-  g_console.RegisterCommand("buzzer", &CmdBuzzer,
-                            "buzzer len | warn | alert | test | silence | stop");
+  g_console.RegisterCommand(
+      "buzzer", &CmdBuzzer,
+      "buzzer len | warn | alert | test | silence | stop");
   g_console.RegisterCommand("flash", &CmdFlash, "flash <ms>|off");
   g_console.RegisterCommand("i2cscan", &CmdI2cScan, "scan I2C bus");
   g_console.RegisterCommand("order", &CmdOrder, "sensor global order");
