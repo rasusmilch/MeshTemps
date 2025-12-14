@@ -5940,12 +5940,12 @@ static void CmdLs(void *ctx, int argc, const String argv[], Print &out) {
       }
 
       if (sensor_label.length() > 0) {
-        out.printf("  %s \"%s\" : %s %s%s (age=%lu min)\n", addr16.c_str(),
+        out.printf("  %s \"%s\": %s%s%s (age=%lu min)\n", addr16.c_str(),
                    sensor_label.c_str(), temp_s.c_str(), unit_label,
                    sensor->corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       } else {
-        out.printf("  %s : %s %s%s (age=%lu min)\n", addr16.c_str(), temp_s.c_str(),
+        out.printf("  %s: %s%s%s (age=%lu min)\n", addr16.c_str(), temp_s.c_str(),
                    unit_label, sensor->corrected ? " (corr)" : "",
                    static_cast<unsigned long>(age_sensor_min));
       }
