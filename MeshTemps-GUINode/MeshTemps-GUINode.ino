@@ -218,6 +218,12 @@ static void RoomMapRebuild(uint32_t now_ms);
 static void RoomMapRefresh(uint32_t now_ms);
 static void RoomMapLoop(uint32_t now_ms);
 static void RoomMapSetViewMode(UiViewMode mode);
+static void RoomTapEvent(lv_event_t *e);
+static void RoomChartRequest(const RoomDef &def);
+static void CloseHistoryChart();
+static void ChartRangeButtonEvent(lv_event_t *e);
+static void RoomChartBackEvent(lv_event_t *e);
+static void ChartDrawEvent(lv_event_t *e);
 static void BellyButtonEvent(lv_event_t *e);
 static void ViewButtonEvent(lv_event_t *e);
 static void SilenceButtonEvent(lv_event_t *e);
@@ -345,6 +351,48 @@ lv_obj_t *g_ui_label_title = nullptr;
 lv_obj_t *g_ui_label_peers = nullptr;
 lv_obj_t *g_ui_label_clock = nullptr;
 lv_obj_t *g_ui_tile_container = nullptr;
+
+// History chart UI (map overlay).
+lv_obj_t *g_ui_chart_container = nullptr;
+lv_obj_t *g_ui_chart_holder = nullptr;
+lv_obj_t *g_ui_chart_band_layer = nullptr;
+lv_obj_t *g_ui_chart = nullptr;
+lv_obj_t *g_ui_chart_title = nullptr;
+lv_obj_t *g_ui_chart_empty_label = nullptr;
+lv_obj_t *g_ui_button_chart_back = nullptr;
+lv_chart_series_t *g_ui_chart_series = nullptr;
+
+struct ChartRangeOption {
+  const char *label;
+  uint32_t days;
+};
+
+constexpr ChartRangeOption kChartRanges[] = {{"1d", 1},  {"2d", 2},
+                                             {"5d", 5},  {"7d", 7},
+                                             {"30d", 30}};
+constexpr size_t kChartRangeCount = sizeof(kChartRanges) / sizeof(kChartRanges[0]);
+
+lv_obj_t *g_ui_chart_range_buttons[kChartRangeCount] = {nullptr, nullptr, nullptr,
+                                                        nullptr, nullptr};
+size_t g_chart_active_range_index = 0; // default to previous day
+
+struct ChartSelection {
+  bool active = false;
+  String room_label;   // Display name (e.g., "Living Room").
+  String sensor_label; // "Room" or "Underbelly".
+  uint32_t node_id = 0;
+};
+
+ChartSelection g_chart_selection;
+
+struct ChartAxisContext {
+  double x_start_hours = 0.0;
+  double x_end_hours = 0.0;
+  bool has_epoch = false;
+  time_t range_start_epoch = 0;
+};
+
+ChartAxisContext g_chart_axis_ctx;
 
 lv_obj_t *g_ui_button_belly = nullptr;
 lv_obj_t *g_ui_button_belly_label = nullptr;
@@ -3146,6 +3194,18 @@ void GuiInit() {
   lv_obj_clear_flag(bar, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scrollbar_mode(bar, LV_SCROLLBAR_MODE_OFF);
 
+  // Back button (only visible while history chart is open).
+  g_ui_button_chart_back = lv_btn_create(bar);
+  lv_obj_set_size(g_ui_button_chart_back, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+  lv_obj_align(g_ui_button_chart_back, LV_ALIGN_LEFT_MID, 4, 0);
+  lv_obj_add_event_cb(g_ui_button_chart_back, RoomChartBackEvent,
+                      LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_flag(g_ui_button_chart_back, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t *chart_back_label = lv_label_create(g_ui_button_chart_back);
+  lv_label_set_text(chart_back_label, "Back");
+  lv_obj_center(chart_back_label);
+
   // Peers label
   g_ui_label_peers = lv_label_create(bar);
   lv_label_set_text(g_ui_label_peers, "Peers: 0");
@@ -3285,6 +3345,87 @@ void GuiInit() {
   lv_obj_set_scrollbar_mode(g_ui_map_container, LV_SCROLLBAR_MODE_OFF);
   g_ui_map_house = nullptr; // created lazily
   lv_obj_add_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
+
+  // History chart container (overlays map area when active).
+  g_ui_chart_container = lv_obj_create(screen);
+  lv_obj_set_size(g_ui_chart_container, lv_pct(100), cont_h);
+  lv_obj_align_to(g_ui_chart_container, bar, LV_ALIGN_OUT_BOTTOM_MID, 0, 0);
+  lv_obj_set_style_pad_all(g_ui_chart_container, 8, 0);
+  lv_obj_set_style_bg_opa(g_ui_chart_container, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(g_ui_chart_container, 0, 0);
+  lv_obj_clear_flag(g_ui_chart_container, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(g_ui_chart_container, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_set_flex_flow(g_ui_chart_container, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(g_ui_chart_container, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  lv_obj_add_flag(g_ui_chart_container, LV_OBJ_FLAG_HIDDEN);
+
+  g_ui_chart_title = lv_label_create(g_ui_chart_container);
+  lv_label_set_text(g_ui_chart_title, "History");
+  lv_obj_set_style_text_font(g_ui_chart_title, &lv_font_montserrat_22, 0);
+
+  lv_obj_t *range_row = lv_obj_create(g_ui_chart_container);
+  lv_obj_set_style_pad_all(range_row, 0, 0);
+  lv_obj_set_style_border_width(range_row, 0, 0);
+  lv_obj_set_style_bg_opa(range_row, LV_OPA_TRANSP, 0);
+  lv_obj_set_flex_flow(range_row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(range_row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_clear_flag(range_row, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_style_pad_row(range_row, 0, 0);
+  lv_obj_set_style_pad_column(range_row, 4, 0);
+
+  for (size_t i = 0; i < kChartRangeCount; ++i) {
+    lv_obj_t *btn = lv_btn_create(range_row);
+    lv_obj_set_size(btn, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
+    lv_obj_add_event_cb(btn, ChartRangeButtonEvent, LV_EVENT_CLICKED,
+                        reinterpret_cast<void *>(i));
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_label_set_text(label, kChartRanges[i].label);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_obj_center(label);
+
+    g_ui_chart_range_buttons[i] = btn;
+  }
+
+  // Holder that overlays the chart bands + chart widget.
+  g_ui_chart_holder = lv_obj_create(g_ui_chart_container);
+  lv_obj_set_style_pad_all(g_ui_chart_holder, 0, 0);
+  lv_obj_set_style_bg_opa(g_ui_chart_holder, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(g_ui_chart_holder, 0, 0);
+  lv_obj_clear_flag(g_ui_chart_holder, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_width(g_ui_chart_holder, lv_pct(100));
+  lv_obj_set_flex_grow(g_ui_chart_holder, 1);
+
+  g_ui_chart_band_layer = lv_obj_create(g_ui_chart_holder);
+  lv_obj_set_size(g_ui_chart_band_layer, lv_pct(100), lv_pct(100));
+  lv_obj_set_style_bg_opa(g_ui_chart_band_layer, LV_OPA_TRANSP, 0);
+  lv_obj_set_style_border_width(g_ui_chart_band_layer, 0, 0);
+  lv_obj_clear_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_align(g_ui_chart_band_layer, LV_ALIGN_CENTER, 0, 0);
+
+  g_ui_chart = lv_chart_create(g_ui_chart_holder);
+  lv_obj_set_size(g_ui_chart, lv_pct(100), lv_pct(100));
+  lv_obj_add_flag(g_ui_chart, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_align(g_ui_chart, LV_ALIGN_CENTER, 0, 0);
+  lv_chart_set_type(g_ui_chart, LV_CHART_TYPE_LINE);
+  lv_chart_set_div_line_count(g_ui_chart, 6, 4);
+  lv_chart_set_update_mode(g_ui_chart, LV_CHART_UPDATE_MODE_CIRCULAR);
+  lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_50, 0);
+  lv_obj_set_style_bg_color(g_ui_chart, lv_color_make(0x18, 0x18, 0x18), 0);
+  lv_obj_add_event_cb(g_ui_chart, ChartDrawEvent, LV_EVENT_DRAW_PART_BEGIN,
+                      nullptr);
+  g_ui_chart_series =
+      lv_chart_add_series(g_ui_chart, lv_color_make(0x80, 0xD0, 0xFF),
+                          LV_CHART_AXIS_PRIMARY_Y);
+
+  g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
+  lv_label_set_text(g_ui_chart_empty_label, "No history for this range");
+  lv_obj_add_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_align(g_ui_chart_empty_label, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_add_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_HIDDEN);
 
   // Ensure NTP popup is drawn above tiles/map, but below the top bar.
   if (g_ui_ntp_popup != nullptr) {
@@ -3925,6 +4066,8 @@ static void RoomMapBuildWidgets() {
     lv_obj_set_style_bg_color(rect, lv_color_make(0x20, 0x20, 0x20), 0);
     lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, 0);
     lv_obj_clear_flag(rect, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(rect, RoomTapEvent, LV_EVENT_CLICKED,
+                        (void *)&outside_def);
 
     // "Outside" label anchored near the top-left of the map.
     outside_label_obj = lv_label_create(g_ui_map_container);
@@ -3932,6 +4075,8 @@ static void RoomMapBuildWidgets() {
     lv_label_set_text(outside_label_obj, outside_def.display_name);
     lv_obj_set_style_text_color(outside_label_obj, lv_color_white(), 0);
     lv_obj_set_pos(outside_label_obj, kOutsideLabelPosXPx, kOutsideLabelPosYPx);
+    lv_obj_add_event_cb(outside_label_obj, RoomTapEvent, LV_EVENT_CLICKED,
+                        (void *)&outside_def);
 
     outside_label_height = lv_obj_get_height(outside_label_obj);
 
@@ -4118,6 +4263,7 @@ static void RoomMapBuildWidgets() {
       lv_obj_set_style_bg_color(rect, lv_color_make(0x40, 0x40, 0x40), 0);
       lv_obj_set_style_bg_opa(rect, LV_OPA_COVER, 0);
       lv_obj_clear_flag(rect, LV_OBJ_FLAG_SCROLLABLE);
+      lv_obj_add_event_cb(rect, RoomTapEvent, LV_EVENT_CLICKED, (void *)&def);
     }
 
     // Label: sibling of rectangles, anchored to the first rect.
@@ -4133,6 +4279,8 @@ static void RoomMapBuildWidgets() {
       lv_obj_set_style_text_color(widget.label_obj, lv_color_white(), 0);
       lv_obj_align(widget.label_obj, LV_ALIGN_TOP_MID, 0, 0);
     }
+    lv_obj_add_event_cb(widget.label_obj, RoomTapEvent, LV_EVENT_CLICKED,
+                        (void *)&def);
 
     widget.temp_c = NAN;
     widget.has_value = false;
@@ -4491,8 +4639,436 @@ static void RoomMapLoop(uint32_t now_ms) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// History chart overlay (map view)
+// ---------------------------------------------------------------------------
+
+static constexpr float kChartTempScale = 10.0f;   // store temps as 0.1 units
+static constexpr double kChartHoursScale = 10.0;  // store hours as 0.1h units
+
+static void UpdateRangeButtonStates() {
+  const lv_color_t active_bg = lv_color_make(0x50, 0x70, 0x90);
+  const lv_color_t idle_bg = lv_color_make(0x30, 0x30, 0x30);
+
+  for (size_t i = 0; i < kChartRangeCount; ++i) {
+    lv_obj_t *btn = g_ui_chart_range_buttons[i];
+    if (btn == nullptr) {
+      continue;
+    }
+
+    const bool active = (i == g_chart_active_range_index);
+    lv_obj_set_style_bg_color(btn, active ? active_bg : idle_bg, 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(btn, lv_color_white(), 0);
+  }
+}
+
+static void SetTopBarForChart(bool chart_active, const String &title) {
+  if (g_ui_label_title != nullptr) {
+    lv_label_set_text(g_ui_label_title, title.c_str());
+  }
+
+  auto Toggle = [&](lv_obj_t *obj, bool hide) {
+    if (obj == nullptr) {
+      return;
+    }
+    if (hide) {
+      lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+  };
+
+  Toggle(g_ui_button_map, chart_active);
+  Toggle(g_ui_button_belly, chart_active);
+  Toggle(g_ui_button_silence, chart_active);
+  Toggle(g_ui_label_peers, chart_active);
+  Toggle(g_ui_ntp_icon, chart_active);
+
+  Toggle(g_ui_button_chart_back, !chart_active ? true : false);
+  if (g_ui_button_chart_back != nullptr && chart_active) {
+    lv_obj_clear_flag(g_ui_button_chart_back, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
+                             uint32_t range_days) {
+  if (g_ui_chart_band_layer == nullptr) {
+    return;
+  }
+
+  lv_obj_clean(g_ui_chart_band_layer);
+
+  if (range_start_epoch == 0 || range_end_epoch <= range_start_epoch) {
+    lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+
+  lv_obj_clear_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_update_layout(g_ui_chart_holder);
+
+  const lv_coord_t w = lv_obj_get_width(g_ui_chart_band_layer);
+  const lv_coord_t h = lv_obj_get_height(g_ui_chart_band_layer);
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+
+  const uint32_t stride_days = (range_days > 10U) ? 2U : 1U;
+  const time_t stride = static_cast<time_t>(stride_days) * 24 * 60 * 60;
+
+  // Align the first band to the nearest day boundary at or before start.
+  time_t band_start = range_start_epoch;
+  struct tm start_tm;
+  if (localtime_r(&range_start_epoch, &start_tm) != nullptr) {
+    start_tm.tm_hour = 0;
+    start_tm.tm_min = 0;
+    start_tm.tm_sec = 0;
+    band_start = mktime(&start_tm);
+  }
+
+  int band_index = 0;
+  for (time_t t = band_start; t < range_end_epoch; t += stride) {
+    const time_t band_end = t + stride;
+    const double start_frac =
+        (static_cast<double>(t - range_start_epoch) /
+         static_cast<double>(range_end_epoch - range_start_epoch));
+    const double end_frac =
+        (static_cast<double>(band_end - range_start_epoch) /
+         static_cast<double>(range_end_epoch - range_start_epoch));
+
+    const lv_coord_t x = static_cast<lv_coord_t>(start_frac * w);
+    lv_coord_t width = static_cast<lv_coord_t>((end_frac - start_frac) * w);
+    if (width < 1) {
+      width = 1;
+    }
+
+    lv_obj_t *band = lv_obj_create(g_ui_chart_band_layer);
+    lv_obj_set_size(band, width, h);
+    lv_obj_set_pos(band, x, 0);
+    lv_obj_set_style_border_width(band, 0, 0);
+    lv_obj_set_style_pad_all(band, 0, 0);
+    lv_obj_clear_flag(band, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(band, LV_OBJ_FLAG_IGNORE_LAYOUT);
+
+    const bool light = (band_index % 2 == 0);
+    lv_obj_set_style_bg_color(band,
+                              light ? lv_color_make(0x28, 0x28, 0x28)
+                                    : lv_color_make(0x30, 0x30, 0x30),
+                              0);
+    lv_obj_set_style_bg_opa(band, LV_OPA_20, 0);
+    ++band_index;
+  }
+}
+
+struct ChartPoint {
+  double x_hours = 0.0; // relative to range start, scaled by 1 hour units
+  float temp_display = NAN;
+};
+
+static void ShowChartMessage(const char *msg) {
+  if (g_ui_chart_empty_label == nullptr) {
+    return;
+  }
+  if (msg == nullptr) {
+    msg = "No history for this range";
+  }
+  lv_label_set_text(g_ui_chart_empty_label, msg);
+  lv_obj_clear_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_HIDDEN);
+
+  if (g_ui_chart != nullptr && g_ui_chart_series != nullptr) {
+    lv_chart_set_point_count(g_ui_chart, 0);
+    lv_chart_refresh(g_ui_chart);
+  }
+
+  if (g_ui_chart_band_layer != nullptr) {
+    lv_obj_clean(g_ui_chart_band_layer);
+    lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+static void HideChartMessage() {
+  if (g_ui_chart_empty_label == nullptr) {
+    return;
+  }
+  lv_obj_add_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void BuildHistoryChartForSelection() {
+  UpdateRangeButtonStates();
+
+  g_chart_axis_ctx = {};
+
+  if (g_ui_chart == nullptr || g_ui_chart_series == nullptr ||
+      !g_chart_selection.active) {
+    return;
+  }
+
+  MeshNode *node = FindMeshNode(g_chart_selection.node_id);
+  if (node == nullptr) {
+    ShowChartMessage("No node found for this room");
+    return;
+  }
+
+  std::vector<MeshNode::SensorHistorySample> history;
+  if (!node->GetSensorHistoryByLabel(g_chart_selection.sensor_label, &history) ||
+      history.empty()) {
+    ShowChartMessage("No history yet");
+    return;
+  }
+
+  const ChartRangeOption &range =
+      kChartRanges[std::min(g_chart_active_range_index, kChartRangeCount - 1)];
+
+  const uint64_t range_ms = static_cast<uint64_t>(range.days) * 24ULL * 60ULL *
+                            60ULL * 1000ULL;
+
+  const uint32_t now_ms = millis();
+  time_t now_epoch = time(nullptr);
+  if (now_epoch == static_cast<time_t>(-1)) {
+    now_epoch = 0;
+  }
+
+  time_t latest_epoch = 0;
+  uint32_t latest_ms = 0;
+  for (const auto &sample : history) {
+    if (sample.has_epoch && sample.timestamp_epoch > latest_epoch) {
+      latest_epoch = sample.timestamp_epoch;
+    }
+    if (sample.timestamp_ms > latest_ms) {
+      latest_ms = sample.timestamp_ms;
+    }
+  }
+
+  const bool use_epoch = (now_epoch > 0) || (latest_epoch > 0);
+  const time_t end_epoch = (now_epoch > 0) ? now_epoch : latest_epoch;
+  const uint32_t end_ms = (latest_ms > 0) ? latest_ms : now_ms;
+
+  const time_t start_epoch =
+      end_epoch > 0 ? end_epoch - static_cast<time_t>(range.days * 24UL * 60UL * 60UL) : 0;
+
+  std::vector<ChartPoint> points;
+  points.reserve(history.size());
+
+  float min_temp = std::numeric_limits<float>::max();
+  float max_temp = std::numeric_limits<float>::lowest();
+
+  for (const auto &sample : history) {
+    bool in_range = false;
+    double x_hours = 0.0;
+
+    if (use_epoch && sample.has_epoch) {
+      if (sample.timestamp_epoch < start_epoch) {
+        continue;
+      }
+      in_range = true;
+      const double delta_s = difftime(sample.timestamp_epoch, start_epoch);
+      x_hours = delta_s / 3600.0;
+    } else {
+      const uint32_t age_ms = end_ms - sample.timestamp_ms;
+      if (age_ms > range_ms) {
+        continue;
+      }
+      in_range = true;
+      const uint64_t elapsed_ms = range_ms - age_ms;
+      x_hours = static_cast<double>(elapsed_ms) / 3600000.0;
+    }
+
+    if (!in_range || !sample.has_value || isnan(sample.temp_c)) {
+      continue;
+    }
+
+    ChartPoint pt;
+    pt.x_hours = x_hours;
+    pt.temp_display = ToDisplayUnits(sample.temp_c);
+    points.push_back(pt);
+
+    if (!isnan(pt.temp_display)) {
+      min_temp = std::min(min_temp, pt.temp_display);
+      max_temp = std::max(max_temp, pt.temp_display);
+    }
+  }
+
+  if (points.empty()) {
+    ShowChartMessage("No history in this window");
+    return;
+  }
+
+  HideChartMessage();
+
+  // Sort by time to ensure correct order.
+  std::sort(points.begin(), points.end(),
+            [](const ChartPoint &a, const ChartPoint &b) {
+              return a.x_hours < b.x_hours;
+            });
+
+  const double total_hours = static_cast<double>(range.days) * 24.0;
+  const lv_coord_t x_max = static_cast<lv_coord_t>(ceil(total_hours * kChartHoursScale));
+
+  // Add a small margin around extremes.
+  if (min_temp == max_temp) {
+    min_temp -= 0.5f;
+    max_temp += 0.5f;
+  }
+
+  const float margin = 0.5f;
+  min_temp -= margin;
+  max_temp += margin;
+
+  lv_chart_set_point_count(g_ui_chart, points.size());
+  lv_chart_set_axis_tick(g_ui_chart, LV_CHART_AXIS_PRIMARY_X, 8, 4, 6, 1, true,
+                        60);
+  lv_chart_set_axis_tick(g_ui_chart, LV_CHART_AXIS_PRIMARY_Y, 8, 4, 5, 1, true,
+                        50);
+  lv_chart_set_range(g_ui_chart, LV_CHART_AXIS_PRIMARY_X, 0, x_max);
+  lv_chart_set_range(g_ui_chart, LV_CHART_AXIS_PRIMARY_Y,
+                     static_cast<lv_coord_t>(floor(min_temp * kChartTempScale)),
+                     static_cast<lv_coord_t>(ceil(max_temp * kChartTempScale)));
+
+  lv_chart_set_all_value(g_ui_chart, g_ui_chart_series, LV_CHART_POINT_NONE);
+
+  for (size_t i = 0; i < points.size(); ++i) {
+    const lv_coord_t x_val =
+        static_cast<lv_coord_t>(points[i].x_hours * kChartHoursScale);
+    const lv_coord_t y_val =
+        static_cast<lv_coord_t>(points[i].temp_display * kChartTempScale);
+    lv_chart_set_value_by_id2(g_ui_chart, g_ui_chart_series,
+                              static_cast<uint16_t>(i), x_val, y_val);
+  }
+
+  g_chart_axis_ctx.x_start_hours = 0.0;
+  g_chart_axis_ctx.x_end_hours = total_hours;
+  g_chart_axis_ctx.has_epoch = use_epoch && start_epoch > 0;
+  g_chart_axis_ctx.range_start_epoch = g_chart_axis_ctx.has_epoch ? start_epoch : 0;
+
+  if (g_chart_axis_ctx.has_epoch) {
+    const time_t range_end =
+        start_epoch + static_cast<time_t>(range.days * 24UL * 60UL * 60UL);
+    UpdateChartBands(start_epoch, range_end, range.days);
+  } else if (g_ui_chart_band_layer != nullptr) {
+    lv_obj_clean(g_ui_chart_band_layer);
+    lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  lv_chart_refresh(g_ui_chart);
+}
+
+static void RoomChartRequest(const RoomDef &def) {
+  g_chart_selection.active = true;
+  g_chart_selection.room_label = def.display_name;
+  g_chart_selection.sensor_label = g_map_use_underbelly ? "Underbelly" : "Room";
+
+  MeshNode *node = FindNodeForRoom(def);
+  g_chart_selection.node_id = node ? node->node_id() : 0;
+  g_chart_active_range_index = 0;
+
+  if (g_ui_map_container != nullptr) {
+    lv_obj_add_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (g_ui_chart_container != nullptr) {
+    lv_obj_clear_flag(g_ui_chart_container, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(g_ui_chart_container);
+  }
+
+  const String title = String("History: ") + g_chart_selection.room_label +
+                      " / " + g_chart_selection.sensor_label;
+  SetTopBarForChart(true, title);
+  BuildHistoryChartForSelection();
+}
+
+static void CloseHistoryChart() {
+  g_chart_selection.active = false;
+
+  if (g_ui_chart_container != nullptr) {
+    lv_obj_add_flag(g_ui_chart_container, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  if (g_ui_map_container != nullptr && g_ui_view_mode == kUiViewModeMap) {
+    lv_obj_clear_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  const char *title = (g_ui_view_mode == kUiViewModeMap) ? "House Map"
+                                                         : "Room Temps";
+  SetTopBarForChart(false, title);
+}
+
+static void RoomTapEvent(lv_event_t *e) {
+  if (g_ui_view_mode != kUiViewModeMap || g_chart_selection.active) {
+    return;
+  }
+
+  const RoomDef *def =
+      static_cast<const RoomDef *>(lv_event_get_user_data(e));
+  if (def == nullptr) {
+    return;
+  }
+  RoomChartRequest(*def);
+}
+
+static void ChartRangeButtonEvent(lv_event_t *e) {
+  size_t index = reinterpret_cast<size_t>(lv_event_get_user_data(e));
+  if (index >= kChartRangeCount) {
+    return;
+  }
+  g_chart_active_range_index = index;
+  BuildHistoryChartForSelection();
+}
+
+static void RoomChartBackEvent(lv_event_t *e) {
+  (void)e;
+  CloseHistoryChart();
+}
+
+static void ChartDrawEvent(lv_event_t *e) {
+  lv_obj_draw_part_dsc_t *dsc =
+      static_cast<lv_obj_draw_part_dsc_t *>(lv_event_get_draw_part_dsc(e));
+  if (dsc == nullptr || dsc->class_p != &lv_chart_class) {
+    return;
+  }
+  if (dsc->type != LV_CHART_DRAW_PART_TICK_LABEL || dsc->text_length <= 0) {
+    return;
+  }
+
+  if (dsc->id == LV_CHART_AXIS_PRIMARY_Y) {
+    const float temp = static_cast<float>(dsc->value) / kChartTempScale;
+    static char y_label[32];
+    lv_snprintf(y_label, sizeof(y_label), "%.1f%s", static_cast<double>(temp),
+                DisplayUnitsLabel());
+    const size_t len = strlen(y_label);
+    dsc->text = y_label;
+    dsc->text_length = static_cast<lv_coord_t>(len);
+    return;
+  }
+
+  if (dsc->id == LV_CHART_AXIS_PRIMARY_X) {
+    const double hours = static_cast<double>(dsc->value) / kChartHoursScale;
+
+    if (g_chart_axis_ctx.has_epoch && g_chart_axis_ctx.range_start_epoch > 0) {
+      const time_t tick_epoch =
+          g_chart_axis_ctx.range_start_epoch +
+          static_cast<time_t>(hours * 3600.0);
+
+      struct tm tm_info;
+      if (localtime_r(&tick_epoch, &tm_info) != nullptr) {
+        const bool show_time = (g_chart_active_range_index <= 1);
+        const char *fmt = show_time ? "%m/%d\n%H:%M" : "%m/%d";
+        static char x_label[32];
+        const size_t len = strftime(x_label, sizeof(x_label), fmt, &tm_info);
+        if (len > 0) {
+          dsc->text = x_label;
+          dsc->text_length = static_cast<lv_coord_t>(len);
+        }
+      }
+    } else {
+      static char x_label[24];
+      lv_snprintf(x_label, sizeof(x_label), "%.0fh", hours);
+      dsc->text = x_label;
+      dsc->text_length = static_cast<lv_coord_t>(strlen(x_label));
+    }
+  }
+}
+
 static void RoomMapSetViewMode(UiViewMode mode) {
-  if (g_ui_view_mode == mode) {
+  if (g_ui_view_mode == mode && !(g_chart_selection.active && mode != kUiViewModeMap)) {
     return;
   }
   g_ui_view_mode = mode;
@@ -4501,27 +5077,45 @@ static void RoomMapSetViewMode(UiViewMode mode) {
     return;
   }
 
-  if (g_ui_tile_container != nullptr) {
-    if (mode == kUiViewModeTiles) {
-      lv_obj_clear_flag(g_ui_tile_container, LV_OBJ_FLAG_HIDDEN);
+  if (g_chart_selection.active) {
+    if (mode != kUiViewModeMap) {
+      CloseHistoryChart();
     } else {
-      lv_obj_add_flag(g_ui_tile_container, LV_OBJ_FLAG_HIDDEN);
+      if (g_ui_map_container != nullptr) {
+        lv_obj_add_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
+      }
+      if (g_ui_chart_container != nullptr) {
+        lv_obj_clear_flag(g_ui_chart_container, LV_OBJ_FLAG_HIDDEN);
+      }
+      const String title = String("History: ") + g_chart_selection.room_label +
+                          " / " + g_chart_selection.sensor_label;
+      SetTopBarForChart(true, title);
     }
   }
 
-  if (g_ui_map_container != nullptr) {
-    if (mode == kUiViewModeMap) {
-      lv_obj_clear_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
-    } else {
-      lv_obj_add_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
+  if (!g_chart_selection.active) {
+    if (g_ui_tile_container != nullptr) {
+      if (mode == kUiViewModeTiles) {
+        lv_obj_clear_flag(g_ui_tile_container, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_add_flag(g_ui_tile_container, LV_OBJ_FLAG_HIDDEN);
+      }
     }
-  }
 
-  if (g_ui_label_title != nullptr) {
-    if (mode == kUiViewModeMap) {
-      lv_label_set_text(g_ui_label_title, "House Map");
-    } else {
-      lv_label_set_text(g_ui_label_title, "Room Temps");
+    if (g_ui_map_container != nullptr) {
+      if (mode == kUiViewModeMap) {
+        lv_obj_clear_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_add_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
+      }
+    }
+
+    if (g_ui_label_title != nullptr) {
+      if (mode == kUiViewModeMap) {
+        lv_label_set_text(g_ui_label_title, "House Map");
+      } else {
+        lv_label_set_text(g_ui_label_title, "Room Temps");
+      }
     }
   }
 
