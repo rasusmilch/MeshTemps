@@ -2126,7 +2126,10 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
 #if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
   JsonDocument doc;
 #else
-  StaticJsonDocument<16384> doc;
+  // Allow larger dumps (labels, node meta) without truncation.
+  // Add a safety margin to handle parser overhead.
+  const size_t json_capacity = json.length() + 1024;
+  DynamicJsonDocument doc(json_capacity);
 #endif
 
   const DeserializationError err = deserializeJson(doc, json);
@@ -6472,8 +6475,11 @@ static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
   if (sub.equalsIgnoreCase("dump")) {
     String json;
     if (BuildNvsBackupJson(&json, out)) {
+      out.println(F("Copy/paste the lines below to restore:"));
+      out.println(F("nvs restore"));
       out.println(json);
-      out.println(F("nvs dump: copy the JSON above for restore"));
+      out.println(kNvsRestoreEndSentinel);
+      out.println(F("nvs dump: ready-made restore block emitted"));
     } else {
       out.println(F("ERR nvs dump"));
     }
