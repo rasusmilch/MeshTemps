@@ -5033,9 +5033,10 @@ static void ChartDrawEvent(lv_event_t *e) {
     static char y_label[32];
     lv_snprintf(y_label, sizeof(y_label), "%.1f%s", static_cast<double>(temp),
                 DisplayUnitsLabel());
-    const size_t len = strlen(y_label);
+    const size_t len_bytes = strlen(y_label);
+    const uint32_t len_chars = lv_txt_get_encoded_length(y_label, len_bytes);
     dsc->text = y_label;
-    dsc->text_length = static_cast<lv_coord_t>(len);
+    dsc->text_length = static_cast<lv_coord_t>(len_chars);
     return;
   }
 
