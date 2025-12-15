@@ -1,6 +1,6 @@
 #pragma once
 #ifndef DBG_BAUD
-#define DBG_BAUD 115200
+#define DBG_BAUD 9600
 #endif
 
 // Set this to your LED pin if you have one (common ESP32-S3 devkits use 38 or

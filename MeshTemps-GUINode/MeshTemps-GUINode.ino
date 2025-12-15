@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "Config.h" // Mesh / IO configuration, addrToHex()
+#include "esp_heap_caps.h"
 #include "esp_panel_board_custom_conf.h"
 #include "lvgl_v8_port.h"
 #include <WiFi.h>
@@ -62,11 +63,14 @@ using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
 static constexpr const char *kNvsRestoreEndSentinel = "<<<END-JSON>>>";
 static constexpr const char *kNvsRestoreAbortSentinel = "<<<CANCEL>>>";
 static constexpr size_t kNvsRestoreMaxBytes = 2048;
-constexpr size_t kConsoleDefaultMaxLineLen = 2048;
+constexpr size_t kConsoleDefaultMaxLineLen = 256;
 static bool g_nvs_restore_raw_active = false;
 static String g_nvs_restore_raw_json;
 
-static SerialConsole g_console(kNvsRestoreMaxBytes);
+static SerialConsole g_console(kConsoleDefaultMaxLineLen);
+
+static String g_nvs_restore_rx_line;
+static uint32_t g_nvs_restore_rx_bytes = 0;
 
 // ---------------------------------------------------------------------------
 // Map view definitions (root)
@@ -496,9 +500,25 @@ enum NodeMuteMask : uint8_t {
 // History configuration: NVS persistence
 // ============================================================================
 
+struct RestoreLogCounters {
+  int found = 0;
+  int saved = 0;
+  int skipped = 0;
+  int failed = 0;
+};
+
 constexpr const char *kHistoryPrefsNamespace = "mesh_hist"; // adjust if needed
 constexpr const char *kHistoryKeyIntervalMs = "histIntMs";
 constexpr const char *kHistoryKeyRetentionDays = "histRetDays";
+
+static void LogHeap(const char *tag) {
+  Serial.printf("[%s] free=%u min=%u internal=%u min_internal=%u psram=%u\n",
+                tag, (unsigned)esp_get_free_heap_size(),
+                (unsigned)esp_get_minimum_free_heap_size(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
 
 // Load history logging configuration (interval + retention) from NVS and
 // apply it to MeshNode static configuration.
@@ -2128,19 +2148,303 @@ static bool BuildNvsBackupJson(String *out_json, Print &out) {
   return true;
 }
 
-static bool RestoreNvsFromJson(const String &json, Print &out) {
+static void AppendUniqueNodeId(std::vector<uint32_t> *node_ids,
+                               uint32_t node_id) {
+  if (node_ids == nullptr) {
+    return;
+  }
+  if (std::find(node_ids->begin(), node_ids->end(), node_id) ==
+      node_ids->end()) {
+    node_ids->push_back(node_id);
+  }
+}
+
+static void SeedMeshNodesFromIds(const std::vector<uint32_t> &node_ids,
+                                 uint32_t now_ms) {
+  for (uint32_t node_id : node_ids) {
+    MeshNode *node_model = GetOrCreateMeshNode(node_id);
+    if (node_model != nullptr && node_model->last_update_ms() == 0U) {
+      // Mirror LoadKnownTopology() behavior so tiles can exist before live
+      // traffic.
+      node_model->SetBusGpioAndLastUpdate(-1, now_ms);
+    }
+  }
+}
+
+static void CollectNodeIdsFromNodeMetaBytes(const std::vector<uint8_t> &bytes,
+                                std::vector<uint32_t> *out_node_ids) {
+  if (out_node_ids == nullptr) {
+    return;
+  }
+  if (bytes.empty() || (bytes.size() % sizeof(NodeMetaRecord)) != 0U) {
+    return;
+  }
+
+  const size_t record_count = bytes.size() / sizeof(NodeMetaRecord);
+  for (size_t index = 0; index < record_count; ++index) {
+    NodeMetaRecord record;
+    memcpy(&record, bytes.data() + (index * sizeof(NodeMetaRecord)),
+           sizeof(NodeMetaRecord));
+    AppendUniqueNodeId(out_node_ids, record.node_id);
+  }
+}
+
 #if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
-  // Allocate enough capacity for the full payload plus parser overhead; without
-  // this, ArduinoJson v7 silently drops trailing keys when the default pool is
-  // too small, which prevented labels from being restored.
-  const size_t json_capacity = json.length() + 1024;
-  DynamicJsonDocument doc(json_capacity);
+static void CollectNodeIdsFromLabelsDoc(const JsonDocument &labels_doc,
+                                        std::vector<uint32_t> *out_node_ids) {
 #else
-  // Allow larger dumps (labels, node meta) without truncation.
-  // Add a safety margin to handle parser overhead.
-  const size_t json_capacity = json.length() + 1024;
-  DynamicJsonDocument doc(json_capacity);
+static void CollectNodeIdsFromLabelsDoc(const DynamicJsonDocument &labels_doc,
+                                        std::vector<uint32_t> *out_node_ids) {
 #endif
+  if (out_node_ids == nullptr) {
+    return;
+  }
+
+  // Node labels: labels["nodes"] keys.
+  JsonObjectConst nodes_obj = labels_doc["nodes"].as<JsonObjectConst>();
+  for (JsonPairConst p : nodes_obj) {
+    const String node_key = p.key().c_str();
+    uint32_t node_id = 0;
+    if (ParseNodeIdToU32(node_key, &node_id)) {
+      AppendUniqueNodeId(out_node_ids, node_id);
+    }
+  }
+
+  // Per-node sensor ordering root: labels["sorder"] keys.
+  JsonObjectConst sorder_root = labels_doc["sorder"].as<JsonObjectConst>();
+  for (JsonPairConst p : sorder_root) {
+    const String node_key = p.key().c_str();
+    uint32_t node_id = 0;
+    if (ParseNodeIdToU32(node_key, &node_id)) {
+      AppendUniqueNodeId(out_node_ids, node_id);
+    }
+  }
+
+  // Sensor labels: labels["sensors"][addr16] is an object keyed by node IDs.
+  JsonObjectConst sensors_root = labels_doc["sensors"].as<JsonObjectConst>();
+  for (JsonPairConst sensor_pair : sensors_root) {
+    JsonObjectConst per_node = sensor_pair.value().as<JsonObjectConst>();
+    for (JsonPairConst node_pair : per_node) {
+      const String node_key = node_pair.key().c_str();
+      uint32_t node_id = 0;
+      if (ParseNodeIdToU32(node_key, &node_id)) {
+        AppendUniqueNodeId(out_node_ids, node_id);
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NVS restore logging helpers
+// ---------------------------------------------------------------------------
+
+static void RestoreLogFound(Print &out, RestoreLogCounters *counters,
+                            const char *section) {
+  if (counters != nullptr) {
+    ++counters->found;
+  }
+  out.printf("nvs restore: found %s\n", section);
+}
+
+static void RestoreLogSaved(Print &out, RestoreLogCounters *counters,
+                            const char *section, const char *detail = nullptr) {
+  if (counters != nullptr) {
+    ++counters->saved;
+  }
+  if (detail != nullptr && detail[0] != '\0') {
+    out.printf("nvs restore: saved %s (%s)\n", section, detail);
+  } else {
+    out.printf("nvs restore: saved %s\n", section);
+  }
+}
+
+static void RestoreLogSkipped(Print &out, RestoreLogCounters *counters,
+                              const char *section, const char *reason) {
+  if (counters != nullptr) {
+    ++counters->skipped;
+  }
+  out.printf("nvs restore: skipped %s (%s)\n", section,
+             (reason != nullptr) ? reason : "unspecified");
+}
+
+static void RestoreLogFailed(Print &out, RestoreLogCounters *counters,
+                             const char *section, const char *reason) {
+  if (counters != nullptr) {
+    ++counters->failed;
+  }
+  out.printf("nvs restore: FAILED %s (%s)\n", section,
+             (reason != nullptr) ? reason : "unspecified");
+}
+
+// ---------------------------------------------------------------------------
+// Label restore seeding: create placeholder nodes/sensors so LoadLabels() can
+// attach labels immediately even before any mesh traffic.
+// ---------------------------------------------------------------------------
+
+#if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
+static void SeedPlaceholdersFromLabelsDoc(const JsonDocument &labels_doc,
+                                          std::vector<uint32_t> *seed_node_ids,
+                                          uint32_t now_ms,
+                                          uint32_t *out_nodes_seen,
+                                          uint32_t *out_sensors_seen) {
+#else
+static void SeedPlaceholdersFromLabelsDoc(const DynamicJsonDocument &labels_doc,
+                                          std::vector<uint32_t> *seed_node_ids,
+                                          uint32_t now_ms,
+                                          uint32_t *out_nodes_seen,
+                                          uint32_t *out_sensors_seen) {
+#endif
+  uint32_t nodes_seen = 0;
+  uint32_t sensors_seen = 0;
+
+  JsonObjectConst sorder_root = labels_doc["sorder"].as<JsonObjectConst>();
+  if (sorder_root.isNull()) {
+    if (out_nodes_seen != nullptr)
+      *out_nodes_seen = 0;
+    if (out_sensors_seen != nullptr)
+      *out_sensors_seen = 0;
+    return;
+  }
+
+  for (JsonPairConst node_pair : sorder_root) {
+    const String node_key_hex = node_pair.key().c_str();
+    uint32_t node_id = 0;
+    if (!ParseNodeIdToU32(node_key_hex, &node_id)) {
+      continue;
+    }
+
+    AppendUniqueNodeId(seed_node_ids, node_id);
+
+    MeshNode *node = GetOrCreateMeshNode(node_id);
+    if (node == nullptr) {
+      continue;
+    }
+    ++nodes_seen;
+
+    if (node->last_update_ms() == 0U) {
+      node->SetBusGpioAndLastUpdate(-1, now_ms);
+    }
+
+    JsonObjectConst node_map = node_pair.value().as<JsonObjectConst>();
+    if (node_map.isNull()) {
+      continue;
+    }
+
+    for (JsonPairConst p : node_map) {
+      const String addr16 = p.key().c_str();
+      if (addr16.length() == 0) {
+        continue;
+      }
+
+      MeshNode::Sensor *sensor = node->GetOrCreateSensor(addr16);
+      if (sensor == nullptr) {
+        continue;
+      }
+      ++sensors_seen;
+    }
+  }
+
+  if (out_nodes_seen != nullptr)
+    *out_nodes_seen = nodes_seen;
+  if (out_sensors_seen != nullptr)
+    *out_sensors_seen = sensors_seen;
+}
+
+// --- NVS restore debug helpers (paste above RestoreNvsFromJson) ---
+
+static bool IsSpaceForRestoreDbg(char ch) {
+  return (ch == ' ') || (ch == '\t') || (ch == '\r') || (ch == '\n');
+}
+
+static void NvsRestoreDebugPayloadSlice(const String &payload,
+                                       const char *key,
+                                       Print &out) {
+  const String token = String("\"") + key + "\":";
+  const int pos = payload.indexOf(token);
+  if (pos < 0) {
+    out.printf("nvs restore dbg: payload does NOT contain key '%s'\n", key);
+    return;
+  }
+
+  const int slice_start = pos;
+  const int slice_end = std::min<int>(payload.length(), pos + token.length() + 160);
+  const String slice = payload.substring(slice_start, slice_end);
+
+  out.printf("nvs restore dbg: payload slice for %s: %s\n", key, slice.c_str());
+
+  // Show the first non-space char of the value (quote vs '{' etc).
+  int value_pos = pos + token.length();
+  while (value_pos < payload.length() && IsSpaceForRestoreDbg(payload[value_pos])) {
+    ++value_pos;
+  }
+  if (value_pos < payload.length()) {
+    const unsigned char c = static_cast<unsigned char>(payload[value_pos]);
+    out.printf("nvs restore dbg: %s first value char = 0x%02X ('%c')\n",
+               key, static_cast<unsigned>(c),
+               (c >= 32 && c <= 126) ? payload[value_pos] : '?');
+  }
+}
+
+static void NvsRestoreDebugVariant(const char *key,
+                                  JsonVariantConst v,
+                                  Print &out) {
+  out.printf("nvs restore dbg: %s: ", key);
+
+  if (v.isNull()) {
+    out.println(F("NULL"));
+    return;
+  }
+
+  if (v.is<const char *>()) {
+    const char *s = v.as<const char *>();
+    const size_t len = (s != nullptr) ? strlen(s) : 0;
+    out.printf("string len=%u ", static_cast<unsigned>(len));
+    if (s == nullptr) {
+      out.println(F("(nullptr)"));
+      return;
+    }
+    // Print a short head/tail preview to avoid spamming.
+    const size_t head = std::min<size_t>(24, len);
+    out.print(F("head=\""));
+    for (size_t i = 0; i < head; ++i) out.print(s[i]);
+    out.print(F("\""));
+
+    if (len > head) {
+      const size_t tail = std::min<size_t>(24, len);
+      out.print(F(" tail=\""));
+      for (size_t i = len - tail; i < len; ++i) out.print(s[i]);
+      out.print(F("\""));
+    }
+    out.println();
+    return;
+  }
+
+  if (v.is<JsonObjectConst>()) {
+    JsonObjectConst o = v.as<JsonObjectConst>();
+    out.printf("OBJECT keys=%u\n", static_cast<unsigned>(o.size()));
+    return;
+  }
+
+  if (v.is<JsonArrayConst>()) {
+    JsonArrayConst a = v.as<JsonArrayConst>();
+    out.printf("ARRAY size=%u\n", static_cast<unsigned>(a.size()));
+    return;
+  }
+
+  // Fallback: show a small serialized preview.
+  String preview;
+  preview.reserve(160);
+  serializeJson(v, preview);
+  if (preview.length() > 140) {
+    preview.remove(140);
+    preview += "...";
+  }
+  out.printf("type=OTHER preview=%s\n", preview.c_str());
+}
+
+static bool RestoreNvsFromJson(const String &json, Print &out) {
+  const size_t json_capacity = (json.length() * 2U) + 4096U;
+  DynamicJsonDocument doc(json_capacity);
 
   const DeserializationError err = deserializeJson(doc, json);
   if (err) {
@@ -2149,11 +2453,23 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
   }
 
   int applied_sections = 0;
+  RestoreLogCounters logc;
 
+  std::vector<uint32_t> seed_node_ids;
+  seed_node_ids.reserve(32);
+
+  // -------------------------------------------------------------------------
+  // wifi
+  // -------------------------------------------------------------------------
   if (doc.containsKey("wifi")) {
+    RestoreLogFound(out, &logc, "wifi");
+
     JsonObject wifi = doc["wifi"];
-    if (!wifi.isNull()) {
+    if (wifi.isNull()) {
+      RestoreLogSkipped(out, &logc, "wifi", "null object");
+    } else {
       bool updated = false;
+
       if (wifi.containsKey("ssid")) {
         const char *ssid_c = wifi["ssid"] | nullptr;
         if (ssid_c != nullptr && ssid_c[0] != '\0') {
@@ -2176,213 +2492,391 @@ static bool RestoreNvsFromJson(const String &json, Print &out) {
         g_network_config.dst_enabled = wifi["tz_dst"].as<bool>();
         updated = true;
       }
+
       if (updated) {
-        SaveNetworkConfigToNVS();
+        SaveNetworkConfigToNVS(); // has its own VERIFY logging
+        RestoreLogSaved(out, &logc, "wifi", "ssid/tz updated");
         ++applied_sections;
+      } else {
+        RestoreLogSkipped(out, &logc, "wifi", "no usable fields");
       }
     }
   }
 
+  // -------------------------------------------------------------------------
+  // topo_persist
+  // -------------------------------------------------------------------------
   if (doc.containsKey("topo_persist")) {
+    RestoreLogFound(out, &logc, "topo_persist");
     g_topology_persist_enabled = doc["topo_persist"].as<bool>();
     SaveTopoPersistFlag();
+    RestoreLogSaved(out, &logc, "topo_persist",
+                    g_topology_persist_enabled ? "enabled" : "disabled");
     ++applied_sections;
   }
 
+  // -------------------------------------------------------------------------
+  // limits
+  // -------------------------------------------------------------------------
   if (doc.containsKey("limits")) {
+    RestoreLogFound(out, &logc, "limits");
+
     JsonObject limits = doc["limits"];
-    const float wl = limits["warn_low_c"].as<float>();
-    const float wh = limits["warn_high_c"].as<float>();
-    const float al = limits["alert_low_c"].as<float>();
-    const float ah = limits["alert_high_c"].as<float>();
-    const float hyst = limits["limit_hyst_c"].as<float>();
+    if (limits.isNull()) {
+      RestoreLogSkipped(out, &logc, "limits", "null object");
+    } else {
+      const float wl = limits["warn_low_c"].as<float>();
+      const float wh = limits["warn_high_c"].as<float>();
+      const float al = limits["alert_low_c"].as<float>();
+      const float ah = limits["alert_high_c"].as<float>();
+      const float hyst = limits["limit_hyst_c"].as<float>();
 
-    bool valid = true;
-    if (wh > wl) {
-      g_warn_low_c = wl;
-      g_warn_high_c = wh;
-    } else {
-      valid = false;
-    }
-    if (ah > al) {
-      g_alert_low_c = al;
-      g_alert_high_c = ah;
-    } else {
-      valid = false;
-    }
-    if (hyst >= 0.0f) {
-      g_limit_hysteresis_c = hyst;
-    }
+      bool valid = true;
+      if (wh > wl) {
+        g_warn_low_c = wl;
+        g_warn_high_c = wh;
+      } else {
+        valid = false;
+      }
+      if (ah > al) {
+        g_alert_low_c = al;
+        g_alert_high_c = ah;
+      } else {
+        valid = false;
+      }
+      if (hyst >= 0.0f) {
+        g_limit_hysteresis_c = hyst;
+      } else {
+        valid = false;
+      }
 
-    if (valid) {
-      SaveLimits();
-      ++applied_sections;
-    } else {
-      out.println(F("nvs restore: skipped limits (invalid ranges)"));
+      if (valid) {
+        SaveLimits();
+        RestoreLogSaved(out, &logc, "limits", "ranges ok");
+        ++applied_sections;
+      } else {
+        RestoreLogSkipped(out, &logc, "limits", "invalid ranges");
+      }
     }
   }
 
+  // -------------------------------------------------------------------------
+  // display
+  // -------------------------------------------------------------------------
   if (doc.containsKey("display")) {
+    RestoreLogFound(out, &logc, "display");
     JsonObject disp = doc["display"];
-    g_display_fahrenheit = disp["fahrenheit"].as<bool>();
-    SaveDisplayUnits();
-    ++applied_sections;
+    if (disp.isNull()) {
+      RestoreLogSkipped(out, &logc, "display", "null object");
+    } else {
+      g_display_fahrenheit = disp["fahrenheit"].as<bool>();
+      SaveDisplayUnits();
+      RestoreLogSaved(out, &logc, "display",
+                      g_display_fahrenheit ? "fahrenheit" : "celsius");
+      ++applied_sections;
+    }
   }
 
+  // -------------------------------------------------------------------------
+  // highlight
+  // -------------------------------------------------------------------------
   if (doc.containsKey("highlight")) {
+    RestoreLogFound(out, &logc, "highlight");
     JsonObject hl = doc["highlight"];
-    g_highlight_missing_nodes = hl["missing"].as<bool>();
-    const int stale = hl["stale_min"].as<int>();
-    if (stale > 0) {
-      g_stale_minutes_threshold = static_cast<uint32_t>(stale);
+    if (hl.isNull()) {
+      RestoreLogSkipped(out, &logc, "highlight", "null object");
+    } else {
+      g_highlight_missing_nodes = hl["missing"].as<bool>();
+      const int stale = hl["stale_min"].as<int>();
+      if (stale > 0) {
+        g_stale_minutes_threshold = static_cast<uint32_t>(stale);
+        SaveHighlightSettings();
+        RestoreLogSaved(out, &logc, "highlight", "missing/stale updated");
+        ++applied_sections;
+      } else {
+        RestoreLogSkipped(out, &logc, "highlight", "stale_min <= 0");
+      }
     }
-    SaveHighlightSettings();
-    ++applied_sections;
   }
 
+  // -------------------------------------------------------------------------
+  // ntfy
+  // -------------------------------------------------------------------------
   if (doc.containsKey("ntfy")) {
+    RestoreLogFound(out, &logc, "ntfy");
     JsonObject ntfy = doc["ntfy"];
-    g_ntfy_config.enabled = ntfy["enabled"].as<bool>();
-    g_ntfy_config.summary_enabled = ntfy["summary_enabled"].as<bool>();
-    const uint32_t sum_min = ntfy["summary_min"].as<uint32_t>();
-    if (sum_min > 0) {
-      g_ntfy_config.summary_period_min = sum_min;
+    if (ntfy.isNull()) {
+      RestoreLogSkipped(out, &logc, "ntfy", "null object");
+    } else {
+      g_ntfy_config.enabled = ntfy["enabled"].as<bool>();
+      g_ntfy_config.summary_enabled = ntfy["summary_enabled"].as<bool>();
+      const uint32_t sum_min = ntfy["summary_min"].as<uint32_t>();
+      if (sum_min > 0) {
+        g_ntfy_config.summary_period_min = sum_min;
+      }
+      SaveNtfySettings();
+      RestoreLogSaved(out, &logc, "ntfy", "settings updated");
+      ++applied_sections;
     }
-    SaveNtfySettings();
-    ++applied_sections;
   }
 
+  // -------------------------------------------------------------------------
+  // tile
+  // -------------------------------------------------------------------------
   if (doc.containsKey("tile")) {
+    RestoreLogFound(out, &logc, "tile");
     JsonObject tile = doc["tile"];
-    g_show_sensor_labels = tile["sensor_labels"].as<bool>();
-    g_show_age_label = tile["age_label"].as<bool>();
-    SaveTileDisplaySettings();
-    ++applied_sections;
+    if (tile.isNull()) {
+      RestoreLogSkipped(out, &logc, "tile", "null object");
+    } else {
+      g_show_sensor_labels = tile["sensor_labels"].as<bool>();
+      g_show_age_label = tile["age_label"].as<bool>();
+      SaveTileDisplaySettings();
+      RestoreLogSaved(out, &logc, "tile", "flags updated");
+      ++applied_sections;
+    }
   }
 
+  // -------------------------------------------------------------------------
+  // buzzer
+  // -------------------------------------------------------------------------
   if (doc.containsKey("buzzer")) {
+    RestoreLogFound(out, &logc, "buzzer");
     JsonObject buzzer = doc["buzzer"];
-    const uint32_t len = buzzer["beep_ms"].as<uint32_t>();
-    const uint32_t warn_gap = buzzer["warn_gap_ms"].as<uint32_t>();
-    const uint32_t alert_gap = buzzer["alert_gap_ms"].as<uint32_t>();
+    if (buzzer.isNull()) {
+      RestoreLogSkipped(out, &logc, "buzzer", "null object");
+    } else {
+      const uint32_t len = buzzer["beep_ms"].as<uint32_t>();
+      const uint32_t warn_gap = buzzer["warn_gap_ms"].as<uint32_t>();
+      const uint32_t alert_gap = buzzer["alert_gap_ms"].as<uint32_t>();
 
-    if (len > 0)
-      g_beep_len_ms = len;
-    g_beep_gap_warn_ms = warn_gap;
-    g_beep_gap_alert_ms = alert_gap;
+      if (len > 0) {
+        g_beep_len_ms = len;
+      }
+      g_beep_gap_warn_ms = warn_gap;
+      g_beep_gap_alert_ms = alert_gap;
 
-    SaveBuzzerSettings();
-    ++applied_sections;
+      SaveBuzzerSettings();
+      RestoreLogSaved(out, &logc, "buzzer", "timings updated");
+      ++applied_sections;
+    }
   }
 
+  // -------------------------------------------------------------------------
+  // flash_ms
+  // -------------------------------------------------------------------------
   if (doc.containsKey("flash_ms")) {
+    RestoreLogFound(out, &logc, "flash_ms");
     const uint32_t flash_ms = doc["flash_ms"].as<uint32_t>();
     g_flash_interval_ms = flash_ms;
     SaveFlashSettings();
+    RestoreLogSaved(out, &logc, "flash_ms", "interval updated");
     ++applied_sections;
   }
 
+  // -------------------------------------------------------------------------
+  // history
+  // -------------------------------------------------------------------------
   if (doc.containsKey("history")) {
+    RestoreLogFound(out, &logc, "history");
     JsonObject hist = doc["history"];
-    const uint32_t interval_ms = hist["interval_ms"].as<uint32_t>();
-    const uint32_t retention_days = hist["retention_days"].as<uint32_t>();
-    if (interval_ms > 0 && retention_days > 0) {
-      MeshNode::SetHistoryConfig(interval_ms, retention_days);
-      SaveHistoryConfigToNvs();
-      ++applied_sections;
+    if (hist.isNull()) {
+      RestoreLogSkipped(out, &logc, "history", "null object");
     } else {
-      out.println(F("nvs restore: skipped history (invalid values)"));
+      const uint32_t interval_ms = hist["interval_ms"].as<uint32_t>();
+      const uint32_t retention_days = hist["retention_days"].as<uint32_t>();
+      if (interval_ms > 0 && retention_days > 0) {
+        MeshNode::SetHistoryConfig(interval_ms, retention_days);
+        SaveHistoryConfigToNvs();
+        RestoreLogSaved(out, &logc, "history", "config updated");
+        ++applied_sections;
+      } else {
+        RestoreLogSkipped(out, &logc, "history", "invalid values");
+      }
     }
   }
 
-  bool labels_applied = false;
+  // -------------------------------------------------------------------------
+  // node_meta_hex
+  // -------------------------------------------------------------------------
+  bool meta_saved = false;
+  if (doc.containsKey("node_meta_hex")) {
+    RestoreLogFound(out, &logc, "node_meta_hex");
+
+    JsonVariantConst meta_v = doc["node_meta_hex"];
+    if (g_debug_enabled) {
+      NvsRestoreDebugVariant("node_meta_hex", meta_v, out);
+    }
+
+    if (meta_v.isNull()) {
+      RestoreLogSkipped(out, &logc, "node_meta_hex", "null");
+    } else if (!meta_v.is<const char *>()) {
+      RestoreLogSkipped(out, &logc, "node_meta_hex", "not a string");
+    } else {
+      const char *meta_hex_c = meta_v.as<const char *>();
+      if (meta_hex_c == nullptr || meta_hex_c[0] == '\0') {
+        RestoreLogSkipped(out, &logc, "node_meta_hex", "empty string");
+      } else {
+        std::vector<uint8_t> bytes;
+        if (HexToBytes(meta_hex_c, &bytes) && !bytes.empty() &&
+            (bytes.size() % sizeof(NodeMetaRecord)) == 0U) {
+          const size_t record_count = bytes.size() / sizeof(NodeMetaRecord);
+
+          CollectNodeIdsFromNodeMetaBytes(bytes, &seed_node_ids);
+
+          g_root_preferences.begin("meshroot", /*readOnly=*/false);
+          const bool ok = NvsPutBytesVerified(g_root_preferences, "node_meta",
+                                              bytes.data(), bytes.size());
+          g_root_preferences.end();
+
+          if (ok) {
+            RestoreLogSaved(out, &logc, "node_meta_hex");
+            out.printf("nvs restore: saved node_meta_hex (%u record(s))\n",
+                       static_cast<unsigned>(record_count));
+            meta_saved = true;
+            ++applied_sections;
+          } else {
+            RestoreLogFailed(out, &logc, "node_meta_hex", "write verify failed");
+            out.println(F("nvs restore: failed to write node meta"));
+          }
+        } else {
+          RestoreLogSkipped(out, &logc, "node_meta_hex", "invalid hex/length");
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // labels_json
+  // -------------------------------------------------------------------------
+  bool labels_saved = false;
   if (doc.containsKey("labels_json")) {
-    const char *labels_c = doc["labels_json"] | nullptr;
-    if (labels_c != nullptr) {
-      const String labels_str(labels_c);
+    RestoreLogFound(out, &logc, "labels_json");
+
+    JsonVariantConst labels_v = doc["labels_json"];
+    if (g_debug_enabled) {
+      NvsRestoreDebugVariant("labels_json", labels_v, out);
+    }
+
+    // Accept either:
+    //  - string (your current nvs dump format), or
+    //  - object/array (if something ever strips the quotes).
+    String labels_str;
+    if (labels_v.is<const char *>()) {
+      const char *labels_c = labels_v.as<const char *>();
+      if (labels_c != nullptr) {
+        labels_str = labels_c;
+      }
+    } else if (labels_v.is<JsonObjectConst>() || labels_v.is<JsonArrayConst>()) {
+      serializeJson(labels_v, labels_str);
+    }
+
+    if (labels_str.isEmpty()) {
+      if (labels_v.isNull()) {
+        RestoreLogSkipped(out, &logc, "labels_json", "null");
+      } else {
+        RestoreLogSkipped(out, &logc, "labels_json", "empty or wrong type");
+      }
+    } else {
 #if defined(ARDUINOJSON_VERSION_MAJOR) && (ARDUINOJSON_VERSION_MAJOR >= 7)
-      // Ensure the validator has enough capacity for the full labels payload.
-      const size_t labels_capacity = labels_str.length() + 512;
-      DynamicJsonDocument labels_doc(labels_capacity);
+      JsonDocument labels_doc;
 #else
-      StaticJsonDocument<12288> labels_doc;
+      DynamicJsonDocument labels_doc((labels_str.length() * 2U) + 2048U);
 #endif
       const DeserializationError lerr = deserializeJson(labels_doc, labels_str);
       if (!lerr) {
+        CollectNodeIdsFromLabelsDoc(labels_doc, &seed_node_ids);
+
         g_root_preferences.begin("meshroot", /*readOnly=*/false);
         const bool ok =
             NvsPutStringVerified(g_root_preferences, "labels", labels_str);
         g_root_preferences.end();
+
         if (ok) {
-          LoadLabels();
-          labels_applied = true;
+          RestoreLogSaved(out, &logc, "labels_json");
+          out.printf("nvs restore: saved labels_json (%u bytes)\n",
+                     static_cast<unsigned>(labels_str.length()));
+          labels_saved = true;
           ++applied_sections;
         } else {
+          RestoreLogFailed(out, &logc, "labels_json", "write verify failed");
           out.println(F("nvs restore: failed to write labels"));
         }
       } else {
-        out.println(F("nvs restore: ignored labels_json (invalid JSON)"));
+        RestoreLogSkipped(out, &logc, "labels_json", "invalid inner JSON");
+        out.printf("nvs restore: ignored labels_json (invalid JSON: %s)\n",
+                   lerr.c_str());
       }
     }
   }
 
-  bool meta_applied = false;
-  if (doc.containsKey("node_meta_hex")) {
-    const char *meta_hex_c = doc["node_meta_hex"] | nullptr;
-    if (meta_hex_c != nullptr) {
-      std::vector<uint8_t> bytes;
-      if (HexToBytes(meta_hex_c, &bytes) && !bytes.empty() &&
-          (bytes.size() % sizeof(NodeMetaRecord)) == 0) {
-        g_root_preferences.begin("meshroot", /*readOnly=*/false);
-        const bool ok = NvsPutBytesVerified(g_root_preferences, "node_meta",
-                                            bytes.data(), bytes.size());
-        g_root_preferences.end();
-        if (ok) {
-          LoadNodeMetaFromNVS();
-          meta_applied = true;
-          ++applied_sections;
-        } else {
-          out.println(F("nvs restore: failed to write node meta"));
-        }
-      } else {
-        out.println(F("nvs restore: ignored node_meta_hex (invalid length)"));
-      }
-    }
-  }
-
-  bool known_applied = false;
+  // -------------------------------------------------------------------------
+  // known_hex
+  // -------------------------------------------------------------------------
+  bool known_saved = false;
   if (doc.containsKey("known_hex")) {
+    RestoreLogFound(out, &logc, "known_hex");
+
     const char *known_hex_c = doc["known_hex"] | nullptr;
-    if (known_hex_c != nullptr) {
+    if (known_hex_c == nullptr || known_hex_c[0] == '\0') {
+      RestoreLogSkipped(out, &logc, "known_hex", "empty");
+    } else {
       std::vector<uint8_t> bytes;
       if (HexToBytes(known_hex_c, &bytes) &&
-          (bytes.size() % sizeof(uint32_t)) == 0) {
+          (bytes.size() % sizeof(uint32_t)) == 0U) {
         std::vector<uint32_t> ids;
         ids.reserve(bytes.size() / sizeof(uint32_t));
+
         for (size_t i = 0; i < bytes.size(); i += sizeof(uint32_t)) {
           uint32_t v = 0;
           memcpy(&v, bytes.data() + i, sizeof(uint32_t));
           ids.push_back(v);
+          AppendUniqueNodeId(&seed_node_ids, v);
         }
+
         WriteKnownToNVS(ids);
-        known_applied = true;
+        out.printf("nvs restore: known_hex nodes=%u\n",
+                   static_cast<unsigned>(ids.size()));
+        RestoreLogSaved(out, &logc, "known_hex", "written to NVS");
+        known_saved = true;
         ++applied_sections;
       } else {
-        out.println(F("nvs restore: ignored known_hex (invalid length)"));
+        RestoreLogSkipped(out, &logc, "known_hex", "invalid length/hex");
       }
     }
   }
 
-  if (known_applied && g_topology_persist_enabled) {
+  // -------------------------------------------------------------------------
+  // Seed nodes (independent of topo persistence)
+  // -------------------------------------------------------------------------
+  if (!seed_node_ids.empty()) {
+    const uint32_t now_ms = millis();
+    SeedMeshNodesFromIds(seed_node_ids, now_ms);
+    g_layout_dirty = true;
+    out.printf("nvs restore: seeded MeshNode models=%u\n",
+               static_cast<unsigned>(seed_node_ids.size()));
+  }
+
+  // If topo persistence is enabled, load known topology as usual.
+  if (known_saved && g_topology_persist_enabled) {
     LoadKnownTopology();
   }
-  if (meta_applied || labels_applied) {
+
+  // Apply in normal workflow order: meta first, then labels.
+  if (meta_saved) {
     LoadNodeMetaFromNVS();
+  }
+  if (labels_saved) {
     LoadLabels();
+  }
+  if (meta_saved || labels_saved || known_saved) {
     GuiRequestRender();
   }
 
-  out.printf("nvs restore: applied %d section(s)\n", applied_sections);
+  out.printf("nvs restore: applied=%d found=%d saved=%d skipped=%d failed=%d\n",
+             applied_sections, logc.found, logc.saved, logc.skipped,
+             logc.failed);
+
   return applied_sections > 0;
 }
 
@@ -3141,6 +3635,7 @@ void DisplayInit() {
   }
 
   Serial.println(F("[Display] Init LVGL port"));
+  LogHeap("getTouch");
   if (!lvgl_port_init(g_board->getLCD(), g_board->getTouch())) {
     Serial.println(F("[Display] lvgl_port_init() failed"));
     while (true) {
@@ -6405,12 +6900,288 @@ static void CmdStats(void *ctx, int argc, const String argv[], Print &out) {
   out.printf("labels NVS size=%u bytes\n", static_cast<unsigned>(labels_bytes));
 }
 
+// ---------------------------------------------------------------------------
+// NVS restore: fast raw capture (fixed buffer + streaming sentinel detect)
+// ---------------------------------------------------------------------------
+
+static char g_nvs_restore_capture[kNvsRestoreMaxBytes + 1];
+static size_t g_nvs_restore_capture_len = 0;
+
+// Streaming match positions for sentinels (no searching/scan per byte).
+static size_t g_nvs_restore_end_match_pos = 0;
+static size_t g_nvs_restore_abort_match_pos = 0;
+
+// Used to yield only when the serial input is idle.
+static uint32_t g_nvs_restore_last_yield_ms = 0;
+
+static inline bool IsWhitespaceChar(char ch) {
+  return (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r');
+}
+
+static void ResetNvsRestoreCaptureState() {
+  g_nvs_restore_capture_len = 0;
+  g_nvs_restore_end_match_pos = 0;
+  g_nvs_restore_abort_match_pos = 0;
+  g_nvs_restore_capture[0] = '\0';
+  g_nvs_restore_last_yield_ms = millis();
+}
+
+// Simple streaming prefix matcher.
+// Good enough here because the sentinel strings are unique and short.
+static inline void AdvanceSentinelMatch(const char *sentinel,
+                                        size_t sentinel_len, size_t *match_pos,
+                                        char ch) {
+  if (*match_pos < sentinel_len && ch == sentinel[*match_pos]) {
+    (*match_pos)++;
+    return;
+  }
+
+  // Fallback: restart if this char could begin a new match.
+  *match_pos = (sentinel_len > 0 && ch == sentinel[0]) ? 1U : 0U;
+}
+
+static void FinalizeNvsRestoreFromCaptureAndApply(Print &out,
+                                      size_t bytes_to_remove_from_end) {
+  // bytes_to_remove_from_end is typically strlen(kNvsRestoreEndSentinel)
+  // or strlen(kNvsRestoreAbortSentinel) depending on which matched.
+  if (g_nvs_restore_capture_len < bytes_to_remove_from_end) {
+    ResetNvsRestoreRawMode();
+    ResetNvsRestoreCaptureState();
+    out.println(F("ERR nvs restore (internal parse state)"));
+    return;
+  }
+
+  size_t payload_len = g_nvs_restore_capture_len - bytes_to_remove_from_end;
+
+  // Trim trailing whitespace (often includes the newline before the sentinel
+  // line).
+  while (payload_len > 0 &&
+         IsWhitespaceChar(g_nvs_restore_capture[payload_len - 1])) {
+    payload_len--;
+  }
+
+  g_nvs_restore_capture[payload_len] = '\0';
+
+  String payload = String(g_nvs_restore_capture);
+  payload.trim();
+
+  ResetNvsRestoreRawMode();
+  ResetNvsRestoreCaptureState();
+
+  if (payload.length() == 0) {
+    out.println(F("ERR nvs restore (no JSON received)"));
+    return;
+  }
+
+  out.println(F("nvs restore: processing JSON..."));
+  out.printf("nvs restore: received bytes=%u\n",
+             static_cast<unsigned>(payload.length()));
+
+  const size_t tail_len = 120;
+  if (payload.length() > tail_len) {
+    out.printf("nvs restore: tail=...%s\n",
+               payload.c_str() + (payload.length() - tail_len));
+  } else {
+    out.printf("nvs restore: tail=%s\n", payload.c_str());
+  }
+
+  if (RestoreNvsFromJson(payload, out)) {
+    out.println(F("nvs restore: ok"));
+  } else {
+    out.println(F("nvs restore: no changes"));
+  }
+
+  if (g_debug_enabled) {
+    NvsRestoreDebugPayloadSlice(payload, "labels_json", out);
+    NvsRestoreDebugPayloadSlice(payload, "node_meta_hex", out);
+  }
+
+}
+
 static void ResetNvsRestoreRawMode() {
-  g_console.EndRawMode();
-  // g_console.SetMaxLineLen(kConsoleDefaultMaxLineLen);
   g_nvs_restore_raw_active = false;
   g_nvs_restore_raw_json = "";
+  g_nvs_restore_rx_line = "";
+  g_nvs_restore_rx_bytes = 0;
+  ResetNvsRestoreCaptureState();
 }
+
+static void DrainSerialUntilNewline(Stream &in, size_t max_bytes) {
+  for (size_t i = 0; i < max_bytes && in.available() > 0; ++i) {
+    const int ch = in.read();
+    if (ch == '\n' || ch < 0) {
+      break;
+    }
+  }
+}
+
+static bool AppendRestoreFragmentOrFail(const String &fragment,
+                                        bool append_newline, Print &out) {
+  const size_t extra = fragment.length() + (append_newline ? 1U : 0U);
+  if (g_nvs_restore_raw_json.length() + extra > kNvsRestoreMaxBytes) {
+    ResetNvsRestoreRawMode();
+    out.println(F("ERR nvs restore (input too large)"));
+    return false;
+  }
+  g_nvs_restore_raw_json += fragment;
+  if (append_newline) {
+    g_nvs_restore_raw_json += '\n';
+  }
+  return true;
+}
+
+static void FinalizeNvsRestorePayloadAndApply(Print &out) {
+  String payload = g_nvs_restore_raw_json;
+  ResetNvsRestoreRawMode();
+
+  if (payload.endsWith("\n")) {
+    payload.remove(payload.length() - 1);
+  }
+
+  if (payload.length() == 0) {
+    out.println(F("ERR nvs restore (no JSON received)"));
+    return;
+  }
+
+  out.println(F("nvs restore: processing JSON..."));
+  out.printf("nvs restore: received bytes=%u\n",
+             static_cast<unsigned>(payload.length()));
+
+  const size_t tail_len = 120;
+  if (payload.length() > tail_len) {
+    out.printf("nvs restore: tail=...%s\n",
+               payload.c_str() + (payload.length() - tail_len));
+  } else {
+    out.printf("nvs restore: tail=%s\n", payload.c_str());
+  }
+
+  if (RestoreNvsFromJson(payload, out)) {
+    out.println(F("nvs restore: ok"));
+  } else {
+    out.println(F("nvs restore: no changes"));
+  }
+}
+
+static void StartNvsRestoreRawMode(Print &out) {
+  g_nvs_restore_raw_active = true;
+  g_nvs_restore_raw_json = "";
+  g_nvs_restore_rx_line = "";
+  g_nvs_restore_rx_bytes = 0;
+
+  // Optional but helps avoid repeated realloc while pasting.
+  g_nvs_restore_raw_json.reserve(kNvsRestoreMaxBytes);
+  g_nvs_restore_rx_line.reserve(256);
+
+  ResetNvsRestoreCaptureState(); // <--- ADD THIS
+
+  out.println(F("nvs restore: raw capture enabled"));
+  out.println(F("Paste JSON (multi-line ok)."));
+  out.printf("End with %s on its own line, or %s to abort.\n",
+             kNvsRestoreEndSentinel, kNvsRestoreAbortSentinel);
+}
+
+// Drain Serial as a byte stream and build JSON safely even with a small RX
+// ring. Key behaviors:
+//   - No per-byte String reallocations.
+//   - No yield while bytes are available.
+//   - Streaming sentinel detection for END/CANCEL.
+//   - Yield only when input is idle.
+static void PumpNvsRestoreSerial(Stream &in, Print &out) {
+  if (!g_nvs_restore_raw_active) {
+    return;
+  }
+
+  const char *const end_sentinel = kNvsRestoreEndSentinel;
+  const size_t end_len = strlen(kNvsRestoreEndSentinel);
+
+  const char *const abort_sentinel = kNvsRestoreAbortSentinel;
+  const size_t abort_len = strlen(kNvsRestoreAbortSentinel);
+
+  bool read_any_bytes = false;
+
+  while (g_nvs_restore_raw_active) {
+    const int available = in.available();
+    if (available <= 0) {
+      break; // input idle
+    }
+
+    // IMPORTANT: do not yield while data is waiting.
+    read_any_bytes = true;
+
+    // Read in small chunks to reduce calls/overhead, but never block.
+    char chunk[64];
+    const size_t chunk_target = static_cast<size_t>(
+        std::min<int>(available, static_cast<int>(sizeof(chunk))));
+
+    size_t chunk_read = 0;
+    for (; chunk_read < chunk_target; ++chunk_read) {
+      const int raw = in.read();
+      if (raw < 0) {
+        break;
+      }
+      ++g_nvs_restore_rx_bytes;
+
+      char ch = static_cast<char>(raw);
+      if (ch == '\r') {
+        // Normalize CRLF to LF.
+        continue;
+      }
+      chunk[chunk_read] = ch;
+
+      // Store into fixed capture buffer.
+      if (g_nvs_restore_capture_len >= kNvsRestoreMaxBytes) {
+        ResetNvsRestoreRawMode();
+        out.println(F("ERR nvs restore (input too large)"));
+        return;
+      }
+      g_nvs_restore_capture[g_nvs_restore_capture_len++] = ch;
+      g_nvs_restore_capture[g_nvs_restore_capture_len] = '\0';
+
+      // Streaming sentinel detection.
+      AdvanceSentinelMatch(end_sentinel, end_len, &g_nvs_restore_end_match_pos,
+                           ch);
+      AdvanceSentinelMatch(abort_sentinel, abort_len,
+                           &g_nvs_restore_abort_match_pos, ch);
+
+      if (g_nvs_restore_abort_match_pos == abort_len) {
+        // Drain to end-of-line (best effort) so leftover bytes don't become
+        // console input.
+        DrainSerialUntilNewline(in, /*max_bytes=*/1024);
+
+        ResetNvsRestoreRawMode();
+        out.println(F("nvs restore: canceled"));
+        return;
+      }
+
+      if (g_nvs_restore_end_match_pos == end_len) {
+        // Drain to end-of-line (best effort) so leftover bytes don't become
+        // console input.
+        DrainSerialUntilNewline(in, /*max_bytes=*/1024);
+
+        // Remove the sentinel bytes from the end, finalize payload, apply.
+        FinalizeNvsRestoreFromCaptureAndApply(
+            out, /*bytes_to_remove_from_end=*/end_len);
+        return;
+      }
+    }
+  }
+
+  // Yield only if input is idle (no bytes available).
+  if (!read_any_bytes) {
+    const uint32_t now_ms = millis();
+    if ((now_ms - g_nvs_restore_last_yield_ms) >= 5) {
+      delay(0);
+      g_nvs_restore_last_yield_ms = now_ms;
+    }
+  }
+}
+
+// static void ResetNvsRestoreRawMode() {
+//   g_console.EndRawMode();
+//   g_console.SetMaxLineLen(kConsoleDefaultMaxLineLen);
+//   g_nvs_restore_raw_active = false;
+//   g_nvs_restore_raw_json = "";
+// }
 
 static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
   (void)ctx;
@@ -6470,16 +7241,16 @@ static void NvsRestoreRawLine(void *ctx, const String &line, Print &out) {
   g_nvs_restore_raw_json += '\n';
 }
 
-static void StartNvsRestoreRawMode(Print &out) {
-  g_nvs_restore_raw_active = true;
-  g_nvs_restore_raw_json = "";
-  // g_console.SetMaxLineLen(kNvsRestoreMaxBytes);
-  g_console.BeginRawMode(&NvsRestoreRawLine, nullptr);
-  out.println(F("nvs restore: raw mode enabled"));
-  out.println(F("Paste JSON (multi-line ok)."));
-  out.printf("End with %s on its own line, or %s to abort.\n",
-             kNvsRestoreEndSentinel, kNvsRestoreAbortSentinel);
-}
+// static void StartNvsRestoreRawMode(Print &out) {
+//   g_nvs_restore_raw_active = true;
+//   g_nvs_restore_raw_json = "";
+//   g_console.SetMaxLineLen(kNvsRestoreMaxBytes);
+//   g_console.BeginRawMode(&NvsRestoreRawLine, nullptr);
+//   out.println(F("nvs restore: raw mode enabled"));
+//   out.println(F("Paste JSON (multi-line ok)."));
+//   out.printf("End with %s on its own line, or %s to abort.\n",
+//              kNvsRestoreEndSentinel, kNvsRestoreAbortSentinel);
+// }
 
 static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
   (void)ctx;
@@ -6506,8 +7277,8 @@ static void CmdNvs(void *ctx, int argc, const String argv[], Print &out) {
   }
 
   if (sub.equalsIgnoreCase("restore")) {
-    if (g_console.InRawMode()) {
-      out.println(F("ERR nvs restore (console busy)"));
+    if (g_nvs_restore_raw_active) {
+      out.println(F("ERR nvs restore (already capturing)"));
       return;
     }
 
@@ -8784,14 +9555,23 @@ static void ProcessBridgePassthroughTx() {
 // -----------------------------------------------------------------------------
 
 void setup() {
-#if defined(ARDUINO_ARCH_ESP32)
+
   // Must be before Serial.begin() to reliably take effect.
-  Serial.setRxBufferSize(2048);
-#endif
+  auto rx_ok = Serial.setRxBufferSize(2048);
 
   Serial.begin(DBG_BAUD);
+
+  delay(2000);
+
+  Serial.printf("Serial.setRxBufferSize(2048) -> %d\n", (int)rx_ok);
+
+  LogHeap("After Serial");
+
   bridge_serial.begin(BRIDGE_GUI_BAUD, SERIAL_8N1, BRIDGE_GUI_RX_PIN,
                       BRIDGE_GUI_TX_PIN);
+
+  LogHeap("After bridge");
+
   delay(2000);
 
 #ifdef ESP_ARDUINO_VERSION_STR
@@ -8807,6 +9587,8 @@ void setup() {
 
   RootInitStorage();
   RootInitNetwork();
+
+  LogHeap("RootInitStorage");
 
   DisplayInit();
   GuiInit();
@@ -8879,6 +9661,17 @@ void setup() {
 }
 
 void loop() {
+  if (g_nvs_restore_raw_active) {
+    PumpNvsRestoreSerial(Serial, Serial);
+    static uint32_t last_bridge_ms = 0;
+    const uint32_t now_ms = millis();
+    if (now_ms - last_bridge_ms >= 50) {
+      ProcessBridgeSerial();
+      last_bridge_ms = now_ms;
+    }
+    return;
+  }
+
   if (g_bridge_passthrough) {
     ProcessBridgePassthroughTx();
   } else {
