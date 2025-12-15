@@ -57,13 +57,10 @@ void MeshNode::PrintSensorHistorySampleLayout(Print& output) {
 
 void MeshNode::SetHistoryConfig(uint32_t interval_ms,
                                 uint32_t retention_days) {
-  // interval_ms == 0 disables logging; keep previous value in that case.
-  if (interval_ms != 0U) {
-    history_interval_ms_ = interval_ms;
-  }
+  // interval_ms == 0 disables logging.
+  history_interval_ms_ = interval_ms;
 
   if (retention_days == 0U) {
-    // Do not allow zero-day retention; fall back to default 7 days.
     history_retention_days_ = 7U;
   } else {
     history_retention_days_ = retention_days;
@@ -71,6 +68,7 @@ void MeshNode::SetHistoryConfig(uint32_t interval_ms,
 
   history_capacity_per_sensor_ = ComputeHistoryCapacityPerSensor();
 }
+
 
 size_t MeshNode::ComputeHistoryCapacityPerSensor() {
   if (history_interval_ms_ == 0U) {
