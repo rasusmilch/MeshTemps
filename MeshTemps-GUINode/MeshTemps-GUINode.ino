@@ -4008,8 +4008,8 @@ void GuiInit() {
   lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_COVER, LV_PART_ITEMS);
 
   // Optional: if you want points to stand out more in scatter mode
-  // lv_obj_set_style_size(g_ui_chart, 3, LV_PART_ITEMS);  // point size (dot
-  // radius-ish)
+  lv_obj_set_style_size(g_ui_chart, 2, LV_PART_ITEMS);  // point size (dot
+  radius-ish)
 
   g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
   lv_label_set_text(g_ui_chart_empty_label, "No history for this range");
