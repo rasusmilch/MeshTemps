@@ -25,6 +25,44 @@ void PrintfTo(Print& output, const char* format, ...) {
 
 }  // namespace
 
+static SemaphoreHandle_t g_mesh_nodes_mutex = nullptr;
+
+SemaphoreHandle_t GetMeshNodesMutex() {
+  if (g_mesh_nodes_mutex == nullptr) {
+    g_mesh_nodes_mutex = xSemaphoreCreateRecursiveMutex();
+  }
+  return g_mesh_nodes_mutex;
+}
+
+ScopedMeshNodesLock::ScopedMeshNodesLock() {
+  SemaphoreHandle_t mutex = GetMeshNodesMutex();
+  if (mutex != nullptr) {
+    xSemaphoreTakeRecursive(mutex, portMAX_DELAY);
+  }
+}
+
+ScopedMeshNodesLock::~ScopedMeshNodesLock() {
+  SemaphoreHandle_t mutex = GetMeshNodesMutex();
+  if (mutex != nullptr) {
+    xSemaphoreGiveRecursive(mutex);
+  }
+}
+
+bool CopySensorHistoryByLabelLocked(
+    uint32_t node_id,
+    const String& sensor_label,
+    std::vector<MeshNode::SensorHistorySample>* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  ScopedMeshNodesLock lock;
+  MeshNode* node = FindMeshNode(node_id);
+  if (node == nullptr) {
+    return false;
+  }
+  return node->GetSensorHistoryByLabel(sensor_label, out);
+}
+
 MeshNode::MeshNode(uint32_t node_id)
     : node_id_(node_id),
       node_id_str_(FormatNodeKeyHex(node_id)),   // hex for any user-facing use
@@ -57,6 +95,7 @@ void MeshNode::PrintSensorHistorySampleLayout(Print& output) {
 
 void MeshNode::SetHistoryConfig(uint32_t interval_ms,
                                 uint32_t retention_days) {
+  ScopedMeshNodesLock lock;
   // interval_ms == 0 disables logging.
   history_interval_ms_ = interval_ms;
 
@@ -87,6 +126,7 @@ size_t MeshNode::ComputeHistoryCapacityPerSensor() {
 }
 
 void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
+  ScopedMeshNodesLock lock;
   // History disabled globally.
   if (history_interval_ms_ == 0U) {
     return;
@@ -310,11 +350,13 @@ int32_t MeshNode::GetSensorEffectiveRank(const String& address) const {
 }
 
 void MeshNode::SetBusGpioAndLastUpdate(int bus_gpio, uint32_t now_ms) {
+  ScopedMeshNodesLock lock;
   bus_gpio_ = bus_gpio;
   last_update_ms_ = now_ms;
 }
 
 MeshNode::Sensor* MeshNode::GetOrCreateSensor(const String& address) {
+  ScopedMeshNodesLock lock;
   Sensor* existing = FindSensor(address);
   if (existing != nullptr) {
     return existing;
@@ -329,6 +371,7 @@ MeshNode::Sensor* MeshNode::GetOrCreateSensor(const String& address) {
 void MeshNode::UpdateFromTemps(int bus_gpio,
                                const JsonArrayConst& sensor_array,
                                uint32_t now_ms) {
+  ScopedMeshNodesLock lock;
   SetBusGpioAndLastUpdate(bus_gpio, now_ms);
 
   // Update / insert each sensor reported in this payload.
@@ -448,6 +491,7 @@ bool MeshNode::SequenceStuck(uint32_t now_ms,
 MeshNode* UpdateMeshNodeFromTempsJson(const JsonDocument& doc,
                                       uint32_t default_node_id,
                                       uint32_t now_ms) {
+  ScopedMeshNodesLock lock;
   const uint32_t node_id = doc["nodeId"] | default_node_id;
   const int bus_gpio = doc["busGpio"] | -1;
 
@@ -484,6 +528,7 @@ std::map<uint32_t, MeshNode> g_mesh_nodes;
 
 // static
 void MeshNode::OnFirstTimeSync(time_t epoch_now, uint32_t now_ms) {
+  ScopedMeshNodesLock lock;
   if (epoch_now <= 0 || now_ms == 0U) {
     return;
   }
@@ -579,6 +624,7 @@ uint32_t MeshNode::first_sync_ms_ = 0U;
 
 
 std::vector<uint32_t> GetAllMeshNodeIds() {
+  ScopedMeshNodesLock lock;
   std::vector<uint32_t> ids;
   ids.reserve(g_mesh_nodes.size());
   for (const auto& kv : g_mesh_nodes) {
@@ -588,6 +634,7 @@ std::vector<uint32_t> GetAllMeshNodeIds() {
 }
 
 MeshNode* GetOrCreateMeshNode(uint32_t node_id) {
+  ScopedMeshNodesLock lock;
   auto it = g_mesh_nodes.find(node_id);
   if (it != g_mesh_nodes.end()) {
     return &it->second;
@@ -598,6 +645,7 @@ MeshNode* GetOrCreateMeshNode(uint32_t node_id) {
 }
 
 MeshNode* FindMeshNode(uint32_t node_id) {
+  ScopedMeshNodesLock lock;
   auto it = g_mesh_nodes.find(node_id);
   if (it == g_mesh_nodes.end()) {
     return nullptr;
@@ -606,6 +654,7 @@ MeshNode* FindMeshNode(uint32_t node_id) {
 }
 
 bool RemoveMeshNode(uint32_t node_id) {
+  ScopedMeshNodesLock lock;
   auto it = g_mesh_nodes.find(node_id);
   if (it == g_mesh_nodes.end()) {
     return false;
@@ -615,5 +664,6 @@ bool RemoveMeshNode(uint32_t node_id) {
 }
 
 void ClearAllMeshNodes() {
+  ScopedMeshNodesLock lock;
   g_mesh_nodes.clear();
 }
