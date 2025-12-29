@@ -5375,6 +5375,125 @@ struct ChartPoint {
   float temp_display = NAN;
 };
 
+// Reused chart buffers (UI thread only).
+static std::vector<ChartPoint> s_chart_points_work;
+static std::vector<ChartPoint> s_chart_points_reduced;
+
+constexpr size_t kMaxLvglPoints = 65000;
+constexpr size_t kMinPlotWidthPx = 200;
+
+static size_t GetTargetChartPointBudget() {
+  int width_px = lv_obj_get_width(g_ui_chart);
+  if (width_px <= 0) {
+    width_px = 800;
+  }
+  width_px = std::max(width_px, static_cast<int>(kMinPlotWidthPx));
+
+  const size_t desired = static_cast<size_t>(width_px) * 2u;
+  return std::min(desired, kMaxLvglPoints);
+}
+
+// Input points must be sorted by time (x ascending).
+static void ReducePointsMinMaxBuckets(const std::vector<ChartPoint>& input,
+                                      size_t target_count,
+                                      std::vector<ChartPoint>* output) {
+  if (output == nullptr) {
+    return;
+  }
+  output->clear();
+  if (input.empty()) {
+    return;
+  }
+
+  if (input.size() <= target_count) {
+    const size_t desired = input.size();
+    if (output->capacity() < desired) {
+      output->reserve(desired);
+    }
+    output->assign(input.begin(), input.end());
+    return;
+  }
+
+  const size_t bucket_count = std::max<size_t>(1u, target_count / 2u);
+  const double x_min = input.front().x_hours;
+  const double x_max = input.back().x_hours;
+  const double x_span = std::max(1e-6, x_max - x_min);
+  const double bucket_width = std::max(1e-6, x_span / bucket_count);
+
+  const size_t desired = std::min(target_count, input.size());
+  if (output->capacity() < desired) {
+    output->reserve(desired);
+  }
+
+  size_t index = 0;
+  for (size_t bucket = 0; bucket < bucket_count && index < input.size();
+       ++bucket) {
+    const double bucket_start = x_min + static_cast<double>(bucket) * bucket_width;
+    const double bucket_end =
+        (bucket + 1 == bucket_count) ? (x_max + 1.0) : (bucket_start + bucket_width);
+
+    bool have_bucket = false;
+    ChartPoint min_point{};
+    ChartPoint max_point{};
+
+    while (index < input.size()) {
+      const ChartPoint& point = input[index];
+      if (point.x_hours < bucket_start) {
+        ++index;
+        continue;
+      }
+      if (point.x_hours >= bucket_end) {
+        break;
+      }
+
+      if (!have_bucket) {
+        min_point = point;
+        max_point = point;
+        have_bucket = true;
+      } else {
+        if (point.temp_display < min_point.temp_display) {
+          min_point = point;
+        }
+        if (point.temp_display > max_point.temp_display) {
+          max_point = point;
+        }
+      }
+      ++index;
+    }
+
+    if (!have_bucket) {
+      continue;
+    }
+
+    if (min_point.x_hours == max_point.x_hours &&
+        min_point.temp_display == max_point.temp_display) {
+      output->push_back(min_point);
+    } else {
+      if (min_point.x_hours <= max_point.x_hours) {
+        output->push_back(min_point);
+        output->push_back(max_point);
+      } else {
+        output->push_back(max_point);
+        output->push_back(min_point);
+      }
+    }
+
+    if (output->size() >= target_count) {
+      break;
+    }
+  }
+
+  if (output->empty()) {
+    output->push_back(input.front());
+    if (output->size() < target_count) {
+      output->push_back(input.back());
+    }
+  }
+  if (output->size() > target_count) {
+    output->resize(target_count);
+  }
+}
+
 static void ShowChartMessage(const char *msg) {
   if (g_ui_chart_empty_label == nullptr) {
     return;
@@ -5413,15 +5532,10 @@ static void BuildHistoryChartForSelection() {
     return;
   }
 
-  MeshNode *node = FindMeshNode(g_chart_selection.node_id);
-  if (node == nullptr) {
-    ShowChartMessage("No node found for this room");
-    return;
-  }
-
   std::vector<MeshNode::SensorHistorySample> history;
-  if (!node->GetSensorHistoryByLabel(g_chart_selection.sensor_label,
-                                     &history) ||
+  if (!CopySensorHistoryByLabelLocked(g_chart_selection.node_id,
+                                      g_chart_selection.sensor_label,
+                                      &history) ||
       history.empty()) {
     ShowChartMessage("No history yet");
     return;
@@ -5459,8 +5573,11 @@ static void BuildHistoryChartForSelection() {
           ? end_epoch - static_cast<time_t>(range.days * 24UL * 60UL * 60UL)
           : 0;
 
-  std::vector<ChartPoint> points;
-  points.reserve(history.size());
+  s_chart_points_work.clear();
+  const size_t reserve_cap = std::min<size_t>(history.size(), 70000);
+  if (s_chart_points_work.capacity() < reserve_cap) {
+    s_chart_points_work.reserve(reserve_cap);
+  }
 
   float min_temp = std::numeric_limits<float>::max();
   float max_temp = std::numeric_limits<float>::lowest();
@@ -5493,7 +5610,7 @@ static void BuildHistoryChartForSelection() {
     ChartPoint pt;
     pt.x_hours = x_hours;
     pt.temp_display = ToDisplayUnits(sample.temp_c);
-    points.push_back(pt);
+    s_chart_points_work.push_back(pt);
 
     if (!isnan(pt.temp_display)) {
       min_temp = std::min(min_temp, pt.temp_display);
@@ -5501,7 +5618,7 @@ static void BuildHistoryChartForSelection() {
     }
   }
 
-  if (points.empty()) {
+  if (s_chart_points_work.empty()) {
     ShowChartMessage("No history in this window");
     return;
   }
@@ -5509,10 +5626,25 @@ static void BuildHistoryChartForSelection() {
   HideChartMessage();
 
   // Sort by time to ensure correct order.
-  std::sort(points.begin(), points.end(),
+  std::sort(s_chart_points_work.begin(), s_chart_points_work.end(),
             [](const ChartPoint &a, const ChartPoint &b) {
               return a.x_hours < b.x_hours;
             });
+
+  const size_t target_budget = GetTargetChartPointBudget();
+  if (s_chart_points_reduced.capacity() < target_budget) {
+    s_chart_points_reduced.reserve(target_budget);
+  }
+  ReducePointsMinMaxBuckets(s_chart_points_work, target_budget,
+                            &s_chart_points_reduced);
+
+  const uint16_t point_count = static_cast<uint16_t>(std::min(
+      s_chart_points_reduced.size(), static_cast<size_t>(UINT16_MAX)));
+
+  Serial.printf("[CHART] raw=%u reduced=%u width=%d\n",
+                static_cast<unsigned>(s_chart_points_work.size()),
+                static_cast<unsigned>(s_chart_points_reduced.size()),
+                lv_obj_get_width(g_ui_chart));
 
   const double total_hours = static_cast<double>(range.days) * 24.0;
   const lv_coord_t x_max =
@@ -5528,7 +5660,7 @@ static void BuildHistoryChartForSelection() {
   min_temp -= margin;
   max_temp += margin;
 
-  lv_chart_set_point_count(g_ui_chart, points.size());
+  lv_chart_set_point_count(g_ui_chart, point_count);
 
   auto ClampU8 = [](uint32_t value, uint32_t low, uint32_t high) -> uint8_t {
     if (value < low)
@@ -5582,13 +5714,15 @@ static void BuildHistoryChartForSelection() {
 
   lv_chart_set_all_value(g_ui_chart, g_ui_chart_series, LV_CHART_POINT_NONE);
 
-  for (size_t i = 0; i < points.size(); ++i) {
+  for (uint16_t i = 0; i < point_count; ++i) {
     const lv_coord_t x_val =
-        static_cast<lv_coord_t>(points[i].x_hours * kChartHoursScale);
+        static_cast<lv_coord_t>(s_chart_points_reduced[i].x_hours *
+                                kChartHoursScale);
     const lv_coord_t y_val =
-        static_cast<lv_coord_t>(points[i].temp_display * kChartTempScale);
+        static_cast<lv_coord_t>(s_chart_points_reduced[i].temp_display *
+                                kChartTempScale);
     lv_chart_set_value_by_id2(g_ui_chart, g_ui_chart_series,
-                              static_cast<uint16_t>(i), x_val, y_val);
+                              i, x_val, y_val);
   }
 
   g_chart_axis_ctx.x_start_hours = 0.0;

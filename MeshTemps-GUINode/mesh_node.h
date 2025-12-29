@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include "freertos/semphr.h"
 #include <time.h>
 #include <vector>
 #include <limits>
@@ -310,5 +311,24 @@ void ClearAllMeshNodes();
 
 // Remove a single node from the global store; returns true if removed.
 bool RemoveMeshNode(uint32_t node_id);
+
+// ---------------------------------------------------------------------------
+// Thread safety for global node store
+// ---------------------------------------------------------------------------
+
+SemaphoreHandle_t GetMeshNodesMutex();
+
+class ScopedMeshNodesLock {
+ public:
+  ScopedMeshNodesLock();
+  ~ScopedMeshNodesLock();
+  ScopedMeshNodesLock(const ScopedMeshNodesLock&) = delete;
+  ScopedMeshNodesLock& operator=(const ScopedMeshNodesLock&) = delete;
+};
+
+bool CopySensorHistoryByLabelLocked(
+    uint32_t node_id,
+    const String& sensor_label,
+    std::vector<MeshNode::SensorHistorySample>* out);
 
 #endif  // MESH_NODE_H_
