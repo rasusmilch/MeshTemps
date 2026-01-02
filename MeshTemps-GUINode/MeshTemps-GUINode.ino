@@ -14,6 +14,7 @@
 
 #include "mesh_node.h" // make NodeMetaRecord & MeshNode visible before auto-prototypes
 #include "serial_console.h"
+#include "chart_point.h"  // ChartPoint type must be visible before Arduino auto-prototypes.
 
 // The GUI board talks to the bridge over the default UART0 header (U0TXD/U0RXD)
 // while keeping Serial (USB CDC) for the PC console. Do not remap to the bridge
@@ -5368,11 +5369,6 @@ static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
     ++band_index;
   }
 }
-
-struct ChartPoint {
-  double x_hours = 0.0; // relative to range start, scaled by 1 hour units
-  float temp_display = NAN;
-};
 
 // Reused chart buffers (UI thread only).
 static std::vector<ChartPoint> s_chart_points_work;

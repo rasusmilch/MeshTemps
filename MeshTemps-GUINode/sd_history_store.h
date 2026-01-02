@@ -56,16 +56,11 @@ class SdHistoryStore {
   bool HasMinuteHourBlock(uint32_t hour_start_epoch_minute) const;
   bool HasHourlyRollupBlock(uint32_t hour_start_epoch_minute) const;
 
- private:
-  static constexpr uint32_t FourCc(char a, char b, char c, char d) {
-    return static_cast<uint32_t>(static_cast<uint8_t>(a)) |
-           (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 8) |
-           (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 16) |
-           (static_cast<uint32_t>(static_cast<uint8_t>(d)) << 24);
-  }
-
-  static constexpr uint32_t kMagicMinute = FourCc('M','I','N','H');
-  static constexpr uint32_t kMagicRollup = FourCc('H','R','O','L');
+  private:
+  // FourCC values stored little-endian in the file header.
+  // 'MINH' = Minute frames for an hour, 'HROL' = Hourly rollup, 'DROL' = Daily rollup.
+  static constexpr uint32_t kMagicMinute = 0x484E494Du;  // 'MINH'
+  static constexpr uint32_t kMagicRollup = 0x4C4F5248u;  // 'HROL'
 
   struct MinuteHeader {
     uint32_t magic;
@@ -103,7 +98,7 @@ class SdHistoryStore {
     uint32_t header_crc32;     // CRC32 over header with header_crc32=0
   };
 
-  static constexpr uint32_t kMagicDaily = FourCc('D','R','O','L');  // Daily ROLlup
+  static constexpr uint32_t kMagicDaily = 0x4C4F5244u;  // 'DROL' Daily rollup
 
   struct DailyHeader {
     uint32_t magic;

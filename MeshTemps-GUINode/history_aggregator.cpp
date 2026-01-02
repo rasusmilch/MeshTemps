@@ -2,6 +2,7 @@
 #include "history_crc.h"
 
 #include <algorithm>
+#include <string.h>
 #include <time.h>
 #include <math.h>
 
@@ -22,6 +23,39 @@ uint32_t HourStartEpochMinute(uint32_t epoch_minute) {
 }
 
 }  // namespace
+
+bool HistoryAggregator::Begin(FramStorageInterface* fram,
+                             uint32_t fram_base_address,
+                             uint32_t fram_region_bytes,
+                             fs::FS& sd_fs,
+                             const char* sd_base_dir) {
+  fram_ = fram;
+  fram_base_address_ = fram_base_address;
+  fram_region_bytes_ = fram_region_bytes;
+
+  storages_initialized_ = false;
+  last_epoch_minute_seen_ = -1;
+  daily_entries_.clear();
+  daily_state_sequence_ = 0;
+  current_day_start_epoch_minute_ = 0;
+
+  if (fram_ == nullptr) return false;
+  if (sd_base_dir == nullptr) return false;
+  if (!sd_store_.Begin(sd_fs, sd_base_dir)) return false;
+
+  // Build an initial descriptor snapshot (may be empty); the descriptor is rebuilt
+  // at each hour boundary when time is valid.
+  (void)RebuildDescriptorIfNeeded_(true);
+
+  // If time is already valid, initialize FRAM layouts now. Otherwise, Tick() will
+  // initialize on the first valid absolute time.
+  if (IsTimeValid_()) {
+    (void)InitializeIfTimeValid_(NowEpochSeconds_());
+  }
+  return true;
+}
+
+
 
 bool HistoryAggregator::InitializeIfTimeValid_(uint32_t epoch_seconds) {
   if (storages_initialized_) return true;
@@ -198,76 +232,33 @@ void HistoryAggregator::Tick(uint32_t now_ms) {
   const uint32_t epoch_seconds = NowEpochSeconds_();
   if (!InitializeIfTimeValid_(epoch_seconds)) return;
 
-  const uint32_t epoch_minute = epoch_seconds / 60u;
+  const uint32_t epoch_minute = EpochSecondsToEpochMinute(epoch_seconds);
   if (static_cast<int32_t>(epoch_minute) == last_epoch_minute_seen_) return;
   last_epoch_minute_seen_ = static_cast<int32_t>(epoch_minute);
 
-  MaybeRotateDay_(epoch_seconds);
-
-  // Hour boundary: rebuild descriptor and ensure journal matches this hour.
-  const uint32_t hour_start_epoch_minute = epoch_minute - (epoch_minute % 60u);
-  if (fram_journal_.hour_start_epoch_minute() != hour_start_epoch_minute) {
-    RebuildDescriptorIfNeeded_(true);
-
-    fram_journal_.Begin(fram_,
-                        fram_hour_base_address_,
-                        fram_hour_region_bytes_,
-                        static_cast<uint16_t>(slots_.size()),
-                        epoch_seconds);
-  }
-
-  PollAndAppendMinute_(now_ms, epoch_seconds);
-
-  if (fram_journal_.IsHourComplete()) {
-    std::vector<SdHistoryStore::HourlyRollupEntry> rollups;
-    if (FlushHourToSd_(fram_journal_.hour_start_epoch_minute(), &rollups)) {
-      UpdateDailyFromHourly_(rollups);
-      SaveDailyStateToFram_();
-      fram_journal_.ResetToCurrentHour(epoch_seconds);
+  // Detect hour rollover BEFORE appending this minute, so we don't reset the FRAM
+  // journal and lose the prior hour state.
+  const uint32_t now_hour_start = HourStartEpochMinute(epoch_minute);
+  const uint32_t journal_hour_start = fram_journal_.hour_start_epoch_minute();
+  if (journal_hour_start != 0 && now_hour_start != journal_hour_start) {
+    // Flush the completed (previous) hour to SD.
+    std::vector<SdHistoryStore::HourlyRollupEntry> hour_rollups;
+    if (FlushHourToSd_(journal_hour_start, &hour_rollups)) {
+      UpdateDailyFromHourly_(hour_rollups);
+      (void)SaveDailyStateToFram_();
     }
-  }
-}
 
-
-
-void HistoryAggregator::Tick(uint32_t now_ms) {
-  if (!IsTimeValid_()) {
-    return;  // do not log absolute-time history until time is valid
-  }
-
-  const uint32_t epoch_seconds = NowEpochSeconds_();
-  const uint32_t epoch_minute = EpochSecondsToEpochMinute(epoch_seconds);
-
-  if (static_cast<int32_t>(epoch_minute) == last_epoch_minute_seen_) {
-    return;
-  }
-  last_epoch_minute_seen_ = static_cast<int32_t>(epoch_minute);
-
-  // If hour boundary, rebuild descriptor (slot order) for the new hour.
-  if ((epoch_minute % 60u) == 0u) {
+    // Rebuild descriptor at each hour boundary to capture add/remove sensors.
     (void)RebuildDescriptorIfNeeded_(true);
 
-    // Re-init FRAM journal for the new hour with updated sensor_count.
-    // (First pass: we reset journal at the hour boundary.)
-    // TODO: Store the fram_base_address and fram_region_bytes from Begin() into members, and use them in Tick()
-    (void)fram_journal_.Begin(fram_, fram_base_address_, fram_region_bytes_,
-                              static_cast<uint16_t>(slots_.size()), epoch_seconds);
-  }
-
-  // Ensure FRAM journal exists and matches current sensor_count.
-  if (fram_journal_.sensor_count() != static_cast<uint16_t>(slots_.size())) {
-    // Mid-hour sensor set changes are deferred; do not rebuild here.
-    // Keep journaling with existing slots.
-  }
-
-  // Snapshot and append.
-  (void)PollAndAppendMinute_(now_ms, epoch_seconds);
-
-  // If hour complete, flush to SD.
-  if (fram_journal_.IsHourComplete()) {
-    (void)FlushHourToSd_(fram_journal_.hour_start_epoch_minute());
+    // Start a fresh FRAM hour journal for the new hour.
     (void)fram_journal_.ResetToCurrentHour(epoch_seconds);
   }
+
+  if (!PollAndAppendMinute_(now_ms, epoch_seconds)) return;
+
+  // Handle day rollover AFTER we incorporated the final hour of the prior day.
+  MaybeRotateDay_(epoch_seconds);
 }
 
 bool HistoryAggregator::PollAndAppendMinute_(uint32_t now_ms, uint32_t epoch_seconds) {
@@ -312,39 +303,17 @@ bool HistoryAggregator::PollAndAppendMinute_(uint32_t now_ms, uint32_t epoch_sec
                                     values.data(), values.size());
 }
 
+
 bool HistoryAggregator::FlushHourToSd_(
     uint32_t hour_start_epoch_minute,
     std::vector<SdHistoryStore::HourlyRollupEntry>* out_hourly_rollups) {
+  const uint16_t sensor_count = static_cast<uint16_t>(slots_.size());
+  if (sensor_count == 0) return false;
+
   HourComputationResult computation;
   if (!ComputeHourCrcAndRollup_(&computation)) return false;
 
-  const bool minute_exists = sd_store_.HasMinuteHourBlock(hour_start_epoch_minute);
-  if (!minute_exists) {
-    // append minute block
-  }
-
-  const bool rollup_exists = sd_store_.HasHourlyRollupBlock(hour_start_epoch_minute);
-  if (!rollup_exists) {
-    // append rollup block
-  }
-
-
-  if (!sd_store_.AppendMinuteHourBlock(hour_start_epoch_minute,
-                                       static_cast<uint16_t>(slots_.size()),
-                                       fram_journal_.frame_bytes(),
-                                       fram_journal_.presence_bytes_padded(),
-                                       computation.bad_frame_mask,
-                                       computation.payload_crc32,
-                                       /*descriptor*/ /* node_ids */ nullptr,
-                                       /*rom64*/ nullptr,
-                                       [&](std::function<bool(const void*, size_t)> sink) {
-                                         return StreamHourPayloadForSd_(computation, sink);
-                                       })) {
-    return false;
-  }
-
-  // Hourly rollup (descriptor arrays built from slots_ in your existing code path).
-  const uint16_t sensor_count = static_cast<uint16_t>(slots_.size());
+  // Descriptor arrays (stable, derived from slots_).
   std::vector<uint32_t> node_ids(sensor_count);
   std::vector<uint64_t> rom64(sensor_count);
   for (uint16_t i = 0; i < sensor_count; ++i) {
@@ -352,18 +321,43 @@ bool HistoryAggregator::FlushHourToSd_(
     rom64[i] = slots_[i].rom64;
   }
 
-  if (!sd_store_.AppendHourlyRollupBlock(hour_start_epoch_minute,
-                                         sensor_count,
-                                         node_ids.data(),
-                                         rom64.data(),
-                                         computation.rollups.data())) {
-    return false;
+  const bool minute_exists = sd_store_.HasMinuteHourBlock(hour_start_epoch_minute);
+  if (!minute_exists) {
+    if (!sd_store_.AppendMinuteHourBlock(
+            hour_start_epoch_minute,
+            sensor_count,
+            fram_journal_.frame_bytes(),
+            fram_journal_.presence_bytes_padded(),
+            computation.bad_frame_mask,
+            computation.payload_crc32,
+            node_ids.data(),
+            rom64.data(),
+            [&](std::function<bool(const void*, size_t)> sink) {
+              return StreamHourPayloadForSd_(computation, sink);
+            })) {
+      return false;
+    }
+  }
+
+  const bool rollup_exists = sd_store_.HasHourlyRollupBlock(hour_start_epoch_minute);
+  if (!rollup_exists) {
+    if (!sd_store_.AppendHourlyRollupBlock(hour_start_epoch_minute,
+                                           sensor_count,
+                                           node_ids.data(),
+                                           rom64.data(),
+                                           computation.rollups.data())) {
+      return false;
+    }
   }
 
   if (out_hourly_rollups != nullptr) {
     *out_hourly_rollups = computation.rollups;
   }
   return true;
+}
+
+bool HistoryAggregator::FlushHourToSd_(uint32_t hour_start_epoch_minute) {
+  return FlushHourToSd_(hour_start_epoch_minute, nullptr);
 }
 
 bool HistoryAggregator::RebuildDescriptorIfNeeded_(bool force) {
@@ -486,7 +480,17 @@ bool HistoryAggregator::ComputeHourCrcAndRollup_(HourComputationResult* out) con
   std::vector<uint8_t> missing_frame(fram_journal_.frame_bytes());
   if (!fram_journal_.BuildMissingFrame(missing_frame.data(), missing_frame.size())) return false;
 
+  const uint8_t minutes_written = fram_journal_.minutes_written();
+
   for (uint8_t minute_index = 0; minute_index < 60; ++minute_index) {
+    if (minute_index >= minutes_written) {
+      out->bad_frame_mask |= (1ULL << minute_index);
+      out->payload_crc32 = Crc32Update(out->payload_crc32,
+                                      missing_frame.data(),
+                                      missing_frame.size());
+      continue;
+    }
+
     if (!fram_journal_.ReadRawFrame(minute_index, frame_bytes.data(), frame_bytes.size())) {
       // Treat unread as missing.
       out->bad_frame_mask |= (1ULL << minute_index);
@@ -508,13 +512,17 @@ bool HistoryAggregator::ComputeHourCrcAndRollup_(HourComputationResult* out) con
     if (!crc_ok) continue;
 
     const uint8_t* presence = frame_bytes.data();
-    const int16_t* values = reinterpret_cast<const int16_t*>(frame_bytes.data() + presence_bytes_padded);
 
     for (uint16_t sensor_index = 0; sensor_index < sensor_count; ++sensor_index) {
       const bool present = (presence[sensor_index / 8u] >> (sensor_index % 8u)) & 1u;
       if (!present) continue;
 
-      const int16_t value = values[sensor_index];
+      // NOTE: frame_bytes is a uint8_t vector (alignment 1). Do not reinterpret_cast
+      // into int16_t*; that is undefined behavior and can fault on some targets.
+      int16_t value = 0;
+      const uint8_t* value_ptr = frame_bytes.data() + static_cast<size_t>(presence_bytes_padded) +
+                                 static_cast<size_t>(sensor_index) * sizeof(int16_t);
+      memcpy(&value, value_ptr, sizeof(value));
       if (value == static_cast<int16_t>(0x8000)) continue;
 
       sum[sensor_index] += value;
@@ -554,7 +562,14 @@ bool HistoryAggregator::StreamHourPayloadForSd_(
   std::vector<uint8_t> missing_frame(fram_journal_.frame_bytes());
   if (!fram_journal_.BuildMissingFrame(missing_frame.data(), missing_frame.size())) return false;
 
+  const uint8_t minutes_written = fram_journal_.minutes_written();
+
   for (uint8_t minute_index = 0; minute_index < 60; ++minute_index) {
+    if (minute_index >= minutes_written) {
+      if (!sink(missing_frame.data(), missing_frame.size())) return false;
+      continue;
+    }
+
     const bool should_replace = (info.bad_frame_mask >> minute_index) & 1ULL;
 
     if (should_replace) {
