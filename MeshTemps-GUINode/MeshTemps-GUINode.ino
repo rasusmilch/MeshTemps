@@ -34,6 +34,7 @@
 #include <array>
 #include <cstring> // for memcmp in NVS verification
 #include <math.h>
+#include <stdarg.h>
 #include <painlessMesh.h>
 #include <vector>
 
@@ -407,6 +408,98 @@ struct ChartAxisContext {
   bool has_epoch = false;
   time_t range_start_epoch = 0;
 };
+
+
+#ifndef MESHTEMPS_CHART_DIAG
+#define MESHTEMPS_CHART_DIAG 0
+#endif
+
+#if MESHTEMPS_CHART_DIAG
+static uint32_t g_chart_diag_sequence = 0;
+static uint32_t g_chart_diag_active_sequence = 0;
+
+static const ChartRangeOption &ChartDiagCurrentRange() {
+  return kChartRanges[std::min(g_chart_active_range_index,
+                               kChartRangeCount - 1)];
+}
+
+static int ChartDiagChartWidth() {
+  return (g_ui_chart != nullptr) ? lv_obj_get_width(g_ui_chart) : -1;
+}
+
+static void ChartDiagPrintf(const char *fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  Serial.print("[CHART_DIAG] ");
+  Serial.vprintf(fmt, args);
+  Serial.println();
+  va_end(args);
+}
+
+static void ChartDiagHeap(uint32_t seq, const char *phase) {
+  ChartDiagPrintf(
+      "heap seq=%lu phase=%s free=%u internal_free=%u internal_largest=%u "
+      "spiram_free=%u spiram_largest=%u",
+      static_cast<unsigned long>(seq), phase,
+      static_cast<unsigned>(ESP.getFreeHeap()),
+      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+      static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
+      static_cast<unsigned>(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
+}
+
+static void ChartDiagContext(uint32_t seq, const char *source, size_t range_index) {
+  const size_t safe_index = std::min(range_index, kChartRangeCount - 1);
+  const ChartRangeOption &range = kChartRanges[safe_index];
+  ChartDiagPrintf(
+      "ctx seq=%lu source=%s range_i=%u range=%s days=%lu node=%08lX "
+      "room=\"%s\" sensor=\"%s\" width=%d active=%u",
+      static_cast<unsigned long>(seq), source,
+      static_cast<unsigned>(safe_index), range.label,
+      static_cast<unsigned long>(range.days),
+      static_cast<unsigned long>(g_chart_selection.node_id),
+      g_chart_selection.room_label.c_str(),
+      g_chart_selection.sensor_label.c_str(), ChartDiagChartWidth(),
+      g_chart_selection.active ? 1U : 0U);
+}
+
+static void ChartDiagBuildDone(uint32_t seq, const char *reason,
+                               uint32_t build_start_ms, size_t copied_count,
+                               size_t filtered_count, size_t reduced_count,
+                               uint16_t lvgl_point_count) {
+  const ChartRangeOption &range = ChartDiagCurrentRange();
+  ChartDiagPrintf(
+      "build done seq=%lu reason=%s total_ms=%lu range=%s days=%lu "
+      "copied=%u filtered=%u reduced=%u lvgl_points=%u width=%d",
+      static_cast<unsigned long>(seq), reason,
+      static_cast<unsigned long>(millis() - build_start_ms), range.label,
+      static_cast<unsigned long>(range.days),
+      static_cast<unsigned>(copied_count), static_cast<unsigned>(filtered_count),
+      static_cast<unsigned>(reduced_count), static_cast<unsigned>(lvgl_point_count),
+      ChartDiagChartWidth());
+}
+#else
+static const ChartRangeOption &ChartDiagCurrentRange() {
+  return kChartRanges[std::min(g_chart_active_range_index,
+                               kChartRangeCount - 1)];
+}
+static inline int ChartDiagChartWidth() { return -1; }
+#define ChartDiagPrintf(...) do { } while (0)
+static inline uint32_t ChartDiagNextSequence() { return 0; }
+static inline void ChartDiagHeap(uint32_t, const char *) {}
+static inline void ChartDiagContext(uint32_t, const char *, size_t) {}
+static inline void ChartDiagBuildDone(uint32_t, const char *, uint32_t, size_t,
+                                      size_t, size_t, uint16_t) {}
+#endif
+
+#if MESHTEMPS_CHART_DIAG
+static inline uint32_t ChartDiagNextSequence() { return ++g_chart_diag_sequence; }
+static inline void ChartDiagSetActiveSequence(uint32_t seq) { g_chart_diag_active_sequence = seq; }
+static inline uint32_t ChartDiagActiveSequence() { return g_chart_diag_active_sequence; }
+#else
+static inline void ChartDiagSetActiveSequence(uint32_t) {}
+static inline uint32_t ChartDiagActiveSequence() { return 0; }
+#endif
 
 ChartAxisContext g_chart_axis_ctx;
 
@@ -5283,14 +5376,32 @@ static void SetTopBarForChart(bool chart_active, const String &title) {
 
 static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
                              uint32_t range_days) {
+  const uint32_t diag_seq = ChartDiagActiveSequence();
+  const uint32_t bands_start_ms = millis();
+  ChartDiagPrintf(
+      "bands seq=%lu phase=entry start_epoch=%ld end_epoch=%ld days=%lu "
+      "layer_null=%u",
+      static_cast<unsigned long>(diag_seq), static_cast<long>(range_start_epoch),
+      static_cast<long>(range_end_epoch), static_cast<unsigned long>(range_days),
+      g_ui_chart_band_layer == nullptr ? 1U : 0U);
   if (g_ui_chart_band_layer == nullptr) {
+    ChartDiagPrintf("bands seq=%lu phase=done reason=no_layer total_ms=%lu",
+                    static_cast<unsigned long>(diag_seq),
+                    static_cast<unsigned long>(millis() - bands_start_ms));
     return;
   }
 
+  const uint32_t clean_start_ms = millis();
   lv_obj_clean(g_ui_chart_band_layer);
+  ChartDiagPrintf("bands seq=%lu phase=clean ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - clean_start_ms));
 
   if (range_start_epoch == 0 || range_end_epoch <= range_start_epoch) {
     lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
+    ChartDiagPrintf("bands seq=%lu phase=done reason=invalid_range total_ms=%lu",
+                    static_cast<unsigned long>(diag_seq),
+                    static_cast<unsigned long>(millis() - bands_start_ms));
     return;
   }
 
@@ -5299,7 +5410,13 @@ static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
 
   const lv_coord_t layer_width = lv_obj_get_width(g_ui_chart_band_layer);
   const lv_coord_t layer_height = lv_obj_get_height(g_ui_chart_band_layer);
+  ChartDiagPrintf("bands seq=%lu phase=layout width=%d height=%d",
+                  static_cast<unsigned long>(diag_seq), static_cast<int>(layer_width),
+                  static_cast<int>(layer_height));
   if (layer_width <= 0 || layer_height <= 0) {
+    ChartDiagPrintf("bands seq=%lu phase=done reason=empty_layout total_ms=%lu",
+                    static_cast<unsigned long>(diag_seq),
+                    static_cast<unsigned long>(millis() - bands_start_ms));
     return;
   }
 
@@ -5327,6 +5444,7 @@ static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
       LV_OPA_80; // was 50; 80 is still "subtle" but visible
 
   int band_index = 0;
+  uint32_t bands_created = 0;
   for (time_t t = band_start_epoch; t < range_end_epoch; t += stride_seconds) {
     const time_t band_end_epoch = t + stride_seconds;
 
@@ -5367,7 +5485,15 @@ static void UpdateChartBands(time_t range_start_epoch, time_t range_end_epoch,
     lv_obj_set_style_bg_opa(band, band_opa, 0);
 
     ++band_index;
+    ++bands_created;
   }
+
+  ChartDiagPrintf(
+      "bands seq=%lu phase=done reason=normal stride_days=%lu bands_created=%lu "
+      "total_ms=%lu",
+      static_cast<unsigned long>(diag_seq), static_cast<unsigned long>(stride_days),
+      static_cast<unsigned long>(bands_created),
+      static_cast<unsigned long>(millis() - bands_start_ms));
 }
 
 // Reused chart buffers (UI thread only).
@@ -5392,11 +5518,22 @@ static size_t GetTargetChartPointBudget() {
 static void ReducePointsMinMaxBuckets(const std::vector<ChartPoint>& input,
                                       size_t target_count,
                                       std::vector<ChartPoint>* output) {
+  const uint32_t diag_seq = ChartDiagActiveSequence();
+  const size_t output_capacity_before = (output != nullptr) ? output->capacity() : 0;
+  ChartDiagPrintf("reduce seq=%lu phase=entry input=%u target=%u output_cap_before=%u",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned>(input.size()),
+                  static_cast<unsigned>(target_count),
+                  static_cast<unsigned>(output_capacity_before));
   if (output == nullptr) {
+    ChartDiagPrintf("reduce seq=%lu phase=done reason=null_output",
+                    static_cast<unsigned long>(diag_seq));
     return;
   }
   output->clear();
   if (input.empty()) {
+    ChartDiagPrintf("reduce seq=%lu phase=done reason=empty_input output=0",
+                    static_cast<unsigned long>(diag_seq));
     return;
   }
 
@@ -5406,6 +5543,10 @@ static void ReducePointsMinMaxBuckets(const std::vector<ChartPoint>& input,
       output->reserve(desired);
     }
     output->assign(input.begin(), input.end());
+    ChartDiagPrintf(
+        "reduce seq=%lu phase=direct_copy desired=%u output_cap_after=%u output=%u",
+        static_cast<unsigned long>(diag_seq), static_cast<unsigned>(desired),
+        static_cast<unsigned>(output->capacity()), static_cast<unsigned>(output->size()));
     return;
   }
 
@@ -5484,55 +5625,115 @@ static void ReducePointsMinMaxBuckets(const std::vector<ChartPoint>& input,
       output->push_back(input.back());
     }
   }
-  if (output->size() > target_count) {
+  const bool resized_down = output->size() > target_count;
+  if (resized_down) {
     output->resize(target_count);
   }
+  ChartDiagPrintf(
+      "reduce seq=%lu phase=bucketed bucket_count=%u x_min=%.3f x_max=%.3f "
+      "x_span=%.3f output=%u resized_down=%u",
+      static_cast<unsigned long>(diag_seq), static_cast<unsigned>(bucket_count),
+      x_min, x_max, x_span, static_cast<unsigned>(output->size()),
+      resized_down ? 1U : 0U);
 }
 
 static void ShowChartMessage(const char *msg) {
+  const uint32_t diag_seq = ChartDiagActiveSequence();
+  const ChartRangeOption &diag_range = ChartDiagCurrentRange();
   if (g_ui_chart_empty_label == nullptr) {
+    ChartDiagPrintf("message seq=%lu phase=show skipped=no_label msg=\"%s\"",
+                    static_cast<unsigned long>(diag_seq),
+                    msg != nullptr ? msg : "(null)");
     return;
   }
   if (msg == nullptr) {
     msg = "No history for this range";
   }
+  ChartDiagPrintf(
+      "message seq=%lu phase=show msg=\"%s\" node=%08lX sensor=\"%s\" "
+      "range=%s days=%lu",
+      static_cast<unsigned long>(diag_seq), msg,
+      static_cast<unsigned long>(g_chart_selection.node_id),
+      g_chart_selection.sensor_label.c_str(), diag_range.label,
+      static_cast<unsigned long>(diag_range.days));
   lv_label_set_text(g_ui_chart_empty_label, msg);
   lv_obj_clear_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_HIDDEN);
 
   if (g_ui_chart != nullptr && g_ui_chart_series != nullptr) {
+    const uint32_t chart_clear_start_ms = millis();
     lv_chart_set_point_count(g_ui_chart, 0);
     lv_chart_refresh(g_ui_chart);
+    ChartDiagPrintf("message seq=%lu phase=chart_clear ms=%lu",
+                    static_cast<unsigned long>(diag_seq),
+                    static_cast<unsigned long>(millis() - chart_clear_start_ms));
   }
 
   if (g_ui_chart_band_layer != nullptr) {
+    const uint32_t band_clear_start_ms = millis();
     lv_obj_clean(g_ui_chart_band_layer);
     lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
+    ChartDiagPrintf("message seq=%lu phase=band_clear ms=%lu",
+                    static_cast<unsigned long>(diag_seq),
+                    static_cast<unsigned long>(millis() - band_clear_start_ms));
   }
 }
 
 static void HideChartMessage() {
+  const uint32_t hide_start_ms = millis();
   if (g_ui_chart_empty_label == nullptr) {
+    ChartDiagPrintf("message seq=%lu phase=hide skipped=no_label ms=%lu",
+                    static_cast<unsigned long>(ChartDiagActiveSequence()),
+                    static_cast<unsigned long>(millis() - hide_start_ms));
     return;
   }
   lv_obj_add_flag(g_ui_chart_empty_label, LV_OBJ_FLAG_HIDDEN);
+  ChartDiagPrintf("message seq=%lu phase=hide ms=%lu",
+                  static_cast<unsigned long>(ChartDiagActiveSequence()),
+                  static_cast<unsigned long>(millis() - hide_start_ms));
 }
 
 static void BuildHistoryChartForSelection() {
+  const uint32_t build_start_ms = millis();
+  const uint32_t existing_diag_seq = ChartDiagActiveSequence();
+  const uint32_t diag_seq = (existing_diag_seq != 0) ? existing_diag_seq : ChartDiagNextSequence();
+  ChartDiagSetActiveSequence(diag_seq);
+  const uint32_t range_axis_start_ms = millis();
   UpdateRangeButtonStates();
 
   g_chart_axis_ctx = {};
+  ChartDiagPrintf("build seq=%lu phase=range_axis_reset ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - range_axis_start_ms));
 
   if (g_ui_chart == nullptr || g_ui_chart_series == nullptr ||
       !g_chart_selection.active) {
+    ChartDiagBuildDone(diag_seq, "invalid_chart_or_selection", build_start_ms,
+                       0, 0, 0, 0);
+    ChartDiagSetActiveSequence(0);
     return;
   }
 
+  ChartDiagContext(diag_seq, "build", g_chart_active_range_index);
+
+  ChartDiagHeap(diag_seq, "copy_before");
+  const uint32_t copy_start_ms = millis();
   std::vector<MeshNode::SensorHistorySample> history;
-  if (!CopySensorHistoryByLabelLocked(g_chart_selection.node_id,
-                                      g_chart_selection.sensor_label,
-                                      &history) ||
-      history.empty()) {
+  const bool copy_ok = CopySensorHistoryByLabelLocked(
+      g_chart_selection.node_id, g_chart_selection.sensor_label, &history);
+  const uint32_t copy_ms = millis() - copy_start_ms;
+  ChartDiagHeap(diag_seq, "copy_after");
+  ChartDiagPrintf(
+      "build seq=%lu phase=copy ok=%u history_size=%u history_capacity=%u "
+      "bytes=%u ms=%lu",
+      static_cast<unsigned long>(diag_seq), copy_ok ? 1U : 0U,
+      static_cast<unsigned>(history.size()), static_cast<unsigned>(history.capacity()),
+      static_cast<unsigned>(history.capacity() * sizeof(MeshNode::SensorHistorySample)),
+      static_cast<unsigned long>(copy_ms));
+  if (!copy_ok || history.empty()) {
     ShowChartMessage("No history yet");
+    ChartDiagBuildDone(diag_seq, "no_copied_history", build_start_ms,
+                       history.size(), 0, 0, 0);
+    ChartDiagSetActiveSequence(0);
     return;
   }
 
@@ -5547,7 +5748,18 @@ static void BuildHistoryChartForSelection() {
   if (now_epoch == static_cast<time_t>(-1)) {
     now_epoch = 0;
   }
+  ChartDiagPrintf(
+      "build seq=%lu phase=range_setup range_i=%u range=%s days=%lu "
+      "range_ms=%llu now_ms=%lu now_epoch=%ld width=%d",
+      static_cast<unsigned long>(diag_seq),
+      static_cast<unsigned>(std::min(g_chart_active_range_index,
+                                     kChartRangeCount - 1)),
+      range.label, static_cast<unsigned long>(range.days),
+      static_cast<unsigned long long>(range_ms),
+      static_cast<unsigned long>(now_ms), static_cast<long>(now_epoch),
+      ChartDiagChartWidth());
 
+  const uint32_t latest_scan_start_ms = millis();
   time_t latest_epoch = 0;
   uint32_t latest_ms = 0;
   for (const auto &sample : history) {
@@ -5560,6 +5772,14 @@ static void BuildHistoryChartForSelection() {
   }
 
   const bool use_epoch = (now_epoch > 0) || (latest_epoch > 0);
+  ChartDiagPrintf(
+      "build seq=%lu phase=latest_scan history_size=%u latest_epoch=%ld "
+      "latest_ms=%lu use_epoch=%u ms=%lu",
+      static_cast<unsigned long>(diag_seq), static_cast<unsigned>(history.size()),
+      static_cast<long>(latest_epoch), static_cast<unsigned long>(latest_ms),
+      use_epoch ? 1U : 0U,
+      static_cast<unsigned long>(millis() - latest_scan_start_ms));
+
   const time_t end_epoch = (now_epoch > 0) ? now_epoch : latest_epoch;
   const uint32_t end_ms = (latest_ms > 0) ? latest_ms : now_ms;
 
@@ -5568,21 +5788,39 @@ static void BuildHistoryChartForSelection() {
           ? end_epoch - static_cast<time_t>(range.days * 24UL * 60UL * 60UL)
           : 0;
 
-  s_chart_points_work.clear();
+  const size_t work_capacity_before = s_chart_points_work.capacity();
   const size_t reserve_cap = std::min<size_t>(history.size(), 70000);
+  ChartDiagHeap(diag_seq, "work_reserve_before");
+  const uint32_t work_reserve_start_ms = millis();
+  s_chart_points_work.clear();
   if (s_chart_points_work.capacity() < reserve_cap) {
     s_chart_points_work.reserve(reserve_cap);
   }
+  ChartDiagHeap(diag_seq, "work_reserve_after");
+  ChartDiagPrintf(
+      "build seq=%lu phase=work_reserve cap_before=%u reserve_cap=%u "
+      "cap_after=%u ms=%lu",
+      static_cast<unsigned long>(diag_seq), static_cast<unsigned>(work_capacity_before),
+      static_cast<unsigned>(reserve_cap),
+      static_cast<unsigned>(s_chart_points_work.capacity()),
+      static_cast<unsigned long>(millis() - work_reserve_start_ms));
 
   float min_temp = std::numeric_limits<float>::max();
   float max_temp = std::numeric_limits<float>::lowest();
 
+  size_t scanned_count = 0;
+  size_t skipped_before_range_count = 0;
+  size_t skipped_age_range_count = 0;
+  size_t skipped_invalid_value_count = 0;
+  const uint32_t filter_start_ms = millis();
   for (const auto &sample : history) {
+    ++scanned_count;
     bool in_range = false;
     double x_hours = 0.0;
 
     if (use_epoch && sample.has_epoch()) {
       if (sample.timestamp_epoch < start_epoch) {
+        ++skipped_before_range_count;
         continue;
       }
       in_range = true;
@@ -5591,6 +5829,7 @@ static void BuildHistoryChartForSelection() {
     } else {
       const uint32_t age_ms = end_ms - sample.timestamp_ms;
       if (age_ms > range_ms) {
+        ++skipped_age_range_count;
         continue;
       }
       in_range = true;
@@ -5599,6 +5838,7 @@ static void BuildHistoryChartForSelection() {
     }
 
     if (!in_range || !sample.has_value() || isnan(sample.temp_c)) {
+      ++skipped_invalid_value_count;
       continue;
     }
 
@@ -5612,34 +5852,86 @@ static void BuildHistoryChartForSelection() {
       max_temp = std::max(max_temp, pt.temp_display);
     }
   }
+  const size_t accepted_count = s_chart_points_work.size();
+  ChartDiagPrintf(
+      "build seq=%lu phase=filter scanned=%u accepted=%u "
+      "skip_epoch_range=%u skip_age_range=%u skip_invalid=%u min=%.3f max=%.3f ms=%lu",
+      static_cast<unsigned long>(diag_seq), static_cast<unsigned>(scanned_count),
+      static_cast<unsigned>(accepted_count),
+      static_cast<unsigned>(skipped_before_range_count),
+      static_cast<unsigned>(skipped_age_range_count),
+      static_cast<unsigned>(skipped_invalid_value_count),
+      accepted_count != 0 ? min_temp : NAN, accepted_count != 0 ? max_temp : NAN,
+      static_cast<unsigned long>(millis() - filter_start_ms));
 
   if (s_chart_points_work.empty()) {
+    ChartDiagPrintf(
+        "build seq=%lu phase=empty_window copied=%u accepted=%u total_ms=%lu",
+        static_cast<unsigned long>(diag_seq), static_cast<unsigned>(history.size()),
+        static_cast<unsigned>(accepted_count),
+        static_cast<unsigned long>(millis() - build_start_ms));
     ShowChartMessage("No history in this window");
+    ChartDiagBuildDone(diag_seq, "no_points_in_window", build_start_ms,
+                       history.size(), accepted_count, 0, 0);
+    ChartDiagSetActiveSequence(0);
     return;
   }
 
+  const uint32_t hide_message_start_ms = millis();
   HideChartMessage();
+  ChartDiagPrintf("build seq=%lu phase=hide_message ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - hide_message_start_ms));
 
   // Sort by time to ensure correct order.
+  const uint32_t sort_start_ms = millis();
   std::sort(s_chart_points_work.begin(), s_chart_points_work.end(),
             [](const ChartPoint &a, const ChartPoint &b) {
               return a.x_hours < b.x_hours;
             });
+  ChartDiagPrintf("build seq=%lu phase=sort work_count=%u ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned>(s_chart_points_work.size()),
+                  static_cast<unsigned long>(millis() - sort_start_ms));
 
+  const size_t reduced_capacity_before = s_chart_points_reduced.capacity();
+  ChartDiagHeap(diag_seq, "reduced_reserve_before");
+  const uint32_t target_reserve_start_ms = millis();
   const size_t target_budget = GetTargetChartPointBudget();
   if (s_chart_points_reduced.capacity() < target_budget) {
     s_chart_points_reduced.reserve(target_budget);
   }
+  ChartDiagHeap(diag_seq, "reduced_reserve_after");
+  ChartDiagPrintf(
+      "build seq=%lu phase=target_reserve width=%d target_budget=%u "
+      "reduced_cap_before=%u reduced_cap_after=%u ms=%lu",
+      static_cast<unsigned long>(diag_seq), ChartDiagChartWidth(),
+      static_cast<unsigned>(target_budget),
+      static_cast<unsigned>(reduced_capacity_before),
+      static_cast<unsigned>(s_chart_points_reduced.capacity()),
+      static_cast<unsigned long>(millis() - target_reserve_start_ms));
+
+  const uint32_t reduce_start_ms = millis();
   ReducePointsMinMaxBuckets(s_chart_points_work, target_budget,
                             &s_chart_points_reduced);
+  ChartDiagPrintf(
+      "build seq=%lu phase=reduce work_count=%u target_budget=%u reduced_count=%u ms=%lu",
+      static_cast<unsigned long>(diag_seq),
+      static_cast<unsigned>(s_chart_points_work.size()),
+      static_cast<unsigned>(target_budget),
+      static_cast<unsigned>(s_chart_points_reduced.size()),
+      static_cast<unsigned long>(millis() - reduce_start_ms));
 
+  const bool lvgl_truncated = s_chart_points_reduced.size() > static_cast<size_t>(UINT16_MAX);
   const uint16_t point_count = static_cast<uint16_t>(std::min(
       s_chart_points_reduced.size(), static_cast<size_t>(UINT16_MAX)));
-
-  Serial.printf("[CHART] raw=%u reduced=%u width=%d\n",
-                static_cast<unsigned>(s_chart_points_work.size()),
-                static_cast<unsigned>(s_chart_points_reduced.size()),
-                lv_obj_get_width(g_ui_chart));
+  ChartDiagPrintf(
+      "build seq=%lu phase=lvgl_point_plan reduced_count=%u point_count=%u "
+      "truncated=%u width=%d",
+      static_cast<unsigned long>(diag_seq),
+      static_cast<unsigned>(s_chart_points_reduced.size()),
+      static_cast<unsigned>(point_count), lvgl_truncated ? 1U : 0U,
+      ChartDiagChartWidth());
 
   const double total_hours = static_cast<double>(range.days) * 24.0;
   const lv_coord_t x_max =
@@ -5655,7 +5947,14 @@ static void BuildHistoryChartForSelection() {
   min_temp -= margin;
   max_temp += margin;
 
+  ChartDiagHeap(diag_seq, "lvgl_point_count_before");
+  const uint32_t point_count_start_ms = millis();
   lv_chart_set_point_count(g_ui_chart, point_count);
+  ChartDiagHeap(diag_seq, "lvgl_point_count_after");
+  ChartDiagPrintf("build seq=%lu phase=lvgl_point_count point_count=%u ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned>(point_count),
+                  static_cast<unsigned long>(millis() - point_count_start_ms));
 
   auto ClampU8 = [](uint32_t value, uint32_t low, uint32_t high) -> uint8_t {
     if (value < low)
@@ -5692,6 +5991,7 @@ static void BuildHistoryChartForSelection() {
   const uint8_t x_draw_size = show_time ? 90 : 60;
   const uint8_t y_draw_size = 50;
 
+  const uint32_t lvgl_config_start_ms = millis();
   lv_chart_set_axis_tick(g_ui_chart, LV_CHART_AXIS_PRIMARY_X, 8, 4, x_major, 1,
                          true, x_draw_size);
 
@@ -5706,9 +6006,20 @@ static void BuildHistoryChartForSelection() {
   lv_chart_set_range(g_ui_chart, LV_CHART_AXIS_PRIMARY_Y,
                      static_cast<lv_coord_t>(floor(min_temp * kChartTempScale)),
                      static_cast<lv_coord_t>(ceil(max_temp * kChartTempScale)));
+  ChartDiagPrintf("build seq=%lu phase=lvgl_config ms=%lu x_major=%u y_major=%u",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - lvgl_config_start_ms),
+                  static_cast<unsigned>(x_major), static_cast<unsigned>(y_major));
 
+  ChartDiagHeap(diag_seq, "lvgl_clear_before");
+  const uint32_t lvgl_clear_start_ms = millis();
   lv_chart_set_all_value(g_ui_chart, g_ui_chart_series, LV_CHART_POINT_NONE);
+  ChartDiagHeap(diag_seq, "lvgl_clear_after");
+  ChartDiagPrintf("build seq=%lu phase=lvgl_clear ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - lvgl_clear_start_ms));
 
+  const uint32_t lvgl_write_start_ms = millis();
   for (uint16_t i = 0; i < point_count; ++i) {
     const lv_coord_t x_val =
         static_cast<lv_coord_t>(s_chart_points_reduced[i].x_hours *
@@ -5719,6 +6030,10 @@ static void BuildHistoryChartForSelection() {
     lv_chart_set_value_by_id2(g_ui_chart, g_ui_chart_series,
                               i, x_val, y_val);
   }
+  ChartDiagPrintf("build seq=%lu phase=lvgl_write point_count=%u ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned>(point_count),
+                  static_cast<unsigned long>(millis() - lvgl_write_start_ms));
 
   g_chart_axis_ctx.x_start_hours = 0.0;
   g_chart_axis_ctx.x_end_hours = total_hours;
@@ -5726,6 +6041,10 @@ static void BuildHistoryChartForSelection() {
   g_chart_axis_ctx.range_start_epoch =
       g_chart_axis_ctx.has_epoch ? start_epoch : 0;
 
+  const uint32_t band_start_ms = millis();
+  const bool bands_called = g_chart_axis_ctx.has_epoch;
+  const bool bands_cleaned_hidden = !g_chart_axis_ctx.has_epoch &&
+                                    g_ui_chart_band_layer != nullptr;
   if (g_chart_axis_ctx.has_epoch) {
     const time_t range_end =
         start_epoch + static_cast<time_t>(range.days * 24UL * 60UL * 60UL);
@@ -5734,11 +6053,25 @@ static void BuildHistoryChartForSelection() {
     lv_obj_clean(g_ui_chart_band_layer);
     lv_obj_add_flag(g_ui_chart_band_layer, LV_OBJ_FLAG_HIDDEN);
   }
+  ChartDiagPrintf(
+      "build seq=%lu phase=band_branch called_update=%u cleaned_hidden=%u ms=%lu",
+      static_cast<unsigned long>(diag_seq), bands_called ? 1U : 0U,
+      bands_cleaned_hidden ? 1U : 0U,
+      static_cast<unsigned long>(millis() - band_start_ms));
 
+  ChartDiagHeap(diag_seq, "refresh_before");
+  const uint32_t refresh_start_ms = millis();
   lv_obj_refresh_ext_draw_size(g_ui_chart);
   lv_obj_invalidate(g_ui_chart);
 
   lv_chart_refresh(g_ui_chart);
+  ChartDiagHeap(diag_seq, "refresh_after");
+  ChartDiagPrintf("build seq=%lu phase=refresh ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - refresh_start_ms));
+  ChartDiagBuildDone(diag_seq, "normal", build_start_ms, history.size(),
+                     accepted_count, s_chart_points_reduced.size(), point_count);
+  ChartDiagSetActiveSequence(0);
 }
 
 static void RoomChartRequest(const RoomDef &def) {
@@ -5749,6 +6082,11 @@ static void RoomChartRequest(const RoomDef &def) {
   MeshNode *node = FindNodeForRoom(def);
   g_chart_selection.node_id = node ? node->node_id() : 0;
   g_chart_active_range_index = 0;
+
+  const uint32_t chart_entry_start_ms = millis();
+  const uint32_t diag_seq = ChartDiagNextSequence();
+  ChartDiagContext(diag_seq, "room_tap", g_chart_active_range_index);
+  ChartDiagSetActiveSequence(diag_seq);
 
   if (g_ui_map_container != nullptr) {
     lv_obj_add_flag(g_ui_map_container, LV_OBJ_FLAG_HIDDEN);
@@ -5761,7 +6099,12 @@ static void RoomChartRequest(const RoomDef &def) {
   const String title = String("History: ") + g_chart_selection.room_label +
                        " / " + g_chart_selection.sensor_label;
   SetTopBarForChart(true, title);
+  ChartDiagHeap(diag_seq, "room_tap_before_build");
   BuildHistoryChartForSelection();
+  ChartDiagHeap(diag_seq, "room_tap_after_build");
+  ChartDiagPrintf("event seq=%lu source=room_tap total_ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - chart_entry_start_ms));
 }
 
 static void CloseHistoryChart() {
@@ -5793,12 +6136,24 @@ static void RoomTapEvent(lv_event_t *e) {
 }
 
 static void ChartRangeButtonEvent(lv_event_t *e) {
+  const uint32_t event_start_ms = millis();
   size_t index = reinterpret_cast<size_t>(lv_event_get_user_data(e));
   if (index >= kChartRangeCount) {
+    ChartDiagPrintf("event source=range_button invalid_index=%u total_ms=%lu",
+                    static_cast<unsigned>(index),
+                    static_cast<unsigned long>(millis() - event_start_ms));
     return;
   }
   g_chart_active_range_index = index;
+  const uint32_t diag_seq = ChartDiagNextSequence();
+  ChartDiagContext(diag_seq, "range_button", index);
+  ChartDiagSetActiveSequence(diag_seq);
+  ChartDiagHeap(diag_seq, "range_button_before_build");
   BuildHistoryChartForSelection();
+  ChartDiagHeap(diag_seq, "range_button_after_build");
+  ChartDiagPrintf("event seq=%lu source=range_button total_ms=%lu",
+                  static_cast<unsigned long>(diag_seq),
+                  static_cast<unsigned long>(millis() - event_start_ms));
 }
 
 static void RoomChartBackEvent(lv_event_t *e) {
