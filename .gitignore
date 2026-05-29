@@ -6,3 +6,4 @@ Flattened/mesh_tile.h
 Flattened/MeshTemps.ino
 Flattened/serial_console.h
 *.tar.gz
+*.kicad_pcb.lck
