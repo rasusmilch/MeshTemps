@@ -2,30 +2,76 @@
 
 #include <string.h>
 
+#include <vector>
+
 #include "history_crc.h"
 
 namespace {
 
 constexpr size_t kHeaderReserveBytes = 256;
-constexpr uint16_t kInvalidTempSentinel = 0x8000u;
+constexpr int16_t kInvalidTempSentinel = static_cast<int16_t>(0x8000);
 
-bool IsHeaderSane(const FramHourJournal::Header& header) {
-  if (header.magic != FramHourJournal::kMagic) return false;
-  if (header.version != FramHourJournal::kVersion) return false;
-  if (header.header_bytes != sizeof(FramHourJournal::Header)) return false;
-  if (header.sensor_count == 0 || header.sensor_count > 1000) return false;
-  if (header.frame_bytes == 0 || header.frame_bytes > 4096) return false;
-  if (header.minutes_written > 60) return false;
+struct ComputedLayout {
+  uint16_t sensor_count = 0;
+  uint16_t presence_bytes_padded = 0;
+  uint16_t frame_bytes = 0;
+};
+
+constexpr size_t AlignUp(size_t value, size_t alignment) {
+  if (alignment == 0) return value;
+  return ((value + alignment - 1u) / alignment) * alignment;
+}
+
+bool ComputeLayoutForSensorCount(uint16_t sensor_count, ComputedLayout* out) {
+  if (out == nullptr) return false;
+  if (sensor_count == 0) return false;
+
+  const size_t raw_presence_bytes =
+      (static_cast<size_t>(sensor_count) + 7u) / 8u;
+  const size_t presence_bytes_padded = AlignUp(raw_presence_bytes, 4u);
+  if (presence_bytes_padded == 0 || presence_bytes_padded > 0xFFFFu) {
+    return false;
+  }
+
+  const size_t values_bytes =
+      static_cast<size_t>(sensor_count) * sizeof(int16_t);
+  const size_t crc_bytes = sizeof(uint16_t);
+  const size_t frame_unaligned = presence_bytes_padded + values_bytes + crc_bytes;
+  const size_t frame_bytes = AlignUp(frame_unaligned, 4u);
+  if (frame_bytes == 0 || frame_bytes > 0xFFFFu) {
+    return false;
+  }
+
+  out->sensor_count = sensor_count;
+  out->presence_bytes_padded = static_cast<uint16_t>(presence_bytes_padded);
+  out->frame_bytes = static_cast<uint16_t>(frame_bytes);
   return true;
 }
 
-uint32_t ComputeHeaderCrc32(FramHourJournal::Header header_without_crc) {
+}  // namespace
+
+bool FramHourJournal::IsHeaderSane_(const Header& header) {
+  if (header.magic != kMagic) return false;
+  if (header.version != kVersion) return false;
+  if (header.header_bytes != sizeof(Header)) return false;
+
+  ComputedLayout layout;
+  if (!ComputeLayoutForSensorCount(header.sensor_count, &layout)) return false;
+  if (header.frame_bytes != layout.frame_bytes) return false;
+  if (header.frame_bytes > 4096) return false;  // defensive upper bound
+
+  if (header.minutes_written > 60u) return false;
+  if (header.hour_start_epoch_minute == 0) return false;
+  return true;
+}
+
+
+uint32_t FramHourJournal::ComputeHeaderCrc32_(Header header_without_crc) {
   header_without_crc.header_crc32 = 0;
   return Crc32(reinterpret_cast<const uint8_t*>(&header_without_crc),
                sizeof(header_without_crc));
 }
 
-}  // namespace
 
 bool FramHourJournal::Begin(FramStorageInterface* fram,
                             uint32_t base_address,
@@ -35,41 +81,43 @@ bool FramHourJournal::Begin(FramStorageInterface* fram,
   fram_ = fram;
   base_address_ = base_address;
   region_bytes_ = region_bytes;
-  sensor_count_ = sensor_count;
+  initialized_ = false;
 
   if (fram_ == nullptr) return false;
   if (region_bytes_ < (0x200u + 60u * 16u)) return false;  // minimal sanity
-  if (sensor_count_ == 0 || sensor_count_ > 100) return false;
 
-  // Compute frame sizing.
-  const size_t raw_presence_bytes = (static_cast<size_t>(sensor_count_) + 7u) / 8u;
-  presence_bytes_ = static_cast<uint16_t>(AlignUp(raw_presence_bytes, 4u));
-  const size_t values_bytes = static_cast<size_t>(sensor_count_) * sizeof(int16_t);
-  const size_t crc_bytes = sizeof(uint16_t);
-  frame_bytes_ = static_cast<uint16_t>(AlignUp(presence_bytes_ + values_bytes + crc_bytes, 4u));
+  ComputedLayout layout;
+  if (!ComputeLayoutForSensorCount(sensor_count, &layout)) return false;
+
+  // The journal stores 2 headers + frames region.
+  const uint64_t required = static_cast<uint64_t>(kHeaderReserveBytes) +
+                            static_cast<uint64_t>(60u) *
+                                static_cast<uint64_t>(layout.frame_bytes);
+  if (required > static_cast<uint64_t>(region_bytes_)) return false;
+
+  sensor_count_ = layout.sensor_count;
+  presence_bytes_ = layout.presence_bytes_padded;
+  frame_bytes_ = layout.frame_bytes;
 
   Header header;
   if (LoadBestHeader(&header)) {
-    // Adopt header state.
-    header_sequence_ = header.sequence;
-    sensor_count_ = header.sensor_count;
-    frame_bytes_ = header.frame_bytes;
-    hour_start_epoch_minute_ = header.hour_start_epoch_minute;
-    last_epoch_minute_written_ = header.last_epoch_minute_written;
-    minutes_written_ = header.minutes_written;
-
-    // If the header claims a different sensor_count/frame_bytes than current request,
-    // we honor the on-FRAM state (resume) only if it matches the requested sensor_count.
-    if (sensor_count_ != sensor_count) {
-      // Caller requested a different layout; start fresh.
-      return ResetToCurrentHour(now_epoch_seconds);
+    // If the stored header matches the requested layout, resume.
+    if (header.sensor_count == sensor_count_ && header.frame_bytes == frame_bytes_) {
+      header_sequence_ = header.sequence;
+      hour_start_epoch_minute_ = header.hour_start_epoch_minute;
+      last_epoch_minute_written_ = header.last_epoch_minute_written;
+      minutes_written_ = header.minutes_written;
+      initialized_ = true;
+      return true;
     }
 
-    initialized_ = true;
-    return true;
+    // Carry forward the header sequence for a clean rollover to the new layout.
+    header_sequence_ = header.sequence;
+  } else {
+    header_sequence_ = 0;
   }
 
-  // No valid header; start fresh.
+  // Start fresh for the requested layout.
   return ResetToCurrentHour(now_epoch_seconds);
 }
 
@@ -92,7 +140,7 @@ bool FramHourJournal::ResetToCurrentHour(uint32_t now_epoch_seconds) {
   header.hour_start_epoch_minute = hour_start_epoch_minute_;
   header.minutes_written = minutes_written_;
   header.last_epoch_minute_written = last_epoch_minute_written_;
-  header.header_crc32 = ComputeHeaderCrc32(header);
+  header.header_crc32 = ComputeHeaderCrc32_(header);
 
   if (!WriteHeaderAtomic(header)) return false;
 
@@ -145,7 +193,7 @@ bool FramHourJournal::AppendMinute(uint32_t epoch_seconds,
   header.hour_start_epoch_minute = hour_start_epoch_minute_;
   header.minutes_written = minutes_written_;
   header.last_epoch_minute_written = last_epoch_minute_written_;
-  header.header_crc32 = ComputeHeaderCrc32(header);
+  header.header_crc32 = ComputeHeaderCrc32_(header);
 
   if (!WriteHeaderAtomic(header)) return false;
   header_sequence_ = header.sequence;
@@ -159,21 +207,16 @@ bool FramHourJournal::FillMissingFramesUpTo(uint32_t target_epoch_minute) {
   uint32_t next_expected = last_epoch_minute_written_ + 1u;
   while (next_expected < target_epoch_minute && minutes_written_ < 60) {
     // Write an all-missing frame.
-    uint8_t presence[32];
+    uint8_t presence[64];
     memset(presence, 0, sizeof(presence));
+    if (presence_bytes_ > sizeof(presence)) return false;
 
-    // For missing values we still write sentinel to avoid stale bytes.
-    // We write in chunks to avoid large stack arrays.
-    const uint16_t missing = static_cast<uint16_t>(kInvalidTempSentinel);
+    // For missing values we still write a sentinel to avoid stale bytes.
+    std::vector<int16_t> values(static_cast<size_t>(sensor_count_),
+                                kInvalidTempSentinel);
 
-    // Build a temp frame in a small buffer and stream it into FRAM.
-    // For first pass: use WriteFrame with a generated values array chunked.
-    int16_t values[100];
-    for (uint16_t i = 0; i < sensor_count_; ++i) {
-      values[i] = static_cast<int16_t>(missing);
-    }
-
-    if (!WriteFrame(minutes_written_, presence, presence_bytes_, values, sensor_count_)) {
+    if (!WriteFrame(minutes_written_, presence, presence_bytes_, values.data(),
+                    values.size())) {
       return false;
     }
 
@@ -199,8 +242,9 @@ bool FramHourJournal::WriteFrame(uint8_t minute_index,
   const uint32_t frame_addr = FrameAddress(minute_index);
 
   // Write presence bitmap (padded).
-  uint8_t presence_padded[32];
+  uint8_t presence_padded[64];
   memset(presence_padded, 0, sizeof(presence_padded));
+  if (presence_bytes_ > sizeof(presence_padded)) return false;
   const size_t to_copy = (presence_bytes < presence_bytes_) ? presence_bytes : presence_bytes_;
   memcpy(presence_padded, presence_bitmap, to_copy);
 
@@ -279,9 +323,16 @@ bool FramHourJournal::LoadBestHeader(Header* out_header) const {
   if (!ReadBytesChecked(HeaderAddressA(), &a, sizeof(a))) memset(&a, 0, sizeof(a));
   if (!ReadBytesChecked(HeaderAddressB(), &b, sizeof(b))) memset(&b, 0, sizeof(b));
 
-  auto is_valid = [](const Header& h) -> bool {
-    if (!IsHeaderSane(h)) return false;
-    const uint32_t expected = ComputeHeaderCrc32(h);
+  auto is_valid = [this](const Header& h) -> bool {
+    if (!IsHeaderSane_(h)) return false;
+
+    // Header/frame region must fit within the provided FRAM region.
+    const uint64_t required = static_cast<uint64_t>(kHeaderReserveBytes) +
+                              static_cast<uint64_t>(60u) *
+                                  static_cast<uint64_t>(h.frame_bytes);
+    if (required > static_cast<uint64_t>(region_bytes_)) return false;
+
+    const uint32_t expected = ComputeHeaderCrc32_(h);
     return expected == h.header_crc32;
   };
 

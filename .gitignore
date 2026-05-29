@@ -5,3 +5,4 @@ Flattened/mesh_tile.cpp
 Flattened/mesh_tile.h
 Flattened/MeshTemps.ino
 Flattened/serial_console.h
+*.tar.gz

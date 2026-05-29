@@ -74,6 +74,9 @@ class FramHourJournal {
     uint32_t header_crc32;
   };
 
+  static bool IsHeaderSane_(const Header& header);
+  static uint32_t ComputeHeaderCrc32_(Header header_without_crc);
+
   bool LoadBestHeader(Header* out_header) const;
   bool WriteHeaderAtomic(const Header& header);
 
