@@ -409,9 +409,15 @@ struct ChartAxisContext {
   time_t range_start_epoch = 0;
 };
 
+struct RestoreLogCounters {
+  uint32_t found = 0;
+  uint32_t saved = 0;
+  uint32_t skipped = 0;
+  uint32_t failed = 0;
+};
 
 #ifndef MESHTEMPS_CHART_DIAG
-#define MESHTEMPS_CHART_DIAG 0
+#define MESHTEMPS_CHART_DIAG 1
 #endif
 
 #if MESHTEMPS_CHART_DIAG
@@ -593,13 +599,6 @@ enum NodeMuteMask : uint8_t {
 // ============================================================================
 // History configuration: NVS persistence
 // ============================================================================
-
-struct RestoreLogCounters {
-  int found = 0;
-  int saved = 0;
-  int skipped = 0;
-  int failed = 0;
-};
 
 constexpr const char *kHistoryPrefsNamespace = "mesh_hist"; // adjust if needed
 constexpr const char *kHistoryKeyIntervalMs = "histIntMs";
