@@ -63,6 +63,74 @@ bool CopySensorHistoryByLabelLocked(
   return node->GetSensorHistoryByLabel(sensor_label, out);
 }
 
+bool ClearSensorHistoryForDiagnostics(uint32_t node_id,
+                                      const String& sensor_address,
+                                      size_t requested_capacity,
+                                      size_t* out_capacity) {
+  ScopedMeshNodesLock lock;
+  MeshNode* node = FindMeshNode(node_id);
+  if (node == nullptr) {
+    return false;
+  }
+
+  MeshNode::Sensor* sensor = node->FindSensor(sensor_address);
+  if (sensor == nullptr) {
+    return false;
+  }
+
+  sensor->history.clear();
+  if (requested_capacity > 0U) {
+    sensor->history.resize(requested_capacity);
+  }
+  sensor->history_head_index = 0U;
+  sensor->history_size = 0U;
+
+  if (out_capacity != nullptr) {
+    *out_capacity = sensor->history.size();
+  }
+  return sensor->history.size() == requested_capacity;
+}
+
+bool AppendSensorHistorySampleForDiagnostics(
+    uint32_t node_id,
+    const String& sensor_address,
+    const MeshNode::SensorHistorySample& sample,
+    size_t* out_size,
+    size_t* out_capacity) {
+  ScopedMeshNodesLock lock;
+  MeshNode* node = FindMeshNode(node_id);
+  if (node == nullptr) {
+    return false;
+  }
+
+  MeshNode::Sensor* sensor = node->FindSensor(sensor_address);
+  if (sensor == nullptr || sensor->history.empty()) {
+    return false;
+  }
+
+  if (sensor->history_head_index >= sensor->history.size()) {
+    sensor->history_head_index = 0U;
+  }
+  if (sensor->history_size > sensor->history.size()) {
+    sensor->history_size = sensor->history.size();
+  }
+
+  sensor->history[sensor->history_head_index] = sample;
+  sensor->history_head_index =
+      (sensor->history_head_index + 1U) % sensor->history.size();
+  if (sensor->history_size < sensor->history.size()) {
+    ++sensor->history_size;
+  }
+
+  if (out_size != nullptr) {
+    *out_size = sensor->history_size;
+  }
+  if (out_capacity != nullptr) {
+    *out_capacity = sensor->history.size();
+  }
+  return true;
+}
+
 MeshNode::MeshNode(uint32_t node_id)
     : node_id_(node_id),
       node_id_str_(FormatNodeKeyHex(node_id)),   // hex for any user-facing use

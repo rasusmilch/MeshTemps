@@ -331,4 +331,32 @@ bool CopySensorHistoryByLabelLocked(
     const String& sensor_label,
     std::vector<MeshNode::SensorHistorySample>* out);
 
+/**
+ * Clear and prepare one sensor history buffer for diagnostics-generated samples.
+ *
+ * The helper owns the mesh-node lock, finds the node/sensor by stable IDs,
+ * resizes the ring buffer to requested_capacity, and resets the ring metadata.
+ * It does not modify live sensor values, real history logging cadence, Serial,
+ * LVGL, or GUI state.
+ */
+bool ClearSensorHistoryForDiagnostics(uint32_t node_id,
+                                      const String& sensor_address,
+                                      size_t requested_capacity,
+                                      size_t* out_capacity = nullptr);
+
+/**
+ * Append one already-formed history sample to a sensor diagnostics history ring.
+ *
+ * The helper owns the mesh-node lock and preserves the ring-buffer invariants:
+ * history_size never exceeds history.size(), history_head_index stays within the
+ * allocated ring, and the next write position advances modulo capacity. It does
+ * not modify live sensor values or real history logging cadence.
+ */
+bool AppendSensorHistorySampleForDiagnostics(
+    uint32_t node_id,
+    const String& sensor_address,
+    const MeshNode::SensorHistorySample& sample,
+    size_t* out_size = nullptr,
+    size_t* out_capacity = nullptr);
+
 #endif  // MESH_NODE_H_
