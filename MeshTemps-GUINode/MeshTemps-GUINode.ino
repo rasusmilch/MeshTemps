@@ -9111,6 +9111,7 @@ constexpr uint32_t kFakeHistorySampleIntervalMs =
 constexpr size_t kFakeHistoryBatchWritesPerLoop = 128U;
 constexpr size_t kFakeHistoryMaxTotalWrites = 250000U;
 constexpr uint32_t kFakeHistoryBatchBudgetMs = 5U;
+constexpr uint32_t kFakeHistoryLiveNodeWindowMs = 5UL * 60UL * 1000UL;
 constexpr time_t kFakeHistoryMinValidEpoch = 1704067200;  // 2024-01-01 UTC.
 
 struct FakeHistoryTarget {
@@ -9156,6 +9157,11 @@ static float FakeHistoryTemperatureC(float min_c, float max_c, time_t epoch,
                                      bool *used_utc_fallback);
 static String FormatFakeHistoryEpoch(time_t epoch);
 static void PrintFakeHistoryStatus(Print &out);
+static bool FakeHistorySensorIsRecent(const MeshNode::Sensor &sensor,
+                                      uint32_t now_ms);
+static bool FakeHistoryNodeIsLive(const MeshNode &node, uint32_t now_ms,
+                                  String *out_reason);
+static void PrintFakeHistoryTargets(Print &out);
 static std::vector<FakeHistoryTarget> SnapshotFakeHistoryTargets();
 static MeshNode::SensorHistorySample BuildFakeHistorySample(size_t sample_index);
 static void FinishFakeHistoryJob(bool canceled);
@@ -9290,15 +9296,165 @@ static void PrintFakeHistoryStatus(Print &out) {
       g_fake_history_job.cancel_requested ? "yes" : "no");
 }
 
-/** Snapshot all sensors currently present on nodes connected at command start. */
+/** Return true when a sensor has application-level activity in the live window. */
+static bool FakeHistorySensorIsRecent(const MeshNode::Sensor &sensor,
+                                      uint32_t now_ms) {
+  return sensor.last_ms != 0U &&
+         (now_ms - sensor.last_ms) <= kFakeHistoryLiveNodeWindowMs;
+}
+
+/** Return true when a GUI-known node is recent enough for fake-history targeting. */
+static bool FakeHistoryNodeIsLive(const MeshNode &node, uint32_t now_ms,
+                                  String *out_reason) {
+  const auto SetReason = [out_reason](const String &reason) {
+    if (out_reason != nullptr) {
+      *out_reason = reason;
+    }
+  };
+
+  const uint32_t last_rx_ms = node.last_sequence_rx_ms();
+  if (last_rx_ms != 0U &&
+      (now_ms - last_rx_ms) <= kFakeHistoryLiveNodeWindowMs) {
+    SetReason(String("recent_rx last_rx=") +
+              String(static_cast<unsigned long>((now_ms - last_rx_ms) / 1000UL)) +
+              "s");
+    return true;
+  }
+
+  const uint32_t last_adv_ms = node.last_sequence_advance_ms();
+  if (last_adv_ms != 0U &&
+      (now_ms - last_adv_ms) <= kFakeHistoryLiveNodeWindowMs) {
+    SetReason(String("recent_seq last_adv=") +
+              String(static_cast<unsigned long>((now_ms - last_adv_ms) / 1000UL)) +
+              "s");
+    return true;
+  }
+
+  for (const auto &sensor : node.sensors()) {
+    if (FakeHistorySensorIsRecent(sensor, now_ms)) {
+      SetReason(String("recent_sensor age=") +
+                String(static_cast<unsigned long>((now_ms - sensor.last_ms) /
+                                                  1000UL)) +
+                "s");
+      return true;
+    }
+  }
+
+  const uint32_t last_update_ms = node.last_update_ms();
+  if (last_update_ms != 0U &&
+      (now_ms - last_update_ms) <= kFakeHistoryLiveNodeWindowMs) {
+    SetReason(String("recent_node age=") +
+              String(static_cast<unsigned long>(node.ComputeAgeMinutes(now_ms))) +
+              "min");
+    return true;
+  }
+
+  if (out_reason != nullptr) {
+    if (last_update_ms != 0U) {
+      *out_reason = String("stale age=") +
+                    String(static_cast<unsigned long>(
+                        node.ComputeAgeMinutes(now_ms))) +
+                    "min";
+    } else {
+      *out_reason = F("no_recent_activity");
+    }
+  }
+  return false;
+}
+
+/** Print the same live target model that hist fake generation will use. */
+static void PrintFakeHistoryTargets(Print &out) {
+  struct SensorPreview {
+    String address;
+    String label;
+  };
+  struct NodePreview {
+    String node_key;
+    String label;
+    String reason;
+    bool include = false;
+    std::vector<SensorPreview> sensors;
+  };
+
+  const uint32_t now_ms = millis();
+  std::vector<NodePreview> previews;
+  size_t eligible_nodes = 0U;
+  size_t eligible_sensors = 0U;
+
+  {
+    ScopedMeshNodesLock lock;
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    previews.reserve(ids.size());
+    for (uint32_t node_id : ids) {
+      MeshNode *node = FindMeshNode(node_id);
+      if (node == nullptr) {
+        continue;
+      }
+
+      NodePreview preview;
+      preview.node_key = node->node_key_hex();
+      preview.label = node->label();
+      preview.include = FakeHistoryNodeIsLive(*node, now_ms, &preview.reason);
+      for (const auto &sensor : node->sensors()) {
+        if (sensor.address.length() == 0) {
+          continue;
+        }
+        SensorPreview sensor_preview;
+        sensor_preview.address = sensor.address;
+        sensor_preview.label = sensor.label;
+        preview.sensors.push_back(sensor_preview);
+      }
+
+      if (preview.include) {
+        ++eligible_nodes;
+        eligible_sensors += preview.sensors.size();
+      }
+      previews.push_back(preview);
+    }
+  }
+
+  out.println(F("hist fake targets:"));
+  if (previews.empty()) {
+    out.println(F("  (no known nodes)"));
+    return;
+  }
+
+  for (const auto &preview : previews) {
+    out.printf("  node %s", preview.node_key.c_str());
+    if (preview.label.length() > 0) {
+      out.printf(" \"%s\"", preview.label.c_str());
+    }
+    out.printf(" include=%s reason=%s sensors=%u\n",
+               preview.include ? "yes" : "no", preview.reason.c_str(),
+               static_cast<unsigned>(preview.sensors.size()));
+
+    if (preview.include) {
+      for (const auto &sensor : preview.sensors) {
+        out.printf("    %s", sensor.address.c_str());
+        if (sensor.label.length() > 0) {
+          out.printf(" \"%s\"", sensor.label.c_str());
+        }
+        out.println();
+      }
+    }
+  }
+
+  out.printf("summary: eligible_nodes=%u eligible_sensors=%u window=%lus\n",
+             static_cast<unsigned>(eligible_nodes),
+             static_cast<unsigned>(eligible_sensors),
+             static_cast<unsigned long>(kFakeHistoryLiveNodeWindowMs / 1000UL));
+}
+
+/** Snapshot all sensors currently present on GUI-live nodes at command start. */
 static std::vector<FakeHistoryTarget> SnapshotFakeHistoryTargets() {
   std::vector<FakeHistoryTarget> targets;
-  auto mesh_node_list = mesh.getNodeList();
+  const uint32_t now_ms = millis();
 
   ScopedMeshNodesLock lock;
-  for (const auto &node_id : mesh_node_list) {
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (uint32_t node_id : ids) {
     MeshNode *node = FindMeshNode(node_id);
-    if (node == nullptr) {
+    if (node == nullptr || !FakeHistoryNodeIsLive(*node, now_ms, nullptr)) {
       continue;
     }
     for (const auto &sensor : node->sensors()) {
@@ -9449,7 +9605,7 @@ static void StartFakeHistoryJob(uint32_t hours, float min_c, float max_c,
                                 time_t now_epoch, Print &out) {
   std::vector<FakeHistoryTarget> targets = SnapshotFakeHistoryTargets();
   if (targets.empty()) {
-    out.println(F("ERR hist fake: no connected sensors found"));
+    out.println(F("ERR hist fake: no live recent sensors found (try 'hist fake targets')"));
     return;
   }
 
@@ -9551,6 +9707,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("  hist fake <hours> <min_c> <max_c>"));
     out.println(
         F("    - replace connected sensor histories with synthetic 5-min data"));
+    out.println(F("  hist fake targets"));
     out.println(F("  hist fake status"));
     out.println(F("  hist fake cancel"));
     return;
@@ -9559,9 +9716,14 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
   const String sub = argv[1];
 
   // -------------------------------------------------------------------------
-  // hist fake <hours> <min_c> <max_c> | status | cancel
+  // hist fake <hours> <min_c> <max_c> | targets | status | cancel
   // -------------------------------------------------------------------------
   if (sub.equalsIgnoreCase("fake")) {
+    if (argc == 3 && argv[2].equalsIgnoreCase("targets")) {
+      PrintFakeHistoryTargets(out);
+      return;
+    }
+
     if (argc == 3 && argv[2].equalsIgnoreCase("status")) {
       PrintFakeHistoryStatus(out);
       return;
@@ -9578,7 +9740,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     }
 
     if (argc != 5) {
-      out.println(F("ERR hist fake (usage: hist fake <hours> <min_c> <max_c> | hist fake status | hist fake cancel)"));
+      out.println(F("ERR hist fake (usage: hist fake <hours> <min_c> <max_c> | hist fake targets | hist fake status | hist fake cancel)"));
       return;
     }
 
@@ -10632,7 +10794,7 @@ delay(250);
   g_console.RegisterCommand("labels", &CmdLabels,
                             "labels sensor on|off | labels age on|off");
   g_console.RegisterCommand("view", &CmdView, "view tiles | map [room|belly]");
-  g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view|fake");
+  g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view|fake targets");
 
   // This will override the compile-time defaults if keys exist in NVS.
   LoadNtfySettings();
