@@ -25,6 +25,11 @@
 #ifndef BRIDGE_GUI_RX_PIN
 #define BRIDGE_GUI_RX_PIN 44 // U0RXD on ESP32-S3
 #endif
+
+#ifndef MESHTEMPS_CHART_DIAG
+#define MESHTEMPS_CHART_DIAG 1
+#endif
+
 #include "../serial_protocol.h"
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -59,6 +64,11 @@ using esp_panel::drivers::BusRGB;
 using esp_panel::drivers::LCD;
 
 #include "mesh_tile.h"
+
+
+#if !ARDUINO_USB_CDC_ON_BOOT
+#error "MeshTemps GUI requires USB CDC On Boot enabled because UART0 is used for the GUI-to-bridge serial link."
+#endif
 
 using Address = std::array<uint8_t, 8>; // DS18B20 64-bit ROM code
 
@@ -415,10 +425,6 @@ struct RestoreLogCounters {
   uint32_t skipped = 0;
   uint32_t failed = 0;
 };
-
-#ifndef MESHTEMPS_CHART_DIAG
-#define MESHTEMPS_CHART_DIAG 1
-#endif
 
 #if MESHTEMPS_CHART_DIAG
 static uint32_t g_chart_diag_sequence = 0;
@@ -10047,6 +10053,10 @@ void setup() {
   delay(2000);
 
   Serial.printf("Serial.setRxBufferSize(2048) -> %d\n", (int)rx_ok);
+
+Serial.printf("ARDUINO_USB_CDC_ON_BOOT=%d\n", ARDUINO_USB_CDC_ON_BOOT);
+Serial.flush();
+delay(250);
 
   LogHeap("After Serial");
 
