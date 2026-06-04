@@ -4105,13 +4105,12 @@ void GuiInit() {
   g_ui_chart_series = lv_chart_add_series(
       g_ui_chart, lv_color_make(0x80, 0xD0, 0xFF), LV_CHART_AXIS_PRIMARY_Y);
 
-  // Make the plotted series visible (width applies to the line/points drawn for
-  // items)
+  // Make the plotted series line visible while keeping per-sample markers hidden.
   lv_obj_set_style_line_width(g_ui_chart, 2, LV_PART_ITEMS);
   lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_COVER, LV_PART_ITEMS);
-
-  // Optional: if you want points to stand out more in scatter mode
-  // lv_obj_set_style_size(g_ui_chart, 2, LV_PART_ITEMS);  // point size (dot radius-ish)
+  lv_obj_set_style_size(g_ui_chart, 0, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_TRANSP, LV_PART_INDICATOR);
+  lv_obj_set_style_border_opa(g_ui_chart, LV_OPA_TRANSP, LV_PART_INDICATOR);
 
   g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
   lv_label_set_text(g_ui_chart_empty_label, "No history for this range");
