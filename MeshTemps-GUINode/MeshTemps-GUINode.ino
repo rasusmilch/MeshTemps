@@ -9268,8 +9268,10 @@ static String FormatFakeHistoryEpoch(time_t epoch) {
 
 /** Print the current fake-history job state. */
 static void PrintFakeHistoryStatus(Print &out) {
+  const size_t diagnostic_histories = CountDiagnosticHistorySensorsForDiagnostics();
   if (!g_fake_history_job.active) {
-    out.println(F("hist fake: idle"));
+    out.printf("hist fake: idle diagnostic_histories=%u\n",
+               static_cast<unsigned>(diagnostic_histories));
     if (g_fake_history_last_summary.length() > 0) {
       out.print(F("last: "));
       out.println(g_fake_history_last_summary);
@@ -9285,7 +9287,8 @@ static void PrintFakeHistoryStatus(Print &out) {
              static_cast<float>(g_fake_history_job.total_planned_writes));
   out.printf(
       "hist fake: active targets=%u samples_per_sensor=%u total=%u written=%u "
-      "progress=%.1f%% elapsed=%lus failures=%u prepare_skipped=%u cancel=%s\n",
+      "progress=%.1f%% elapsed=%lus failures=%u prepare_skipped=%u "
+      "diagnostic_histories=%u cancel=%s\n",
       static_cast<unsigned>(g_fake_history_job.targets.size()),
       static_cast<unsigned>(g_fake_history_job.samples_per_sensor),
       static_cast<unsigned>(g_fake_history_job.total_planned_writes),
@@ -9293,6 +9296,7 @@ static void PrintFakeHistoryStatus(Print &out) {
       static_cast<unsigned long>(elapsed_ms / 1000UL),
       static_cast<unsigned>(g_fake_history_job.append_failures),
       static_cast<unsigned>(g_fake_history_job.prepare_failures),
+      static_cast<unsigned>(diagnostic_histories),
       g_fake_history_job.cancel_requested ? "yes" : "no");
 }
 
@@ -9850,6 +9854,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
           sensor.history.clear();
           sensor.history_head_index = 0U;
           sensor.history_size = 0U;
+          sensor.history_diagnostic = false;
           ++cleared_sensors;
         }
       }
@@ -9882,6 +9887,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       sensor->history.clear();
       sensor->history_head_index = 0U;
       sensor->history_size = 0U;
+      sensor->history_diagnostic = false;
 
       out.print(F("hist clear: cleared history for node "));
       out.print(node->node_id_str());
@@ -9954,7 +9960,9 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     out.print(addr16);
     out.print(F(" ("));
     out.print(static_cast<unsigned long>(total));
-    out.print(F(" samples total, showing last "));
+    out.print(F(" samples total, mode="));
+    out.print(sensor->history_diagnostic ? F("diagnostic") : F("normal"));
+    out.print(F(", showing last "));
     out.print(static_cast<unsigned long>(shown));
     out.println(F("):"));
 
