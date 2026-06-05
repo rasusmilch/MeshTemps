@@ -5742,6 +5742,10 @@ struct ChartSeriesResult {
 };
 
 static ChartSeriesResult PrepareHistoryChartSeriesForSelection(
+  uint32_t diag_seq, uint32_t build_start_ms, size_t target_budget,
+  int chart_width);
+  
+static ChartSeriesResult PrepareHistoryChartSeriesForSelection(
     uint32_t diag_seq, uint32_t build_start_ms, size_t target_budget,
     int chart_width) {
   ChartSeriesResult result;
