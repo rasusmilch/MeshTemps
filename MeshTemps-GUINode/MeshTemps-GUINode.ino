@@ -26,8 +26,9 @@
 #define BRIDGE_GUI_RX_PIN 44 // U0RXD on ESP32-S3
 #endif
 
+// Chart diagnostics are compile-time optional and default off for normal builds.
 #ifndef MESHTEMPS_CHART_DIAG
-#define MESHTEMPS_CHART_DIAG 1
+#define MESHTEMPS_CHART_DIAG 0
 #endif
 
 #include "../serial_protocol.h"
