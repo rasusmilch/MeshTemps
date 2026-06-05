@@ -19,3 +19,8 @@ Time and timezone are injected by the bridge through `time_sync` envelopes, so
 the GUI never brings up Wi‑Fi or NTP on its own. On boot it asks the bridge for
 the current time (and can be forced again via the `time request|sync` console
 command) so a rebooted display quickly regains a valid clock.
+
+## History console commands
+
+For history logging and diagnostic fake-history serial console commands, see
+[`history_console_commands.md`](history_console_commands.md).

@@ -26,8 +26,9 @@
 #define BRIDGE_GUI_RX_PIN 44 // U0RXD on ESP32-S3
 #endif
 
+// Chart diagnostics are compile-time optional and default off for normal builds.
 #ifndef MESHTEMPS_CHART_DIAG
-#define MESHTEMPS_CHART_DIAG 1
+#define MESHTEMPS_CHART_DIAG 0
 #endif
 
 #include "../serial_protocol.h"
@@ -37,6 +38,9 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <cctype>
+#include <cstdlib>
 #include <cstring> // for memcmp in NVS verification
 #include <math.h>
 #include <stdarg.h>
@@ -693,6 +697,7 @@ bool g_debug_enabled = false;
 // Forward declarations used on ROOT builds from LogConnections().
 void GuiUpdateNetwork(size_t peers);
 void GuiRequestRender();
+static void ProcessFakeHistoryJob();
 
 static void DumpStringHex(const char *label, const String &value) {
   Serial.printf("%s (len=%d):", label, static_cast<int>(value.length()));
@@ -4101,13 +4106,12 @@ void GuiInit() {
   g_ui_chart_series = lv_chart_add_series(
       g_ui_chart, lv_color_make(0x80, 0xD0, 0xFF), LV_CHART_AXIS_PRIMARY_Y);
 
-  // Make the plotted series visible (width applies to the line/points drawn for
-  // items)
+  // Make the plotted series line visible while keeping per-sample markers hidden.
   lv_obj_set_style_line_width(g_ui_chart, 2, LV_PART_ITEMS);
   lv_obj_set_style_line_opa(g_ui_chart, LV_OPA_COVER, LV_PART_ITEMS);
-
-  // Optional: if you want points to stand out more in scatter mode
-  // lv_obj_set_style_size(g_ui_chart, 2, LV_PART_ITEMS);  // point size (dot radius-ish)
+  lv_obj_set_style_size(g_ui_chart, 0, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(g_ui_chart, LV_OPA_TRANSP, LV_PART_INDICATOR);
+  lv_obj_set_style_border_opa(g_ui_chart, LV_OPA_TRANSP, LV_PART_INDICATOR);
 
   g_ui_chart_empty_label = lv_label_create(g_ui_chart_holder);
   lv_label_set_text(g_ui_chart_empty_label, "No history for this range");
@@ -9097,6 +9101,590 @@ static bool FindSensorByAddressAcrossNodes(const String &address16,
 }
 
 // ============================================================================
+// History fake-data diagnostics job
+// ============================================================================
+
+constexpr uint32_t kFakeHistoryMaxHours = 720U;
+constexpr uint32_t kFakeHistorySampleIntervalSeconds = 300U;
+constexpr uint32_t kFakeHistorySampleIntervalMs =
+    kFakeHistorySampleIntervalSeconds * 1000UL;
+constexpr size_t kFakeHistoryBatchWritesPerLoop = 128U;
+constexpr size_t kFakeHistoryMaxTotalWrites = 250000U;
+constexpr uint32_t kFakeHistoryBatchBudgetMs = 5U;
+constexpr uint32_t kFakeHistoryLiveNodeWindowMs = 5UL * 60UL * 1000UL;
+constexpr uint32_t kHistorySetMaxNormalIntervalSeconds = 3600U;
+constexpr time_t kFakeHistoryMinValidEpoch = 1704067200;  // 2024-01-01 UTC.
+
+struct FakeHistoryTarget {
+  uint32_t node_id = 0;
+  String sensor_address;
+  String node_label;
+  String sensor_label;
+  size_t samples_written = 0;
+  size_t failures = 0;
+};
+
+struct FakeHistoryJob {
+  bool active = false;
+  bool cancel_requested = false;
+  bool used_utc_fallback = false;
+  uint32_t hours = 0;
+  float min_c = NAN;
+  float max_c = NAN;
+  time_t start_epoch = 0;
+  time_t end_epoch = 0;
+  uint32_t started_ms = 0;
+  uint32_t last_progress_ms = 0;
+  size_t samples_per_sensor = 0;
+  size_t total_planned_writes = 0;
+  size_t total_written = 0;
+  size_t current_sample_index = 0;
+  size_t current_target_index = 0;
+  size_t prepare_failures = 0;
+  size_t append_failures = 0;
+  uint8_t last_progress_bucket = 0;
+  std::vector<FakeHistoryTarget> targets;
+};
+
+static FakeHistoryJob g_fake_history_job;
+static String g_fake_history_last_summary;
+
+static bool ParseStrictPositiveUInt32(const String &text, uint32_t *out_value);
+static bool ParseStrictFiniteFloat(const String &text, float *out_value);
+static bool GetValidFakeHistoryEpoch(time_t *out_epoch);
+static uint32_t FakeHistorySecondsSinceMidnight(time_t epoch,
+                                                bool *used_utc_fallback);
+static float FakeHistoryTemperatureC(float min_c, float max_c, time_t epoch,
+                                     bool *used_utc_fallback);
+static String FormatFakeHistoryEpoch(time_t epoch);
+static void PrintFakeHistoryStatus(Print &out);
+static bool FakeHistorySensorIsRecent(const MeshNode::Sensor &sensor,
+                                      uint32_t now_ms);
+static bool FakeHistoryNodeIsLive(const MeshNode &node, uint32_t now_ms,
+                                  String *out_reason);
+static void PrintFakeHistoryTargets(Print &out);
+static std::vector<FakeHistoryTarget> SnapshotFakeHistoryTargets();
+static MeshNode::SensorHistorySample BuildFakeHistorySample(size_t sample_index);
+static void FinishFakeHistoryJob(bool canceled);
+static void StartFakeHistoryJob(uint32_t hours, float min_c, float max_c,
+                                time_t now_epoch, Print &out);
+
+/** Parse a strict positive base-10 integer token into a uint32_t. */
+static bool ParseStrictPositiveUInt32(const String &text, uint32_t *out_value) {
+  if (out_value == nullptr || text.length() == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < text.length(); ++i) {
+    if (!isdigit(static_cast<unsigned char>(text[i]))) {
+      return false;
+    }
+  }
+
+  errno = 0;
+  char *end = nullptr;
+  const unsigned long parsed = strtoul(text.c_str(), &end, 10);
+  if (errno != 0 || end == nullptr || *end != '\0' || parsed == 0UL ||
+      parsed > static_cast<unsigned long>(UINT32_MAX)) {
+    return false;
+  }
+  *out_value = static_cast<uint32_t>(parsed);
+  return true;
+}
+
+/** Parse a strict finite floating-point token. */
+static bool ParseStrictFiniteFloat(const String &text, float *out_value) {
+  if (out_value == nullptr || text.length() == 0) {
+    return false;
+  }
+
+  errno = 0;
+  char *end = nullptr;
+  const float parsed = strtof(text.c_str(), &end);
+  if (errno != 0 || end == nullptr || *end != '\0' || !isfinite(parsed)) {
+    return false;
+  }
+  *out_value = parsed;
+  return true;
+}
+
+/** Return a sane epoch suitable for epoch-based fake history generation. */
+static bool GetValidFakeHistoryEpoch(time_t *out_epoch) {
+  if (out_epoch != nullptr) {
+    *out_epoch = 0;
+  }
+  if (!g_ntp_time_valid) {
+    return false;
+  }
+  const time_t now_epoch = time(nullptr);
+  if (now_epoch < kFakeHistoryMinValidEpoch) {
+    return false;
+  }
+  if (out_epoch != nullptr) {
+    *out_epoch = now_epoch;
+  }
+  return true;
+}
+
+/** Return local seconds since midnight, falling back to UTC if localtime fails. */
+static uint32_t FakeHistorySecondsSinceMidnight(time_t epoch,
+                                                bool *used_utc_fallback) {
+  struct tm tm_buf;
+  if (localtime_r(&epoch, &tm_buf) != nullptr) {
+    return static_cast<uint32_t>(tm_buf.tm_hour) * 3600UL +
+           static_cast<uint32_t>(tm_buf.tm_min) * 60UL +
+           static_cast<uint32_t>(tm_buf.tm_sec);
+  }
+
+  if (used_utc_fallback != nullptr) {
+    *used_utc_fallback = true;
+  }
+  const time_t day_seconds = epoch % static_cast<time_t>(86400);
+  return (day_seconds >= 0) ? static_cast<uint32_t>(day_seconds) : 0U;
+}
+
+/** Generate the deterministic daily fake temperature in Celsius. */
+static float FakeHistoryTemperatureC(float min_c, float max_c, time_t epoch,
+                                     bool *used_utc_fallback) {
+  const float midpoint_c = (min_c + max_c) * 0.5f;
+  const float amplitude_c = (max_c - min_c) * 0.5f;
+  const uint32_t seconds_since_midnight =
+      FakeHistorySecondsSinceMidnight(epoch, used_utc_fallback);
+  constexpr float kTwoPi = 6.28318530717958647692f;
+  return midpoint_c - amplitude_c *
+                          cosf(kTwoPi *
+                               (static_cast<float>(seconds_since_midnight) /
+                                86400.0f));
+}
+
+/** Format an epoch for operator-facing fake-history summaries. */
+static String FormatFakeHistoryEpoch(time_t epoch) {
+  struct tm tm_buf;
+  char buffer[32];
+  if (localtime_r(&epoch, &tm_buf) != nullptr &&
+      strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm_buf) != 0) {
+    return String(buffer);
+  }
+  return String(static_cast<long>(epoch));
+}
+
+/** Print the current fake-history job state. */
+static void PrintFakeHistoryStatus(Print &out) {
+  const size_t diagnostic_histories = CountDiagnosticHistorySensorsForDiagnostics();
+  if (!g_fake_history_job.active) {
+    out.printf("hist fake: idle diagnostic_histories=%u\n",
+               static_cast<unsigned>(diagnostic_histories));
+    if (g_fake_history_last_summary.length() > 0) {
+      out.print(F("last: "));
+      out.println(g_fake_history_last_summary);
+    }
+    return;
+  }
+
+  const uint32_t elapsed_ms = millis() - g_fake_history_job.started_ms;
+  const float percent =
+      (g_fake_history_job.total_planned_writes == 0U)
+          ? 0.0f
+          : (100.0f * static_cast<float>(g_fake_history_job.total_written) /
+             static_cast<float>(g_fake_history_job.total_planned_writes));
+  out.printf(
+      "hist fake: active targets=%u samples_per_sensor=%u total=%u written=%u "
+      "progress=%.1f%% elapsed=%lus failures=%u prepare_skipped=%u "
+      "diagnostic_histories=%u cancel=%s\n",
+      static_cast<unsigned>(g_fake_history_job.targets.size()),
+      static_cast<unsigned>(g_fake_history_job.samples_per_sensor),
+      static_cast<unsigned>(g_fake_history_job.total_planned_writes),
+      static_cast<unsigned>(g_fake_history_job.total_written), percent,
+      static_cast<unsigned long>(elapsed_ms / 1000UL),
+      static_cast<unsigned>(g_fake_history_job.append_failures),
+      static_cast<unsigned>(g_fake_history_job.prepare_failures),
+      static_cast<unsigned>(diagnostic_histories),
+      g_fake_history_job.cancel_requested ? "yes" : "no");
+}
+
+/** Return true when a sensor has application-level activity in the live window. */
+static bool FakeHistorySensorIsRecent(const MeshNode::Sensor &sensor,
+                                      uint32_t now_ms) {
+  return sensor.last_ms != 0U &&
+         (now_ms - sensor.last_ms) <= kFakeHistoryLiveNodeWindowMs;
+}
+
+/** Return true when a GUI-known node is recent enough for fake-history targeting. */
+static bool FakeHistoryNodeIsLive(const MeshNode &node, uint32_t now_ms,
+                                  String *out_reason) {
+  const auto SetReason = [out_reason](const String &reason) {
+    if (out_reason != nullptr) {
+      *out_reason = reason;
+    }
+  };
+
+  const uint32_t last_rx_ms = node.last_sequence_rx_ms();
+  if (last_rx_ms != 0U &&
+      (now_ms - last_rx_ms) <= kFakeHistoryLiveNodeWindowMs) {
+    SetReason(String("recent_rx last_rx=") +
+              String(static_cast<unsigned long>((now_ms - last_rx_ms) / 1000UL)) +
+              "s");
+    return true;
+  }
+
+  const uint32_t last_adv_ms = node.last_sequence_advance_ms();
+  if (last_adv_ms != 0U &&
+      (now_ms - last_adv_ms) <= kFakeHistoryLiveNodeWindowMs) {
+    SetReason(String("recent_seq last_adv=") +
+              String(static_cast<unsigned long>((now_ms - last_adv_ms) / 1000UL)) +
+              "s");
+    return true;
+  }
+
+  for (const auto &sensor : node.sensors()) {
+    if (FakeHistorySensorIsRecent(sensor, now_ms)) {
+      SetReason(String("recent_sensor age=") +
+                String(static_cast<unsigned long>((now_ms - sensor.last_ms) /
+                                                  1000UL)) +
+                "s");
+      return true;
+    }
+  }
+
+  const uint32_t last_update_ms = node.last_update_ms();
+  if (last_update_ms != 0U &&
+      (now_ms - last_update_ms) <= kFakeHistoryLiveNodeWindowMs) {
+    SetReason(String("recent_node age=") +
+              String(static_cast<unsigned long>(node.ComputeAgeMinutes(now_ms))) +
+              "min");
+    return true;
+  }
+
+  if (out_reason != nullptr) {
+    if (last_update_ms != 0U) {
+      *out_reason = String("stale age=") +
+                    String(static_cast<unsigned long>(
+                        node.ComputeAgeMinutes(now_ms))) +
+                    "min";
+    } else {
+      *out_reason = F("no_recent_activity");
+    }
+  }
+  return false;
+}
+
+/** Print the same live target model that hist fake generation will use. */
+static void PrintFakeHistoryTargets(Print &out) {
+  struct SensorPreview {
+    String address;
+    String label;
+  };
+  struct NodePreview {
+    String node_key;
+    String label;
+    String reason;
+    bool include = false;
+    std::vector<SensorPreview> sensors;
+  };
+
+  const uint32_t now_ms = millis();
+  std::vector<NodePreview> previews;
+  size_t eligible_nodes = 0U;
+  size_t eligible_sensors = 0U;
+
+  {
+    ScopedMeshNodesLock lock;
+    const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+    previews.reserve(ids.size());
+    for (uint32_t node_id : ids) {
+      MeshNode *node = FindMeshNode(node_id);
+      if (node == nullptr) {
+        continue;
+      }
+
+      NodePreview preview;
+      preview.node_key = node->node_key_hex();
+      preview.label = node->label();
+      preview.include = FakeHistoryNodeIsLive(*node, now_ms, &preview.reason);
+      for (const auto &sensor : node->sensors()) {
+        if (sensor.address.length() == 0) {
+          continue;
+        }
+        SensorPreview sensor_preview;
+        sensor_preview.address = sensor.address;
+        sensor_preview.label = sensor.label;
+        preview.sensors.push_back(sensor_preview);
+      }
+
+      if (preview.include) {
+        ++eligible_nodes;
+        eligible_sensors += preview.sensors.size();
+      }
+      previews.push_back(preview);
+    }
+  }
+
+  out.println(F("hist fake targets:"));
+  if (previews.empty()) {
+    out.println(F("  (no known nodes)"));
+    return;
+  }
+
+  for (const auto &preview : previews) {
+    out.printf("  node %s", preview.node_key.c_str());
+    if (preview.label.length() > 0) {
+      out.printf(" \"%s\"", preview.label.c_str());
+    }
+    out.printf(" include=%s reason=%s sensors=%u\n",
+               preview.include ? "yes" : "no", preview.reason.c_str(),
+               static_cast<unsigned>(preview.sensors.size()));
+
+    if (preview.include) {
+      for (const auto &sensor : preview.sensors) {
+        out.printf("    %s", sensor.address.c_str());
+        if (sensor.label.length() > 0) {
+          out.printf(" \"%s\"", sensor.label.c_str());
+        }
+        out.println();
+      }
+    }
+  }
+
+  out.printf("summary: eligible_nodes=%u eligible_sensors=%u window=%lus\n",
+             static_cast<unsigned>(eligible_nodes),
+             static_cast<unsigned>(eligible_sensors),
+             static_cast<unsigned long>(kFakeHistoryLiveNodeWindowMs / 1000UL));
+}
+
+/** Snapshot all sensors currently present on GUI-live nodes at command start. */
+static std::vector<FakeHistoryTarget> SnapshotFakeHistoryTargets() {
+  std::vector<FakeHistoryTarget> targets;
+  const uint32_t now_ms = millis();
+
+  ScopedMeshNodesLock lock;
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (uint32_t node_id : ids) {
+    MeshNode *node = FindMeshNode(node_id);
+    if (node == nullptr || !FakeHistoryNodeIsLive(*node, now_ms, nullptr)) {
+      continue;
+    }
+    for (const auto &sensor : node->sensors()) {
+      if (sensor.address.length() == 0) {
+        continue;
+      }
+      FakeHistoryTarget target;
+      target.node_id = node_id;
+      target.sensor_address = sensor.address;
+      target.node_label = node->label();
+      target.sensor_label = sensor.label;
+      targets.push_back(target);
+    }
+  }
+  return targets;
+}
+
+/** Build one fake history sample for the active job at sample_index. */
+static MeshNode::SensorHistorySample BuildFakeHistorySample(size_t sample_index) {
+  MeshNode::SensorHistorySample sample;
+  const time_t sample_epoch =
+      g_fake_history_job.start_epoch +
+      static_cast<time_t>(sample_index * kFakeHistorySampleIntervalSeconds);
+  sample.timestamp_epoch = sample_epoch;
+  sample.set_has_epoch(true);
+  sample.temp_c = FakeHistoryTemperatureC(g_fake_history_job.min_c,
+                                          g_fake_history_job.max_c,
+                                          sample_epoch,
+                                          &g_fake_history_job.used_utc_fallback);
+  sample.set_has_value(true);
+  sample.set_corrected(false);
+
+  // Epoch is required for this diagnostics command. timestamp_ms is only a
+  // chronological fallback for non-epoch consumers, so keep it deterministic and
+  // increasing even when the generated window exceeds uint32_t millis uptime.
+  sample.timestamp_ms = static_cast<uint32_t>(sample_index) *
+                        kFakeHistorySampleIntervalMs;
+  return sample;
+}
+
+/** Finish the fake-history job and print one operator summary. */
+static void FinishFakeHistoryJob(bool canceled) {
+  const uint32_t elapsed_ms = millis() - g_fake_history_job.started_ms;
+  g_fake_history_last_summary = String(canceled ? "canceled" : "complete");
+  g_fake_history_last_summary += " targets=";
+  g_fake_history_last_summary += String(
+      static_cast<unsigned>(g_fake_history_job.targets.size()));
+  g_fake_history_last_summary += " written=";
+  g_fake_history_last_summary += String(
+      static_cast<unsigned>(g_fake_history_job.total_written));
+  g_fake_history_last_summary += "/";
+  g_fake_history_last_summary += String(
+      static_cast<unsigned>(g_fake_history_job.total_planned_writes));
+  g_fake_history_last_summary += " failures=";
+  g_fake_history_last_summary += String(
+      static_cast<unsigned>(g_fake_history_job.append_failures));
+  g_fake_history_last_summary += " elapsed_s=";
+  g_fake_history_last_summary += String(static_cast<unsigned long>(elapsed_ms / 1000UL));
+  if (g_fake_history_job.used_utc_fallback) {
+    g_fake_history_last_summary += " utc_midnight_fallback=yes";
+  }
+
+  Serial.print(F("[HIST FAKE] "));
+  Serial.println(g_fake_history_last_summary);
+
+  g_fake_history_job = FakeHistoryJob();
+  GuiRequestRender();
+}
+
+/** Run a bounded batch of fake-history writes without blocking loop services. */
+static void ProcessFakeHistoryJob() {
+  if (!g_fake_history_job.active) {
+    return;
+  }
+
+  if (g_fake_history_job.cancel_requested) {
+    FinishFakeHistoryJob(/*canceled=*/true);
+    return;
+  }
+
+  const uint32_t batch_start_ms = millis();
+  size_t writes_this_call = 0;
+  while (g_fake_history_job.active &&
+         !g_fake_history_job.cancel_requested &&
+         writes_this_call < kFakeHistoryBatchWritesPerLoop) {
+    if (g_fake_history_job.current_sample_index >=
+        g_fake_history_job.samples_per_sensor) {
+      FinishFakeHistoryJob(/*canceled=*/false);
+      return;
+    }
+
+    if (g_fake_history_job.current_target_index >=
+        g_fake_history_job.targets.size()) {
+      g_fake_history_job.current_target_index = 0U;
+      ++g_fake_history_job.current_sample_index;
+      continue;
+    }
+
+    FakeHistoryTarget &target =
+        g_fake_history_job.targets[g_fake_history_job.current_target_index];
+    const MeshNode::SensorHistorySample sample =
+        BuildFakeHistorySample(g_fake_history_job.current_sample_index);
+    size_t new_size = 0U;
+    if (AppendSensorHistorySampleForDiagnostics(target.node_id,
+                                                target.sensor_address,
+                                                sample,
+                                                &new_size,
+                                                nullptr)) {
+      ++target.samples_written;
+      ++g_fake_history_job.total_written;
+    } else {
+      ++target.failures;
+      ++g_fake_history_job.append_failures;
+    }
+
+    ++g_fake_history_job.current_target_index;
+    ++writes_this_call;
+
+    if ((millis() - batch_start_ms) >= kFakeHistoryBatchBudgetMs) {
+      break;
+    }
+  }
+
+  if (g_fake_history_job.cancel_requested) {
+    FinishFakeHistoryJob(/*canceled=*/true);
+    return;
+  }
+
+  const uint32_t now_ms = millis();
+  const uint8_t progress_bucket =
+      (g_fake_history_job.total_planned_writes == 0U)
+          ? 0U
+          : static_cast<uint8_t>((g_fake_history_job.total_written * 10U) /
+                                 g_fake_history_job.total_planned_writes);
+  if ((progress_bucket > g_fake_history_job.last_progress_bucket) ||
+      (now_ms - g_fake_history_job.last_progress_ms >= 5000UL)) {
+    g_fake_history_job.last_progress_bucket = progress_bucket;
+    g_fake_history_job.last_progress_ms = now_ms;
+    Serial.printf("[HIST FAKE] progress %u/%u (%u%%)\n",
+                  static_cast<unsigned>(g_fake_history_job.total_written),
+                  static_cast<unsigned>(g_fake_history_job.total_planned_writes),
+                  static_cast<unsigned>(progress_bucket * 10U));
+  }
+}
+
+/** Start a validated fake-history background job. */
+static void StartFakeHistoryJob(uint32_t hours, float min_c, float max_c,
+                                time_t now_epoch, Print &out) {
+  std::vector<FakeHistoryTarget> targets = SnapshotFakeHistoryTargets();
+  if (targets.empty()) {
+    out.println(F("ERR hist fake: no live recent sensors found (try 'hist fake targets')"));
+    return;
+  }
+
+  const size_t samples_per_sensor = static_cast<size_t>(hours) * 12U;
+  const size_t total_requested = samples_per_sensor * targets.size();
+  if (samples_per_sensor == 0U || total_requested == 0U ||
+      total_requested > kFakeHistoryMaxTotalWrites) {
+    out.printf(
+        "ERR hist fake: requested writes exceed cap (targets=%u "
+        "samples_per_sensor=%u requested=%u cap=%u)\n",
+        static_cast<unsigned>(targets.size()),
+        static_cast<unsigned>(samples_per_sensor),
+        static_cast<unsigned>(total_requested),
+        static_cast<unsigned>(kFakeHistoryMaxTotalWrites));
+    return;
+  }
+
+  std::vector<FakeHistoryTarget> prepared_targets;
+  prepared_targets.reserve(targets.size());
+  size_t prepare_failures = 0U;
+  for (const auto &target : targets) {
+    size_t capacity = 0U;
+    if (ClearSensorHistoryForDiagnostics(target.node_id, target.sensor_address,
+                                         samples_per_sensor, &capacity) &&
+        capacity == samples_per_sensor) {
+      prepared_targets.push_back(target);
+    } else {
+      ++prepare_failures;
+    }
+  }
+
+  if (prepared_targets.empty()) {
+    out.println(F("ERR hist fake: failed to prepare all selected sensor histories"));
+    return;
+  }
+
+  const time_t end_epoch_aligned =
+      now_epoch - (now_epoch % static_cast<time_t>(kFakeHistorySampleIntervalSeconds));
+  const time_t start_epoch =
+      end_epoch_aligned -
+      static_cast<time_t>((samples_per_sensor - 1U) *
+                          kFakeHistorySampleIntervalSeconds);
+
+  g_fake_history_job = FakeHistoryJob();
+  g_fake_history_job.active = true;
+  g_fake_history_job.hours = hours;
+  g_fake_history_job.min_c = min_c;
+  g_fake_history_job.max_c = max_c;
+  g_fake_history_job.start_epoch = start_epoch;
+  g_fake_history_job.end_epoch = end_epoch_aligned;
+  g_fake_history_job.started_ms = millis();
+  g_fake_history_job.last_progress_ms = g_fake_history_job.started_ms;
+  g_fake_history_job.samples_per_sensor = samples_per_sensor;
+  g_fake_history_job.total_planned_writes = samples_per_sensor * prepared_targets.size();
+  g_fake_history_job.prepare_failures = prepare_failures;
+  g_fake_history_job.targets.swap(prepared_targets);
+
+  out.printf(
+      "hist fake: started targets=%u skipped=%u hours=%lu interval=5min "
+      "samples_per_sensor=%u total_writes=%u min_c=%.2f max_c=%.2f\n",
+      static_cast<unsigned>(g_fake_history_job.targets.size()),
+      static_cast<unsigned>(prepare_failures),
+      static_cast<unsigned long>(hours),
+      static_cast<unsigned>(g_fake_history_job.samples_per_sensor),
+      static_cast<unsigned>(g_fake_history_job.total_planned_writes), min_c,
+      max_c);
+  out.print(F("  window: "));
+  out.print(FormatFakeHistoryEpoch(g_fake_history_job.start_epoch));
+  out.print(F(" -> "));
+  out.println(FormatFakeHistoryEpoch(g_fake_history_job.end_epoch));
+  out.println(F("  use 'hist fake status' or 'hist fake cancel'"));
+}
+
+// ============================================================================
 // History configuration + data: serial console command
 // ============================================================================
 
@@ -9112,7 +9700,8 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("  hist show|get"));
     out.println(F("    - show global history logging configuration"));
     out.println(F("  hist set <interval_s> <retention_days>"));
-    out.println(F("    - set history interval (seconds) and retention (days)"));
+    out.println(F("    - set interval in SECONDS, not ms"));
+    out.println(F("    - examples: hist set 60 7, hist set 60 30"));
     out.println(F("  hist clear"));
     out.println(F("    - clear history for all nodes / sensors"));
     out.println(F("  hist clear <addr16>"));
@@ -9121,10 +9710,82 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("  hist view <addr16> [max_samples]"));
     out.println(
         F("    - view history for a specific sensor, oldest -> newest"));
+    out.println(F("  hist fake <hours> <min_c> <max_c>"));
+    out.println(
+        F("    - replace connected sensor histories with synthetic 5-min data"));
+    out.println(F("  hist fake targets"));
+    out.println(F("  hist fake status"));
+    out.println(F("  hist fake cancel"));
     return;
   }
 
   const String sub = argv[1];
+
+  // -------------------------------------------------------------------------
+  // hist fake <hours> <min_c> <max_c> | targets | status | cancel
+  // -------------------------------------------------------------------------
+  if (sub.equalsIgnoreCase("fake")) {
+    if (argc == 3 && argv[2].equalsIgnoreCase("targets")) {
+      PrintFakeHistoryTargets(out);
+      return;
+    }
+
+    if (argc == 3 && argv[2].equalsIgnoreCase("status")) {
+      PrintFakeHistoryStatus(out);
+      return;
+    }
+
+    if (argc == 3 && argv[2].equalsIgnoreCase("cancel")) {
+      if (!g_fake_history_job.active) {
+        out.println(F("hist fake: no active fake-history job"));
+        return;
+      }
+      g_fake_history_job.cancel_requested = true;
+      out.println(F("hist fake: cancel requested"));
+      return;
+    }
+
+    if (argc != 5) {
+      out.println(F("ERR hist fake (usage: hist fake <hours> <min_c> <max_c> | hist fake targets | hist fake status | hist fake cancel)"));
+      return;
+    }
+
+    if (g_fake_history_job.active) {
+      out.println(F("ERR hist fake: job already active; use 'hist fake status' or 'hist fake cancel'"));
+      return;
+    }
+
+    uint32_t hours = 0U;
+    float min_c = NAN;
+    float max_c = NAN;
+    if (!ParseStrictPositiveUInt32(argv[2], &hours)) {
+      out.println(F("ERR hist fake: hours must be a positive integer"));
+      return;
+    }
+    if (hours > kFakeHistoryMaxHours) {
+      out.printf("ERR hist fake: hours must be <= %lu\n",
+                 static_cast<unsigned long>(kFakeHistoryMaxHours));
+      return;
+    }
+    if (!ParseStrictFiniteFloat(argv[3], &min_c) ||
+        !ParseStrictFiniteFloat(argv[4], &max_c)) {
+      out.println(F("ERR hist fake: min_c and max_c must be finite numbers"));
+      return;
+    }
+    if (!(min_c < max_c)) {
+      out.println(F("ERR hist fake: min_c must be less than max_c"));
+      return;
+    }
+
+    time_t now_epoch = 0;
+    if (!GetValidFakeHistoryEpoch(&now_epoch)) {
+      out.println(F("ERR hist fake: valid epoch time required (sync bridge/NTP first)"));
+      return;
+    }
+
+    StartFakeHistoryJob(hours, min_c, max_c, now_epoch, out);
+    return;
+  }
 
   // -------------------------------------------------------------------------
   // hist show / hist get -> show global history config
@@ -9138,33 +9799,64 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
   // hist set <interval_s> <retention_days>
   // -------------------------------------------------------------------------
   if (sub.equalsIgnoreCase("set")) {
-    if (argc < 4) {
+    if (argc != 4) {
       out.println(
           F("ERR hist set (usage: hist set <interval_s> <retention_days>)"));
       return;
     }
 
-    const long interval_seconds = argv[2].toInt();
-    const long retention_days = argv[3].toInt();
-
-    if (interval_seconds <= 0) {
-      out.println(F("ERR hist set: interval_s must be > 0"));
+    uint32_t interval_seconds = 0U;
+    uint32_t retention_days = 0U;
+    if (!ParseStrictPositiveUInt32(argv[2], &interval_seconds)) {
+      out.println(F("ERR hist set: interval_s must be a positive integer"));
       return;
     }
-    if (retention_days <= 0) {
-      out.println(F("ERR hist set: retention_days must be > 0"));
+    if (!ParseStrictPositiveUInt32(argv[3], &retention_days)) {
+      out.println(F("ERR hist set: retention_days must be a positive integer"));
       return;
     }
 
-    const uint32_t interval_ms =
-        static_cast<uint32_t>(interval_seconds) * 1000UL;
+    if (interval_seconds > kHistorySetMaxNormalIntervalSeconds) {
+      if ((interval_seconds % 1000U) == 0U) {
+        const uint32_t suggested_seconds = interval_seconds / 1000U;
+        out.printf("ERR hist set: interval_s=%lu is suspiciously large.\n",
+                   static_cast<unsigned long>(interval_seconds));
+        out.println(F("hist set expects seconds, not milliseconds."));
+        out.printf("For %lu ms / ",
+                   static_cast<unsigned long>(interval_seconds));
+        if ((suggested_seconds % 60U) == 0U) {
+          const uint32_t suggested_minutes = suggested_seconds / 60U;
+          out.printf("%lu minute%s",
+                     static_cast<unsigned long>(suggested_minutes),
+                     suggested_minutes == 1U ? "" : "s");
+        } else {
+          out.printf("%lu seconds",
+                     static_cast<unsigned long>(suggested_seconds));
+        }
+        out.printf(" use: hist set %lu %lu\n",
+                   static_cast<unsigned long>(suggested_seconds),
+                   static_cast<unsigned long>(retention_days));
+      } else {
+        out.printf(
+            "ERR hist set: interval_s=%lu exceeds safe console limit %lu.\n",
+            static_cast<unsigned long>(interval_seconds),
+            static_cast<unsigned long>(kHistorySetMaxNormalIntervalSeconds));
+        out.println(
+            F("hist set expects seconds. Common examples: hist set 60 7, hist set 60 30."));
+      }
+      out.println(F("No changes applied."));
+      return;
+    }
 
-    MeshNode::SetHistoryConfig(interval_ms,
-                               static_cast<uint32_t>(retention_days));
+    const uint32_t interval_ms = interval_seconds * 1000UL;
+
+    MeshNode::SetHistoryConfig(interval_ms, retention_days);
 
     out.print(F("hist set: interval="));
     out.print(interval_ms);
-    out.print(F(" ms, retention="));
+    out.print(F(" ms ("));
+    out.print(interval_seconds);
+    out.print(F(" s), retention="));
     out.print(retention_days);
     out.println(F(" days"));
 
@@ -9195,6 +9887,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
           sensor.history.clear();
           sensor.history_head_index = 0U;
           sensor.history_size = 0U;
+          sensor.history_diagnostic = false;
           ++cleared_sensors;
         }
       }
@@ -9227,6 +9920,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
       sensor->history.clear();
       sensor->history_head_index = 0U;
       sensor->history_size = 0U;
+      sensor->history_diagnostic = false;
 
       out.print(F("hist clear: cleared history for node "));
       out.print(node->node_id_str());
@@ -9299,7 +9993,9 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     out.print(addr16);
     out.print(F(" ("));
     out.print(static_cast<unsigned long>(total));
-    out.print(F(" samples total, showing last "));
+    out.print(F(" samples total, mode="));
+    out.print(sensor->history_diagnostic ? F("diagnostic") : F("normal"));
+    out.print(F(", showing last "));
     out.print(static_cast<unsigned long>(shown));
     out.println(F("):"));
 
@@ -9364,7 +10060,7 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
   // Unknown subcommand
   // -------------------------------------------------------------------------
   out.println(F(
-      "ERR hist (use 'hist show', 'hist set', 'hist clear', or 'hist view')"));
+      "ERR hist (use 'hist show', 'hist set', 'hist clear', 'hist view', or 'hist fake')"));
 }
 
 static void CmdTz(void *ctx, int argc, const String argv[], Print &out) {
@@ -10139,7 +10835,7 @@ delay(250);
   g_console.RegisterCommand("labels", &CmdLabels,
                             "labels sensor on|off | labels age on|off");
   g_console.RegisterCommand("view", &CmdView, "view tiles | map [room|belly]");
-  g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view");
+  g_console.RegisterCommand("hist", &CmdHist, "hist show|get|set|clear|view|fake targets");
 
   // This will override the compile-time defaults if keys exist in NVS.
   LoadNtfySettings();
@@ -10172,6 +10868,9 @@ void loop() {
   }
 
   ProcessBridgeSerial();
+  // Run a bounded synthetic-history batch after bridge input so console and
+  // bridge traffic remain responsive before diagnostics work continues.
+  ProcessFakeHistoryJob();
   NtfyLoop();
   DisplayLoop();
   BuzzerLoop();

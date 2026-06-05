@@ -81,6 +81,11 @@ class MeshNode {
     size_t history_head_index = 0;  // where the next sample will be written
     size_t history_size = 0;        // number of valid entries in 'history'
 
+    // True when this history ring is owned by diagnostics/fake-history data.
+    // Normal production logging skips diagnostic histories so it does not resize
+    // or mix live samples into a synthetic test window.
+    bool history_diagnostic = false;
+
     // Copy history into |out| in chronological order (oldest -> newest).
     void CopyHistoryInChronologicalOrder(
         std::vector<SensorHistorySample>* out) const {
@@ -330,5 +335,50 @@ bool CopySensorHistoryByLabelLocked(
     uint32_t node_id,
     const String& sensor_label,
     std::vector<MeshNode::SensorHistorySample>* out);
+
+/**
+ * Clear and prepare one sensor history buffer for diagnostics-generated samples.
+ *
+ * The helper owns the mesh-node lock, finds the node/sensor by stable IDs,
+ * resizes the ring buffer to requested_capacity, and resets the ring metadata.
+ * It does not modify live sensor values, real history logging cadence, Serial,
+ * LVGL, or GUI state.
+ */
+bool ClearSensorHistoryForDiagnostics(uint32_t node_id,
+                                      const String& sensor_address,
+                                      size_t requested_capacity,
+                                      size_t* out_capacity = nullptr);
+
+/**
+ * Append one already-formed history sample to a sensor diagnostics history ring.
+ *
+ * The helper owns the mesh-node lock and preserves the ring-buffer invariants:
+ * history_size never exceeds history.size(), history_head_index stays within the
+ * allocated ring, and the next write position advances modulo capacity. It does
+ * not modify live sensor values or real history logging cadence.
+ */
+bool AppendSensorHistorySampleForDiagnostics(
+    uint32_t node_id,
+    const String& sensor_address,
+    const MeshNode::SensorHistorySample& sample,
+    size_t* out_size = nullptr,
+    size_t* out_capacity = nullptr);
+
+/**
+ * Query whether one sensor history is currently marked diagnostics-owned.
+ *
+ * The helper owns the mesh-node lock and writes the marker state to
+ * out_is_diagnostic when the node and sensor are found.
+ */
+bool SensorHistoryIsDiagnosticForDiagnostics(uint32_t node_id,
+                                             const String& sensor_address,
+                                             bool* out_is_diagnostic);
+
+/**
+ * Count known sensors whose history rings are currently diagnostics-owned.
+ *
+ * The helper owns the mesh-node lock and is intended for operator status output.
+ */
+size_t CountDiagnosticHistorySensorsForDiagnostics();
 
 #endif  // MESH_NODE_H_

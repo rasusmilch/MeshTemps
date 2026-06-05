@@ -63,6 +63,116 @@ bool CopySensorHistoryByLabelLocked(
   return node->GetSensorHistoryByLabel(sensor_label, out);
 }
 
+bool ClearSensorHistoryForDiagnostics(uint32_t node_id,
+                                      const String& sensor_address,
+                                      size_t requested_capacity,
+                                      size_t* out_capacity) {
+  ScopedMeshNodesLock lock;
+  MeshNode* node = FindMeshNode(node_id);
+  if (node == nullptr) {
+    return false;
+  }
+
+  MeshNode::Sensor* sensor = node->FindSensor(sensor_address);
+  if (sensor == nullptr) {
+    return false;
+  }
+
+  sensor->history.clear();
+  if (requested_capacity > 0U) {
+    sensor->history.resize(requested_capacity);
+  }
+  sensor->history_head_index = 0U;
+  sensor->history_size = 0U;
+  sensor->history_diagnostic = true;
+
+  if (out_capacity != nullptr) {
+    *out_capacity = sensor->history.size();
+  }
+  return sensor->history.size() == requested_capacity;
+}
+
+bool AppendSensorHistorySampleForDiagnostics(
+    uint32_t node_id,
+    const String& sensor_address,
+    const MeshNode::SensorHistorySample& sample,
+    size_t* out_size,
+    size_t* out_capacity) {
+  ScopedMeshNodesLock lock;
+  MeshNode* node = FindMeshNode(node_id);
+  if (node == nullptr) {
+    return false;
+  }
+
+  MeshNode::Sensor* sensor = node->FindSensor(sensor_address);
+  if (sensor == nullptr || sensor->history.empty() ||
+      !sensor->history_diagnostic) {
+    return false;
+  }
+
+  if (sensor->history_head_index >= sensor->history.size()) {
+    sensor->history_head_index = 0U;
+  }
+  if (sensor->history_size > sensor->history.size()) {
+    sensor->history_size = sensor->history.size();
+  }
+
+  sensor->history[sensor->history_head_index] = sample;
+  sensor->history_head_index =
+      (sensor->history_head_index + 1U) % sensor->history.size();
+  if (sensor->history_size < sensor->history.size()) {
+    ++sensor->history_size;
+  }
+
+  if (out_size != nullptr) {
+    *out_size = sensor->history_size;
+  }
+  if (out_capacity != nullptr) {
+    *out_capacity = sensor->history.size();
+  }
+  return true;
+}
+
+bool SensorHistoryIsDiagnosticForDiagnostics(uint32_t node_id,
+                                             const String& sensor_address,
+                                             bool* out_is_diagnostic) {
+  if (out_is_diagnostic == nullptr) {
+    return false;
+  }
+
+  ScopedMeshNodesLock lock;
+  MeshNode* node = FindMeshNode(node_id);
+  if (node == nullptr) {
+    return false;
+  }
+
+  const MeshNode::Sensor* sensor = node->FindSensor(sensor_address);
+  if (sensor == nullptr) {
+    return false;
+  }
+
+  *out_is_diagnostic = sensor->history_diagnostic;
+  return true;
+}
+
+size_t CountDiagnosticHistorySensorsForDiagnostics() {
+  ScopedMeshNodesLock lock;
+  size_t count = 0U;
+  const std::vector<uint32_t> ids = GetAllMeshNodeIds();
+  for (uint32_t id : ids) {
+    const MeshNode* node = FindMeshNode(id);
+    if (node == nullptr) {
+      continue;
+    }
+    for (const auto& sensor : node->sensors()) {
+      if (sensor.history_diagnostic) {
+        ++count;
+      }
+    }
+  }
+  return count;
+}
+
 MeshNode::MeshNode(uint32_t node_id)
     : node_id_(node_id),
       node_id_str_(FormatNodeKeyHex(node_id)),   // hex for any user-facing use
@@ -153,6 +263,12 @@ void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
   }
 
   for (auto& sensor : sensors_) {
+    // Diagnostic/fake histories are operator-owned until explicitly cleared or
+    // replaced. Do not resize them or mix real samples into synthetic data.
+    if (sensor.history_diagnostic) {
+      continue;
+    }
+
     // Skip sensors that have never produced a value.
     if (!sensor.has_value) {
       continue;
@@ -164,6 +280,7 @@ void MeshNode::MaybeLogHistorySample(uint32_t now_ms) {
       sensor.history.resize(history_capacity_per_sensor_);
       sensor.history_head_index = 0U;
       sensor.history_size = 0U;
+      sensor.history_diagnostic = false;
     }
 
     SensorHistorySample sample;
