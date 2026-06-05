@@ -9111,6 +9111,7 @@ constexpr size_t kFakeHistoryBatchWritesPerLoop = 128U;
 constexpr size_t kFakeHistoryMaxTotalWrites = 250000U;
 constexpr uint32_t kFakeHistoryBatchBudgetMs = 5U;
 constexpr uint32_t kFakeHistoryLiveNodeWindowMs = 5UL * 60UL * 1000UL;
+constexpr uint32_t kHistorySetMaxNormalIntervalSeconds = 3600U;
 constexpr time_t kFakeHistoryMinValidEpoch = 1704067200;  // 2024-01-01 UTC.
 
 struct FakeHistoryTarget {
@@ -9698,7 +9699,8 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
     out.println(F("  hist show|get"));
     out.println(F("    - show global history logging configuration"));
     out.println(F("  hist set <interval_s> <retention_days>"));
-    out.println(F("    - set history interval (seconds) and retention (days)"));
+    out.println(F("    - set interval in SECONDS, not ms"));
+    out.println(F("    - examples: hist set 60 7, hist set 60 30"));
     out.println(F("  hist clear"));
     out.println(F("    - clear history for all nodes / sensors"));
     out.println(F("  hist clear <addr16>"));
@@ -9796,33 +9798,64 @@ static void CmdHist(void *ctx, int argc, const String argv[], Print &out) {
   // hist set <interval_s> <retention_days>
   // -------------------------------------------------------------------------
   if (sub.equalsIgnoreCase("set")) {
-    if (argc < 4) {
+    if (argc != 4) {
       out.println(
           F("ERR hist set (usage: hist set <interval_s> <retention_days>)"));
       return;
     }
 
-    const long interval_seconds = argv[2].toInt();
-    const long retention_days = argv[3].toInt();
-
-    if (interval_seconds <= 0) {
-      out.println(F("ERR hist set: interval_s must be > 0"));
+    uint32_t interval_seconds = 0U;
+    uint32_t retention_days = 0U;
+    if (!ParseStrictPositiveUInt32(argv[2], &interval_seconds)) {
+      out.println(F("ERR hist set: interval_s must be a positive integer"));
       return;
     }
-    if (retention_days <= 0) {
-      out.println(F("ERR hist set: retention_days must be > 0"));
+    if (!ParseStrictPositiveUInt32(argv[3], &retention_days)) {
+      out.println(F("ERR hist set: retention_days must be a positive integer"));
       return;
     }
 
-    const uint32_t interval_ms =
-        static_cast<uint32_t>(interval_seconds) * 1000UL;
+    if (interval_seconds > kHistorySetMaxNormalIntervalSeconds) {
+      if ((interval_seconds % 1000U) == 0U) {
+        const uint32_t suggested_seconds = interval_seconds / 1000U;
+        out.printf("ERR hist set: interval_s=%lu is suspiciously large.\n",
+                   static_cast<unsigned long>(interval_seconds));
+        out.println(F("hist set expects seconds, not milliseconds."));
+        out.printf("For %lu ms / ",
+                   static_cast<unsigned long>(interval_seconds));
+        if ((suggested_seconds % 60U) == 0U) {
+          const uint32_t suggested_minutes = suggested_seconds / 60U;
+          out.printf("%lu minute%s",
+                     static_cast<unsigned long>(suggested_minutes),
+                     suggested_minutes == 1U ? "" : "s");
+        } else {
+          out.printf("%lu seconds",
+                     static_cast<unsigned long>(suggested_seconds));
+        }
+        out.printf(" use: hist set %lu %lu\n",
+                   static_cast<unsigned long>(suggested_seconds),
+                   static_cast<unsigned long>(retention_days));
+      } else {
+        out.printf(
+            "ERR hist set: interval_s=%lu exceeds safe console limit %lu.\n",
+            static_cast<unsigned long>(interval_seconds),
+            static_cast<unsigned long>(kHistorySetMaxNormalIntervalSeconds));
+        out.println(
+            F("hist set expects seconds. Common examples: hist set 60 7, hist set 60 30."));
+      }
+      out.println(F("No changes applied."));
+      return;
+    }
 
-    MeshNode::SetHistoryConfig(interval_ms,
-                               static_cast<uint32_t>(retention_days));
+    const uint32_t interval_ms = interval_seconds * 1000UL;
+
+    MeshNode::SetHistoryConfig(interval_ms, retention_days);
 
     out.print(F("hist set: interval="));
     out.print(interval_ms);
-    out.print(F(" ms, retention="));
+    out.print(F(" ms ("));
+    out.print(interval_seconds);
+    out.print(F(" s), retention="));
     out.print(retention_days);
     out.println(F(" days"));
 
