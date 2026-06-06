@@ -1,0 +1,813 @@
+menu "PT100 Logger"
+
+menu "General / Node Role"
+
+config APP_NODE_IS_ROOT
+  bool "Build as mesh root node"
+  default n
+  help
+    Root connects to the external Wi-Fi router, runs SNTP, and forwards incoming
+    mesh packets over UART to the host.
+
+endmenu
+
+menu "Network / Mesh / Time Sync"
+
+config APP_WIFI_ROUTER_SSID
+  string "Router SSID (root uses this to reach the Internet)"
+  default ""
+  help
+    External Wi-Fi SSID used by the mesh root to get Internet for SNTP.
+
+config APP_WIFI_ROUTER_PASSWORD
+  string "Router password"
+  default ""
+  help
+    External Wi-Fi password used by the mesh root.
+
+config APP_WIFI_ALLOW_KCONFIG_FALLBACK
+  bool "Allow Kconfig router credentials fallback"
+  default n
+  help
+    When enabled, WifiCredentialsLoad falls back to the Kconfig router
+    SSID/password when no NVS credentials exist. Leave disabled to avoid
+    embedding Wi-Fi secrets in firmware builds.
+
+config APP_WIFI_ALLOW_PASSWORD_PRINT
+  bool "Allow printing Wi-Fi passwords in logs"
+  default n
+  help
+    When disabled, Wi-Fi passwords should only be logged in masked form.
+
+config APP_WIFI_INIT_MIN_FREE_INTERNAL_BYTES
+  int "Wi-Fi init minimum internal free heap (bytes)"
+  default 81920
+  help
+    Minimum internal free heap required before attempting Wi-Fi init.
+
+config APP_WIFI_INIT_MIN_LARGEST_DMA_INTERNAL_BYTES
+  int "Wi-Fi init minimum DMA-capable internal block (bytes)"
+  default 32768
+  help
+    Minimum largest free DMA-capable internal block required before attempting
+    Wi-Fi init.
+
+config APP_WIFI_EARLY_RESERVE
+  bool "Initialize Wi-Fi driver early"
+  default y
+  help
+    Initialize Wi-Fi driver early (esp_wifi_init) to avoid DMA heap
+    fragmentation; start/connect later.
+
+config APP_WIFI_HEAP_TRACE_ENABLE
+  bool "Enable heap trace around Wi-Fi start"
+  default n
+  depends on HEAP_TRACING
+  help
+    When enabled, collect and dump heap trace records around Wi-Fi init/start
+    when failures occur or the internal largest free block drops below a
+    threshold.
+
+config APP_WIFI_HEAP_TRACE_RECORDS
+  int "Wi-Fi heap trace record count"
+  default 200
+  depends on APP_WIFI_HEAP_TRACE_ENABLE
+  help
+    Number of heap trace records kept during Wi-Fi init/start.
+
+config APP_WIFI_HEAP_TRACE_LARGEST_INTERNAL_THRESHOLD_BYTES
+  int "Wi-Fi heap trace internal largest free block threshold (bytes)"
+  default 4096
+  depends on APP_WIFI_HEAP_TRACE_ENABLE
+  help
+    Dump heap trace results after Wi-Fi init/start if the largest internal
+    free block drops below this threshold.
+
+config APP_MESH_DISABLE_ROUTER
+  bool "Disable router backhaul (Mesh-Lite only mode)"
+  default n
+  help
+    If enabled, the mesh root will not attempt to connect to an upstream router.
+    Use this to form a routerless Mesh-Lite network with a fixed root.
+
+config APP_SNTP_SERVER
+  string "SNTP server"
+  default "pool.ntp.org"
+
+config APP_TIME_SYNC_PERIOD_S
+  int "Root time broadcast period (seconds)"
+  range 5 86400
+  default 30
+
+config APP_MESH_CHANNEL
+  int "Mesh Wi-Fi channel"
+  range 1 13
+  default 6
+
+config APP_MESH_ID_HEX
+  string "Mesh ID (6 bytes hex, colon separated)"
+  default "77:77:77:77:77:77"
+  help
+    Example: 77:77:77:77:77:77. All nodes must use the same Mesh ID.
+
+config APP_MESH_AP_PASSWORD
+  string "Mesh AP password (8+ chars)"
+  default "pt100mesh"
+  help
+    Password used for the mesh SoftAP. Must be 8+ characters.
+
+config APP_MESH_AP_CONNECTIONS
+  int "Mesh AP max connections"
+  range 1 10
+  default 6
+
+endmenu
+
+menu "GPIO Map"
+
+menu "Shared SPI / RTD Pins"
+
+config APP_SPI_MOSI_GPIO
+  int "SPI MOSI GPIO"
+  range -1 48
+  default 11
+
+config APP_SPI_MISO_GPIO
+  int "SPI MISO GPIO"
+  range -1 48
+  default 13
+
+config APP_SPI_SCLK_GPIO
+  int "SPI SCLK GPIO"
+  range -1 48
+  default 12
+
+config APP_MAX31865_CS_GPIO
+  int "MAX31865 CS GPIO"
+  range -1 48
+  default 10
+
+config APP_MAX31865_RDY_GPIO
+  int "MAX31865 RDY GPIO (-1 disables)"
+  range -1 48
+  default 6
+  help
+    MAX31865 RDY pin GPIO number. Set to -1 to disable RDY usage.
+
+choice APP_MAX31865_RDY_PULL
+  prompt "MAX31865 RDY pull resistor"
+  default APP_MAX31865_RDY_PULL_NONE
+  depends on APP_MAX31865_RDY_GPIO != -1
+
+config APP_MAX31865_RDY_PULL_NONE
+  bool "None"
+
+config APP_MAX31865_RDY_PULLUP
+  bool "Pull-up"
+
+config APP_MAX31865_RDY_PULLDOWN
+  bool "Pull-down"
+
+endchoice
+
+config APP_MAX31865_RDY_READY_HIGH
+  bool "MAX31865 RDY ready level is HIGH"
+  default n
+  depends on APP_MAX31865_RDY_GPIO != -1
+  help
+    When disabled, ready level is LOW.
+
+endmenu
+
+menu "Display Pins"
+
+config APP_MAX7219_MOSI_GPIO
+  int "MAX7219 MOSI GPIO" if !APP_MAX7219_SHARE_APP_SPI_BUS
+  range -1 48
+  default APP_SPI_MOSI_GPIO if APP_MAX7219_SHARE_APP_SPI_BUS
+  default 17
+
+config APP_MAX7219_SCLK_GPIO
+  int "MAX7219 SCLK GPIO" if !APP_MAX7219_SHARE_APP_SPI_BUS
+  range -1 48
+  default APP_SPI_SCLK_GPIO if APP_MAX7219_SHARE_APP_SPI_BUS
+  default 18
+
+config APP_MAX7219_CS_GPIO
+  int "MAX7219 CS GPIO"
+  range -1 48
+  default 16
+
+endmenu
+
+menu "Storage / I2C Pins"
+
+config APP_SD_CS_GPIO
+  int "SD card CS GPIO"
+  range -1 48
+  default 14
+
+config APP_SD_CARD_DETECT_GPIO
+  int "SD card detect GPIO (-1 disables)"
+  range -1 48
+  default -1
+  help
+    GPIO input that indicates SD card presence. Set to -1 to disable.
+
+choice APP_SD_CARD_DETECT_PRESENT_LEVEL
+  prompt "SD card detect polarity (card present when level is...)"
+  depends on APP_SD_CARD_DETECT_GPIO != -1
+  default APP_SD_CARD_DETECT_PRESENT_LOW
+
+config APP_SD_CARD_DETECT_PRESENT_LOW
+  bool "LOW"
+
+config APP_SD_CARD_DETECT_PRESENT_HIGH
+  bool "HIGH"
+
+endchoice
+
+config APP_SD_CARD_DETECT_DEBOUNCE_MS
+  int "SD card detect debounce (ms)"
+  range 0 500
+  default 50
+  depends on APP_SD_CARD_DETECT_GPIO != -1
+
+config APP_SD_CARD_DETECT_USE_INTERNAL_PULL
+  bool "Enable internal pull resistor for SD detect"
+  default y
+  depends on APP_SD_CARD_DETECT_GPIO != -1
+
+config APP_I2C_SDA_GPIO
+  int "I2C SDA GPIO (DS3231)"
+  range -1 48
+  default 7
+
+config APP_I2C_SCL_GPIO
+  int "I2C SCL GPIO (DS3231)"
+  range -1 48
+  default 8
+
+endmenu
+
+menu "Runtime Control / Override Pins"
+
+config APP_RUN_STOP_GPIO_ENABLE
+  bool "Enable run stop GPIO input"
+  default n
+
+config APP_RUN_STOP_GPIO_NUM
+  int "Run stop GPIO number (active-low)"
+  range -1 48
+  default -1
+  depends on APP_RUN_STOP_GPIO_ENABLE
+
+config APP_RUN_START_GPIO_ENABLE
+  bool "Enable run start GPIO input"
+  default n
+
+config APP_RUN_START_GPIO_NUM
+  int "Run start GPIO number (active-low)"
+  range -1 48
+  default -1
+  depends on APP_RUN_START_GPIO_ENABLE
+
+config APP_DIAGNOSTICS_OVERRIDE_GPIO
+  int "Diagnostics override GPIO (active low, pull-up enabled, -1 to disable)"
+  range -1 48
+  default -1
+  help
+    If set to a valid GPIO, holding the pin low at reset forces diagnostics
+    boot mode regardless of the stored NVS boot mode. The input uses an
+    internal pull-up.
+
+config APP_RUN_OVERRIDE_GPIO
+  int "Run override GPIO (active low, pull-up enabled, -1 to disable)"
+  range -1 48
+  default -1
+  help
+    If set to a valid GPIO, holding the pin low at reset forces run boot mode
+    regardless of the stored NVS boot mode. The input uses an internal pull-up.
+
+endmenu
+
+menu "Units GPIO"
+
+config APP_UNITS_GPIO_ENABLE
+  bool "Enable runtime units override via GPIO"
+  default n
+  help
+    When enabled, a GPIO input can override the display units at runtime
+    without reboot. The pin level selects Celsius or Fahrenheit.
+
+config APP_UNITS_GPIO_TOGGLE_ON_PRESS
+  bool "Units GPIO toggles on button press"
+  default y
+  help
+    When enabled, each debounced press toggles display units and stores the
+    selection in RTC memory for warm-reset persistence. Disable to use legacy
+    level-select behavior.
+
+config APP_UNITS_GPIO_DEFAULT_PIN
+  int "Default units GPIO pin (-1 disables override)"
+  range -1 48
+  default -1
+  help
+    Default GPIO used for runtime unit switching. Set to -1 to disable.
+
+config APP_UNITS_GPIO_DEFAULT_PULL
+  int "Default units GPIO pull (0=none, 1=up, 2=down)"
+  range 0 2
+  default 1
+  help
+    Input pull configuration for the units GPIO.
+
+config APP_UNITS_GPIO_DEFAULT_LEVEL_FOR_C
+  bool "GPIO high level selects Celsius"
+  default n
+  help
+    When enabled, a HIGH pin level means Celsius; otherwise LOW selects Celsius.
+
+config APP_UNITS_TOGGLE_HOLD_MS
+  int "Units toggle button hold time (ms)"
+  range 0 5000
+  default 0
+
+endmenu
+
+menu "Data Stream UART Pins"
+
+config APP_DATA_STREAM_UART_TX_GPIO
+  int "Data stream UART0 TX GPIO"
+  range -1 48
+  default 43
+  help
+    UART0 TX GPIO used by the data stream backend. Set to -1 to leave the
+    current UART0 TX pin mapping unchanged.
+
+config APP_DATA_STREAM_UART_RX_GPIO
+  int "Data stream UART0 RX GPIO"
+  range -1 48
+  default 44
+  help
+    UART0 RX GPIO used by the data stream backend. Set to -1 to leave the
+    current UART0 RX pin mapping unchanged.
+
+endmenu
+
+endmenu
+
+menu "RTD / MAX31865"
+
+config APP_SPI_HOST
+  int "SPI host (2=SPI2_HOST, 3=SPI3_HOST)"
+  range 2 3
+  default 2
+
+config APP_MAX31865_RREF_OHMS
+  int "MAX31865 reference resistor (ohms)"
+  range 10 100000
+  default 430
+
+config APP_RTD_R0_OHMS
+  int "RTD nominal resistance at 0C (ohms)"
+  range 10 100000
+  default 100
+
+config APP_MAX31865_BIAS_SETTLE_MS
+  int "MAX31865 bias settle delay (ms)"
+  range 0 500
+  default 10
+  help
+    Extra delay after enabling VBIAS to allow RC filters on the RTD input to
+    settle before starting a one-shot conversion.
+
+choice APP_MAX31865_WIRES
+  prompt "MAX31865 wiring mode"
+  default APP_MAX31865_WIRES_4
+
+config APP_MAX31865_WIRES_2
+  bool "2-wire (highest lead error)"
+
+config APP_MAX31865_WIRES_3
+  bool "3-wire (lead compensation enabled)"
+
+config APP_MAX31865_WIRES_4
+  bool "4-wire (best accuracy)"
+
+endchoice
+
+choice APP_MAX31865_FILTER
+  prompt "MAX31865 notch filter"
+  default APP_MAX31865_FILTER_50HZ
+
+config APP_MAX31865_FILTER_50HZ
+  bool "50 Hz"
+
+config APP_MAX31865_FILTER_60HZ
+  bool "60 Hz"
+
+endchoice
+
+choice APP_MAX31865_CONVERSION
+  prompt "RTD temperature conversion method"
+  default APP_MAX31865_CONVERSION_CVD_ITERATIVE
+
+config APP_MAX31865_CONVERSION_TABLE_PT100
+  bool "ITS-90 PT100 table (binary search + interpolation)"
+
+config APP_MAX31865_CONVERSION_CVD_ITERATIVE
+  bool "Callendar-Van Dusen iterative solve"
+
+endchoice
+
+endmenu
+
+menu "MAX7219 Display"
+
+choice APP_DISPLAY_UNITS_DEFAULT
+  prompt "Default display units at boot"
+  default APP_DISPLAY_UNITS_DEFAULT_F
+
+config APP_DISPLAY_UNITS_DEFAULT_C
+  bool "Celsius"
+
+config APP_DISPLAY_UNITS_DEFAULT_F
+  bool "Fahrenheit"
+
+endchoice
+
+config APP_MAX7219_ENABLE
+  bool "Enable MAX7219 32x8 display"
+  default y
+
+config APP_MAX7219_SHARE_APP_SPI_BUS
+  bool "MAX7219 shares app SPI bus"
+  default n
+  help
+    When enabled, the MAX7219 display uses the shared app SPI bus and does not
+    initialize its own SPI bus configuration. Only enable this if the MAX7219
+    MOSI/SCLK pins are physically tied to the APP_SPI MOSI/SCLK pins.
+
+config APP_MAX7219_SPI_HOST
+  int "MAX7219 SPI host (2=SPI2_HOST, 3=SPI3_HOST)" if !APP_MAX7219_SHARE_APP_SPI_BUS
+  range 2 3
+  default APP_SPI_HOST if APP_MAX7219_SHARE_APP_SPI_BUS
+  default 3
+
+config APP_MAX7219_CHAIN_LEN
+  int "MAX7219 chain length"
+  range 1 8
+  default 4
+
+config APP_MAX7219_REVERSE_MODULE_ORDER
+  bool "Reverse MAX7219 module order (4,3,2,1)"
+  default y
+  help
+    Enable this if the daisy-chained MAX7219 modules are physically arranged
+    left-to-right as 4,3,2,1. This swaps 8-column blocks so text reads
+    left-to-right.
+
+config APP_MAX7219_INTENSITY
+  int "MAX7219 intensity (0-15)"
+  range 0 15
+  default 6
+
+config APP_MAX7219_ROTATE_180
+  bool "Rotate MAX7219 output 180 degrees"
+  default n
+
+config APP_MAX7219_MIRROR_X
+  bool "Mirror MAX7219 output horizontally"
+  default n
+
+config APP_MAX7219_MIRROR_Y
+  bool "Mirror MAX7219 output vertically"
+  default n
+
+endmenu
+
+menu "Storage / Logging / FRAM / SD"
+
+config APP_FRAM_SIZE_BYTES
+  int "FRAM size in bytes"
+  range 4096 33554432
+  default 32768
+  help
+    Total size of the FRAM device. Used to compute circular buffer capacity.
+
+config APP_FRAM_ERRLOG_BYTES
+  int "FRAM error log reserve (bytes)"
+  range 256 8192
+  default 1024
+  help
+    Reserved bytes at the end of FRAM for the persistent error log.
+
+config APP_FRAM_I2C_ADDR
+  int "FRAM I2C address"
+  range 0 127
+  default 80
+  help
+    0x50 default address for MB85RC256V (A2/A1/A0 low). Shares the same I2C bus
+    as the DS3231.
+
+config APP_FRAM_HEADER_UPDATE_EVERY_N_RECORDS
+  int "Persist FRAM header every N records"
+  range 1 1000
+  default 16
+  help
+    Header is written periodically to survive power loss without writing it on
+    every record.
+
+config APP_LOG_PERIOD_MS_DEFAULT
+  int "Default logging period (ms)"
+  range 100 3600000
+  default 1000
+
+config APP_DISPLAY_SAMPLE_PERIOD_MS_DEFAULT
+  int "Default display/sample period (ms)"
+  range 100 3600000
+  default 1000
+
+config APP_FRAM_FLUSH_WATERMARK_RECORDS_DEFAULT
+  int "Default flush watermark (records)"
+  range 1 1000000
+  default 1024
+  help
+    When buffered records in FRAM reach this watermark, the app will flush a batch
+    of records to the SD card.
+
+config APP_SD_BATCH_BYTES_TARGET
+  int "Target SD batch size (bytes)"
+  range 4096 262144
+  default 8192
+  help
+    CSV flush batches are built up to roughly this many bytes before being
+    appended to SD. Larger batches improve wear and throughput.
+
+config APP_MAX_CSV_LINE_BYTES
+  int "Max CSV line size (bytes)"
+  range 128 1024
+  default 256
+  help
+    Maximum size for formatted CSV rows, including the trailing newline. This
+    buffer is allocated once and reused for CSV formatting.
+
+config APP_SD_PERIODIC_FLUSH_MS
+  int "Periodic flush interval (ms)"
+  range 1000 3600000
+  default 3600000
+  help
+    Even if the FRAM watermark is not reached, the app will attempt to flush
+    buffered records after this many milliseconds to keep latency bounded.
+
+config APP_ALERT_STORAGE_STALL_MS
+  int "Storage stall alert threshold (ms)"
+  range 10000 3600000
+  default 120000
+  help
+    Raise storage_stall alert when FRAM remains at/above watermark and no SD
+    drain progress is observed for this long while SD is unhealthy.
+
+config APP_STOP_DRAIN_MAX_MS
+  int "Stop drain max duration (ms, -1 for no limit)"
+  range -1 600000
+  default 15000
+  help
+    Maximum duration for the STOP drain (entering diagnostics). Use -1 to
+    drain until FRAM is empty without a time limit.
+
+config APP_START_DRAIN_ENABLE
+  bool "Enable start drain on run start"
+  default y
+  help
+    Attempt to drain FRAM to SD on every transition into run mode.
+
+config APP_START_DRAIN_MAX_MS
+  int "Start drain max duration (ms, -1 for no limit)"
+  range -1 600000
+  default 5000
+  help
+    Maximum duration for the START drain (entering run mode). Use -1 to
+    drain until FRAM is empty without a time limit.
+
+config APP_START_DRAIN_MAX_RECORDS_PER_PASS
+  int "Start drain max records per pass"
+  range 1 10000
+  default 200
+  help
+    Maximum number of records flushed per start drain loop iteration.
+
+config APP_START_DRAIN_YIELD_EVERY_RECORDS
+  int "Start drain yield every N records"
+  range 1 10000
+  default 100
+  help
+    Yield to other tasks after draining this many records on start.
+
+config APP_DRAIN_MAX_RECORDS_PER_PASS
+  int "Drain max records per pass"
+  range 1 10000
+  default 200
+  help
+    Maximum number of records flushed per drain loop iteration.
+
+config APP_DRAIN_YIELD_EVERY_RECORDS
+  int "Drain yield every N records"
+  range 1 10000
+  default 200
+  help
+    Yield to other tasks after draining this many records.
+
+config APP_DRAIN_LOG_PROGRESS
+  bool "Log drain progress"
+  default y
+  help
+    Log drain progress while flushing FRAM to SD.
+
+config APP_SD_TAIL_SCAN_BYTES
+  int "Bytes to scan when repairing SD tail"
+  range 4096 1048576
+  default 262144
+  help
+    On boot or day rollover, the logger scans this many bytes from the end of
+    the CSV file to find the last complete line and sequence number.
+
+config APP_SD_FILE_BUFFER_BYTES
+  int "Buffered FILE stream size for SD appends"
+  range 4096 262144
+  default 8096
+
+config APP_SD_SPI_MAX_FREQ_KHZ
+  int "SD SPI max clock (kHz)"
+  range 400 20000
+  default 5000
+  help
+    Maximum SDSPI clock used for SD card access. Lower values improve
+    signal margin on long/noisy wiring, while higher values may improve
+    throughput on clean hardware.
+
+config APP_DS3231_I2C_ADDR
+  int "DS3231 I2C address"
+  range 0 127
+  default 104
+  help
+    104 decimal = 0x68.
+
+endmenu
+
+menu "Runtime Controls / Buttons"
+
+config APP_BUTTONS_POLL_MS
+  int "Button poll interval (ms)"
+  range 1 100
+  default 10
+
+config APP_BUTTONS_DEBOUNCE_MS
+  int "Button debounce time (ms)"
+  range 1 1000
+  default 30
+
+config APP_BUTTONS_HOLDOFF_MS
+  int "Button holdoff after press event (ms)"
+  range 0 5000
+  default 250
+
+config APP_BUTTONS_TASK_STACK_BYTES
+  int "Unified button task stack size (bytes)"
+  range 1024 4096
+  default 2048
+
+config APP_RUN_START_HOLD_MS
+  int "Run start button hold time (ms)"
+  range 0 5000
+  default 100
+
+config APP_RUN_STOP_HOLD_MS
+  int "Run stop button hold time (ms)"
+  range 0 5000
+  default 100
+
+endmenu
+
+menu "Export / MQTT / Mesh Uplink"
+
+config APP_EXPORT_OUTBOX_DEPTH
+  int "Export outbox depth (leaf)"
+  range 16 1024
+  default 128
+  help
+    Number of records to buffer for mesh/MQTT export on leaf nodes.
+
+config APP_BROKER_OUTBOX_DEPTH
+  int "Broker outbox depth (root)"
+  range 32 2048
+  default 256
+  help
+    Number of publish items to buffer for upstream MQTT on the root.
+
+config APP_EXPORT_RATE_LIMIT_MS
+  int "Export log rate limit (ms)"
+  range 1000 600000
+  default 60000
+  help
+    Minimum interval between repeated export warning logs (outbox full, publish failures).
+
+endmenu
+
+menu "Heap / Memory Guard"
+
+config APP_MEM_GUARD_ENABLE
+  bool "Enable mem guard allocation tracking"
+  default y
+  help
+    When enabled, allocation wrappers track allocations and optionally log
+    when allocations occur during the RUN phase.
+
+config APP_MEM_GUARD_LOG_ENABLE
+  bool "Enable mem guard allocation warnings"
+  default y
+  depends on APP_MEM_GUARD_ENABLE
+  help
+    When enabled, allocations during the RUN phase emit a warning with a
+    configurable rate limit.
+
+config APP_MEM_GUARD_LOG_RATE_LIMIT_MS
+  int "Mem guard warning rate limit (ms)"
+  default 60000
+  depends on APP_MEM_GUARD_LOG_ENABLE
+  help
+    Minimum time between repeated mem guard warnings during RUN. Set to 0 to
+    log every allocation.
+
+config APP_MEM_GUARD_STRICT
+  bool "Abort on allocations during RUN phase"
+  default n
+  depends on APP_MEM_GUARD_ENABLE
+  help
+    When enabled, any allocation during RUN will abort quickly.
+
+config APP_HEAP_MONITOR_ENABLE
+  bool "Enable heap fragmentation monitor"
+  default y
+
+config APP_HEAP_MONITOR_PERIOD_MS
+  int "Heap monitor sample period (ms)"
+  range 1000 3600000
+  default 60000
+  depends on APP_HEAP_MONITOR_ENABLE
+
+config APP_HEAP_INTERNAL_LARGEST_WARN_BYTES
+  int "Internal heap warn if largest free block < (bytes)"
+  range 0 1048576
+  default 8192
+  depends on APP_HEAP_MONITOR_ENABLE
+
+config APP_HEAP_INTERNAL_LARGEST_CRIT_BYTES
+  int "Internal heap critical if largest free block < (bytes)"
+  range 0 1048576
+  default 4096
+  depends on APP_HEAP_MONITOR_ENABLE
+
+config APP_HEAP_INTERNAL_FRAG_WARN_PCT
+  int "Internal heap warn if fragmentation >= (%)"
+  range 0 100
+  default 70
+  depends on APP_HEAP_MONITOR_ENABLE
+
+config APP_HEAP_INTERNAL_FRAG_CRIT_PCT
+  int "Internal heap critical if fragmentation >= (%)"
+  range 0 100
+  default 85
+  depends on APP_HEAP_MONITOR_ENABLE
+
+config APP_HEAP_PSRAM_MONITOR_ENABLE
+  bool "Also monitor PSRAM heap"
+  default y
+  depends on APP_HEAP_MONITOR_ENABLE
+
+choice APP_HEAP_GUARD_ACTION
+  prompt "Heap guard action on repeated critical condition"
+  default APP_HEAP_GUARD_ACTION_NONE
+  depends on APP_HEAP_MONITOR_ENABLE
+
+config APP_HEAP_GUARD_ACTION_NONE
+  bool "None (monitor only)"
+
+config APP_HEAP_GUARD_ACTION_RUN_STOP
+  bool "Request run stop (enter diagnostics safely)"
+
+config APP_HEAP_GUARD_ACTION_RESTART
+  bool "Restart device"
+
+endchoice
+
+config APP_HEAP_GUARD_CRIT_CONSECUTIVE_SAMPLES
+  int "Critical samples required before guard action"
+  range 1 20
+  default 3
+  depends on APP_HEAP_MONITOR_ENABLE && (APP_HEAP_GUARD_ACTION_RUN_STOP || APP_HEAP_GUARD_ACTION_RESTART)
+
+endmenu
+
+endmenu

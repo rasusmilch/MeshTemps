@@ -1,0 +1,159 @@
+#include "diagnostics/diag_common.h"
+
+#include <errno.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "esp_heap_caps.h"
+
+/**
+ * @brief Execute DiagInitCtx.
+ * @param ctx Parameter ctx.
+ * @param name Parameter name.
+ * @param verbosity Parameter verbosity.
+ */
+void
+DiagInitCtx(diag_ctx_t* ctx, const char* name, diag_verbosity_t verbosity)
+{
+  if (ctx == NULL) {
+    return;
+  }
+  ctx->name = name;
+  ctx->steps_failed = 0;
+  ctx->steps_run = 0;
+  ctx->verbosity = verbosity;
+}
+
+/**
+ * @brief Execute DiagReportStep.
+ * @param ctx Parameter ctx.
+ * @param step_index Parameter step_index.
+ * @param total_steps Parameter total_steps.
+ * @param step Parameter step.
+ * @param result Parameter result.
+ * @param details_fmt Parameter details_fmt.
+ * @param ... Parameter ....
+ */
+void
+DiagReportStep(diag_ctx_t* ctx,
+               int step_index,
+               int total_steps,
+               const char* step,
+               esp_err_t result,
+               const char* details_fmt,
+               ...)
+{
+  if (ctx == NULL) {
+    return;
+  }
+  ctx->steps_run++;
+  if (result != ESP_OK) {
+    ctx->steps_failed++;
+  }
+
+  const char* status = (result == ESP_OK) ? "PASS" : "FAIL";
+  printf("[%s] STEP %d/%d: %s .... %s", ctx->name, step_index, total_steps, step, status);
+  if (result != ESP_OK) {
+    printf(" (%s)", esp_err_to_name(result));
+  }
+  printf("\n");
+
+  if (details_fmt != NULL && ctx->verbosity >= kDiagVerbosity1) {
+    va_list args;
+    va_start(args, details_fmt);
+    printf("      ");
+    vprintf(details_fmt, args);
+    printf("\n");
+    va_end(args);
+  }
+}
+
+/**
+ * @brief Execute DiagPrintSummary.
+ * @param ctx Parameter ctx.
+ * @param total_steps Parameter total_steps.
+ */
+void
+DiagPrintSummary(const diag_ctx_t* ctx, int total_steps)
+{
+  if (ctx == NULL) {
+    return;
+  }
+  const bool pass = ctx->steps_failed == 0 && ctx->steps_run == total_steps;
+  printf("[%s] SUMMARY: %d/%d steps completed, %d failed => %s\n",
+         ctx->name,
+         ctx->steps_run,
+         total_steps,
+         ctx->steps_failed,
+         pass ? "PASS" : "FAIL");
+}
+
+/**
+ * @brief Execute DiagHexdump.
+ * @param ctx Parameter ctx.
+ * @param label Parameter label.
+ * @param bytes Parameter bytes.
+ * @param len Parameter len.
+ */
+void
+DiagHexdump(const diag_ctx_t* ctx,
+            const char* label,
+            const uint8_t* bytes,
+            size_t len)
+{
+  if (bytes == NULL || len == 0 || ctx == NULL) {
+    return;
+  }
+  if (ctx->verbosity < kDiagVerbosity2) {
+    return;
+  }
+  printf("%s (%u bytes):", label, (unsigned)len);
+  for (size_t i = 0; i < len; ++i) {
+    if (i % 16 == 0) {
+      printf("\n      ");
+    }
+    printf("%02x ", bytes[i]);
+  }
+  printf("\n");
+}
+
+/**
+ * @brief Execute DiagPrintErr.
+ * @param err Parameter err.
+ */
+void
+DiagPrintErr(esp_err_t err)
+{
+  printf("%s", esp_err_to_name(err));
+}
+
+/**
+ * @brief Execute DiagPrintErrno.
+ * @param prefix Parameter prefix.
+ */
+void
+DiagPrintErrno(const char* prefix)
+{
+  if (prefix != NULL) {
+    printf("%s: ", prefix);
+  }
+  printf("errno=%d (%s)", errno, strerror(errno));
+}
+
+/**
+ * @brief Execute DiagHeapCheck.
+ * @param ctx Parameter ctx.
+ * @param label Parameter label.
+ */
+void
+DiagHeapCheck(const diag_ctx_t* ctx, const char* label)
+{
+  if (ctx == NULL || ctx->verbosity < kDiagVerbosity2) {
+    return;
+  }
+  if (label != NULL) {
+    printf("      heap_check[%s]\n", label);
+  }
+  heap_caps_check_integrity_all(true);
+}
