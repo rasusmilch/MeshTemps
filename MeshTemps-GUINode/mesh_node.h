@@ -86,6 +86,42 @@ class MeshNode {
     // or mix live samples into a synthetic test window.
     bool history_diagnostic = false;
 
+    size_t history_capacity() const { return history.size(); }
+
+    size_t history_valid_count() const {
+      const size_t capacity = history_capacity();
+      return (history_size < capacity) ? history_size : capacity;
+    }
+
+    size_t history_chronological_start_index() const {
+      const size_t capacity = history_capacity();
+      if (capacity == 0U) {
+        return 0U;
+      }
+
+      const size_t valid_count = history_valid_count();
+      if (valid_count < capacity) {
+        return 0U;
+      }
+
+      // When the ring is full, history_head_index points at the next write
+      // slot, which is also the oldest retained sample.
+      return history_head_index;
+    }
+
+    const SensorHistorySample* history_sample_at_chronological_offset(
+        size_t offset) const {
+      const size_t capacity = history_capacity();
+      const size_t valid_count = history_valid_count();
+      if (capacity == 0U || valid_count == 0U || offset >= valid_count) {
+        return nullptr;
+      }
+
+      const size_t idx =
+          (history_chronological_start_index() + offset) % capacity;
+      return &history[idx];
+    }
+
     // Copy history into |out| in chronological order (oldest -> newest).
     void CopyHistoryInChronologicalOrder(
         std::vector<SensorHistorySample>* out) const {
@@ -93,18 +129,19 @@ class MeshNode {
         return;
       }
       out->clear();
-      if (history.empty() || history_size == 0) {
+
+      const size_t valid_count = history_valid_count();
+      if (history.empty() || valid_count == 0U) {
         return;
       }
-      out->reserve(history_size);
+      out->reserve(valid_count);
 
-      const size_t capacity = history.size();
-      const size_t start_index =
-          (history_size == capacity) ? history_head_index : 0;
-
-      for (size_t i = 0; i < history_size; ++i) {
-        const size_t idx = (start_index + i) % capacity;
-        out->push_back(history[idx]);
+      for (size_t i = 0; i < valid_count; ++i) {
+        const SensorHistorySample* sample =
+            history_sample_at_chronological_offset(i);
+        if (sample != nullptr) {
+          out->push_back(*sample);
+        }
       }
     }
   };
