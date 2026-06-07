@@ -88,13 +88,17 @@ bool FailingSink(const uint8_t*, size_t len, void* ctx) {
   return true;
 }
 
-HistoryHourSnapshot BuildTwoSensorSnapshot() {
+RamHourStager BuildTwoSensorStager() {
   RamHourStager stager;
   assert(stager.ResetHour(kHour));
   assert(stager.RecordSample("2800000000000060", kNodeA, 0, 12.34f, true));
   assert(stager.RecordSample("2800000000000061", kNodeB, 20, 21.25f, false));
   assert(stager.RecordSample("2800000000000061", kNodeB, 21, 21.50f, true));
+  return stager;
+}
 
+HistoryHourSnapshot BuildTwoSensorSnapshot() {
+  RamHourStager stager = BuildTwoSensorStager();
   HistoryHourSnapshot snapshot;
   assert(stager.ExportSnapshot(&snapshot));
   return snapshot;
@@ -109,6 +113,17 @@ bool EncodeToCapture(const HistoryHourSnapshot& snapshot,
   capture->overflow = false;
   std::memset(capture->bytes, 0, sizeof(capture->bytes));
   return WriteSdFinalizedHourBlock(snapshot, CaptureSink, capture, header, status);
+}
+
+bool EncodeSourceToCapture(const ISdFinalizedHourSource& source,
+                           CaptureBuffer* capture,
+                           SdFinalizedHourBlockHeader* header = nullptr,
+                           SdFinalizedHourWriteStatus* status = nullptr) {
+  if (capture == nullptr) return false;
+  capture->used = 0;
+  capture->overflow = false;
+  std::memset(capture->bytes, 0, sizeof(capture->bytes));
+  return WriteSdFinalizedHourBlock(source, CaptureSink, capture, header, status);
 }
 
 size_t DescriptorOffset(uint8_t slot_id) {
@@ -126,6 +141,66 @@ size_t TempOffset(uint8_t minute_index, uint8_t slot_id) {
   return FrameOffset(minute_index) + (2U * kHistoryBitmapBytes) +
          static_cast<size_t>(slot_id) * sizeof(int16_t);
 }
+
+class FakeFinalizedHourSource final : public ISdFinalizedHourSource {
+ public:
+  FakeFinalizedHourSource() {
+    RamHourStager stager = BuildTwoSensorStager();
+    assert(stager.ExportSnapshot(&snapshot_));
+  }
+
+  uint32_t hour_start_epoch_minute() const override {
+    return override_hour_start_ ? 0U : snapshot_.hour_start_epoch_minute;
+  }
+  uint16_t active_slot_count() const override {
+    return override_slot_count_ ? static_cast<uint16_t>(kHistorySlotCapacity + 1U)
+                                : snapshot_.active_slot_count;
+  }
+  bool hour_active() const override {
+    return override_inactive_ ? false : snapshot_.status.hour_active;
+  }
+  uint16_t format_version() const override {
+    return override_bad_format_ ? static_cast<uint16_t>(0xFFFFU)
+                                : snapshot_.format_version;
+  }
+  HistoryStagerStatus status() const override {
+    HistoryStagerStatus status = snapshot_.status;
+    if (override_inactive_) status.hour_active = false;
+    if (override_hour_start_) status.hour_start_epoch_minute = 0U;
+    if (override_slot_count_) status.active_slot_count = kHistorySlotCapacity + 1U;
+    return status;
+  }
+  const HistorySlotDescriptor* slot(uint8_t slot_id) const override {
+    if (return_null_slot_ && slot_id == 0U) return nullptr;
+    if (slot_id >= kHistorySlotCapacity) return nullptr;
+    temp_slot_ = snapshot_.slots[slot_id];
+    if (slot_id == 0U) {
+      if (slot_id_mismatch_) temp_slot_.slot_id = 1U;
+      if (zero_rom_) temp_slot_.rom64 = 0U;
+      if (bad_addr_) temp_slot_.addr16[0] = 'Z';
+    }
+    return &temp_slot_;
+  }
+  const HistoryMinuteFrame* frame(uint8_t minute_index) const override {
+    if (return_null_frame_ && minute_index == 0U) return nullptr;
+    return (minute_index < kHistoryMinutesPerHour) ? &snapshot_.frames[minute_index]
+                                                   : nullptr;
+  }
+
+  bool override_inactive_ = false;
+  bool override_hour_start_ = false;
+  bool override_slot_count_ = false;
+  bool override_bad_format_ = false;
+  bool return_null_slot_ = false;
+  bool return_null_frame_ = false;
+  bool slot_id_mismatch_ = false;
+  bool zero_rom_ = false;
+  bool bad_addr_ = false;
+
+ private:
+  HistoryHourSnapshot snapshot_{};
+  mutable HistorySlotDescriptor temp_slot_{};
+};
 
 void TestEncodeValidSnapshot() {
   const HistoryHourSnapshot snapshot = BuildTwoSensorSnapshot();
@@ -271,6 +346,86 @@ void TestInvalidSnapshotsRejected() {
   assert(record.used == 0);
 }
 
+void TestRamHourStagerSourceMatchesSnapshotBytes() {
+  RamHourStager stager = BuildTwoSensorStager();
+
+  HistoryHourSnapshot snapshot;
+  assert(stager.ExportSnapshot(&snapshot));
+
+  CaptureBuffer snapshot_record;
+  assert(EncodeToCapture(snapshot, &snapshot_record));
+
+  const RamHourStagerFinalizedHourSource source(stager);
+  CaptureBuffer source_record;
+  SdFinalizedHourBlockHeader header;
+  SdFinalizedHourWriteStatus status;
+  assert(EncodeSourceToCapture(source, &source_record, &header, &status));
+
+  assert(source_record.used == snapshot_record.used);
+  assert(std::memcmp(source_record.bytes, snapshot_record.bytes, source_record.used) == 0);
+  assert(VerifySdFinalizedHourBlock(source_record.bytes, source_record.used));
+  assert(status.bytes_written == source_record.used);
+  assert(header.record_bytes == source_record.used);
+}
+
+void TestInvalidSourcesRejected() {
+  CaptureBuffer record;
+
+  FakeFinalizedHourSource source;
+  source.override_inactive_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.override_hour_start_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.override_slot_count_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.override_bad_format_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.return_null_slot_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.return_null_frame_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.slot_id_mismatch_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.zero_rom_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.bad_addr_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+}
+
+void TestSourceWriterPropagatesWriteFailure() {
+  const RamHourStager stager = BuildTwoSensorStager();
+  const RamHourStagerFinalizedHourSource source(stager);
+  FailingSinkContext sink;
+  sink.fail_after_bytes = kSdFinalizedHourHeaderBytes - 1U;
+
+  assert(!WriteSdFinalizedHourBlock(source, FailingSink, &sink, nullptr, nullptr));
+}
+
 }  // namespace
 
 int main() {
@@ -282,6 +437,9 @@ int main() {
   TestFixedCaptureOverflowFails();
   TestCorruptionDetection();
   TestInvalidSnapshotsRejected();
+  TestRamHourStagerSourceMatchesSnapshotBytes();
+  TestInvalidSourcesRejected();
+  TestSourceWriterPropagatesWriteFailure();
   std::cout << "sd_finalized_hour_block_test: PASS" << std::endl;
   return 0;
 }

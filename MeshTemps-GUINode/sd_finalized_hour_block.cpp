@@ -53,41 +53,59 @@ void WriteU32(uint8_t* record, size_t offset, uint32_t value) {
   }
 }
 
-bool SnapshotIsValid(const HistoryHourSnapshot& snapshot) {
-  if (snapshot.format_version != kHistoryHourSnapshotFormatVersion) {
+bool SourceIsValid(const ISdFinalizedHourSource& source) {
+  if (source.format_version() != kHistoryHourSnapshotFormatVersion) {
     return false;
   }
-  if (snapshot.status.hour_active == false) {
+  if (!source.hour_active()) {
     return false;
   }
-  if (snapshot.hour_start_epoch_minute == 0U) {
+  if (source.hour_start_epoch_minute() == 0U) {
     return false;
   }
-  if (snapshot.active_slot_count > kHistorySlotCapacity) {
-    return false;
-  }
-  if (snapshot.status.active_slot_count != snapshot.active_slot_count) {
+  if (source.active_slot_count() > kHistorySlotCapacity) {
     return false;
   }
 
-  for (uint8_t slot_id = 0; slot_id < snapshot.active_slot_count; ++slot_id) {
-    const HistorySlotDescriptor& slot = snapshot.slots[slot_id];
-    if (!slot.active || slot.slot_id != slot_id || slot.rom64 == 0U) {
+  const HistoryStagerStatus status = source.status();
+  if (!status.hour_active) {
+    return false;
+  }
+  if (status.hour_start_epoch_minute != source.hour_start_epoch_minute()) {
+    return false;
+  }
+  if (status.active_slot_count != source.active_slot_count()) {
+    return false;
+  }
+
+  for (uint16_t slot_index = 0; slot_index < source.active_slot_count(); ++slot_index) {
+    const uint8_t slot_id = static_cast<uint8_t>(slot_index);
+    const HistorySlotDescriptor* slot = source.slot(slot_id);
+    if (slot == nullptr || !slot->active || slot->slot_id != slot_id ||
+        slot->rom64 == 0U) {
       return false;
     }
-    if (slot.addr16[16] != '\0') {
+    if (slot->addr16[16] != '\0') {
       return false;
     }
     uint64_t parsed = 0;
-    if (!HistoryParseAddr16ToRom64(slot.addr16, &parsed) || parsed != slot.rom64) {
+    if (!HistoryParseAddr16ToRom64(slot->addr16, &parsed) ||
+        parsed != slot->rom64) {
+      return false;
+    }
+  }
+
+  for (uint8_t minute_index = 0; minute_index < kHistoryMinutesPerHour;
+       ++minute_index) {
+    if (source.frame(minute_index) == nullptr) {
       return false;
     }
   }
   return true;
 }
 
-uint32_t DescriptorBytesFor(const HistoryHourSnapshot& snapshot) {
-  return static_cast<uint32_t>(snapshot.active_slot_count) *
+uint32_t DescriptorBytesFor(const ISdFinalizedHourSource& source) {
+  return static_cast<uint32_t>(source.active_slot_count()) *
          kSdFinalizedHourDescriptorBytes;
 }
 
@@ -96,10 +114,10 @@ uint32_t FramePayloadBytes() {
          kSdFinalizedHourFrameBytes;
 }
 
-void FillHeader(const HistoryHourSnapshot& snapshot,
+void FillHeader(const ISdFinalizedHourSource& source,
                 uint32_t payload_crc32,
                 uint8_t* out) {
-  const uint32_t descriptor_bytes = DescriptorBytesFor(snapshot);
+  const uint32_t descriptor_bytes = DescriptorBytesFor(source);
   const uint32_t payload_bytes = descriptor_bytes + FramePayloadBytes();
   const uint32_t record_bytes = kSdFinalizedHourHeaderBytes + payload_bytes;
 
@@ -108,8 +126,8 @@ void FillHeader(const HistoryHourSnapshot& snapshot,
   PutU16(out, &offset, kSdFinalizedHourVersion);
   PutU16(out, &offset, kSdFinalizedHourHeaderBytes);
   PutU32(out, &offset, record_bytes);
-  PutU32(out, &offset, snapshot.hour_start_epoch_minute);
-  PutU16(out, &offset, snapshot.active_slot_count);
+  PutU32(out, &offset, source.hour_start_epoch_minute());
+  PutU16(out, &offset, source.active_slot_count());
   PutU16(out, &offset, kSdFinalizedHourDescriptorBytes);
   PutU16(out, &offset, kHistoryMinutesPerHour);
   PutU16(out, &offset, kSdFinalizedHourFrameBytes);
@@ -117,7 +135,7 @@ void FillHeader(const HistoryHourSnapshot& snapshot,
   PutU32(out, &offset, payload_bytes);
   PutU32(out, &offset, payload_crc32);
   PutU32(out, &offset, 0U);  // header_crc32 patched after header is complete.
-  PutU16(out, &offset, snapshot.format_version);
+  PutU16(out, &offset, source.format_version());
   PutU16(out, &offset, 0U);  // reserved0
   PutU32(out, &offset, 0U);  // flags
 }
@@ -148,18 +166,24 @@ void FillFrame(const HistoryMinuteFrame& frame, uint8_t* out) {
   }
 }
 
-bool EmitPayload(const HistoryHourSnapshot& snapshot,
+bool EmitPayload(const ISdFinalizedHourSource& source,
                  SdFinalizedHourWriteFn write_fn,
                  void* ctx) {
   uint8_t descriptor[kSdFinalizedHourDescriptorBytes];
-  for (uint8_t slot_id = 0; slot_id < snapshot.active_slot_count; ++slot_id) {
-    FillDescriptor(snapshot.slots[slot_id], descriptor);
+  for (uint16_t slot_index = 0; slot_index < source.active_slot_count();
+       ++slot_index) {
+    const HistorySlotDescriptor* slot = source.slot(static_cast<uint8_t>(slot_index));
+    if (slot == nullptr) return false;
+    FillDescriptor(*slot, descriptor);
     if (!write_fn(descriptor, sizeof(descriptor), ctx)) return false;
   }
 
   uint8_t frame[kSdFinalizedHourFrameBytes];
-  for (const HistoryMinuteFrame& minute_frame : snapshot.frames) {
-    FillFrame(minute_frame, frame);
+  for (uint8_t minute_index = 0; minute_index < kHistoryMinutesPerHour;
+       ++minute_index) {
+    const HistoryMinuteFrame* minute_frame = source.frame(minute_index);
+    if (minute_frame == nullptr) return false;
+    FillFrame(*minute_frame, frame);
     if (!write_fn(frame, sizeof(frame), ctx)) return false;
   }
   return true;
@@ -196,19 +220,19 @@ bool CrcSink(const uint8_t* data, size_t len, void* ctx) {
 
 }  // namespace
 
-bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
+bool WriteSdFinalizedHourBlock(const ISdFinalizedHourSource& source,
                                SdFinalizedHourWriteFn write_fn,
                                void* ctx,
                                SdFinalizedHourBlockHeader* out_header,
                                SdFinalizedHourWriteStatus* out_status) {
   if (write_fn == nullptr) return false;
-  if (!SnapshotIsValid(snapshot)) return false;
+  if (!SourceIsValid(source)) return false;
 
   uint32_t payload_crc32 = 0xFFFFFFFFu;
-  if (!EmitPayload(snapshot, CrcSink, &payload_crc32)) return false;
+  if (!EmitPayload(source, CrcSink, &payload_crc32)) return false;
 
   uint8_t header[kSdFinalizedHourHeaderBytes];
-  FillHeader(snapshot, payload_crc32, header);
+  FillHeader(source, payload_crc32, header);
   const uint32_t header_crc32 = ComputeSdFinalizedHourHeaderCrc32(
       header, sizeof(header));
   WriteU32(header, kHeaderCrcOffset, header_crc32);
@@ -222,7 +246,7 @@ bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
   }
 
   if (!write_fn(header, sizeof(header), ctx)) return false;
-  if (!EmitPayload(snapshot, write_fn, ctx)) return false;
+  if (!EmitPayload(source, write_fn, ctx)) return false;
 
   if (out_header != nullptr) {
     *out_header = decoded_header;
@@ -234,6 +258,15 @@ bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
     out_status->header_crc32 = decoded_header.header_crc32;
   }
   return true;
+}
+
+bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
+                               SdFinalizedHourWriteFn write_fn,
+                               void* ctx,
+                               SdFinalizedHourBlockHeader* out_header,
+                               SdFinalizedHourWriteStatus* out_status) {
+  const HistoryHourSnapshotFinalizedHourSource source(snapshot);
+  return WriteSdFinalizedHourBlock(source, write_fn, ctx, out_header, out_status);
 }
 
 bool DecodeSdFinalizedHourBlockHeader(const uint8_t* record,
