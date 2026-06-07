@@ -208,6 +208,17 @@ Explicit exclusions:
 - No Task 10D runtime aggregator.
 - No chart migration, FRAM, SD reader/query service, rollups/indexes, or broad allocation audit.
 
+### Task 10C-E0 — Remove stale pre-roadmap history_aggregator implementation
+
+Type: focused cleanup/architecture-safety gate after Task 10C-D validation and before Task 10C-E1.
+Risk: medium; prevents old FRAM-first/vector/String aggregator code from being used as a model.
+
+Scope:
+
+- Delete stale unreferenced MeshTemps `history_aggregator.h/.cpp` if repository search confirms no active references outside those files.
+- Do not implement the replacement runtime aggregator in this task.
+- Task 10D must be implemented fresh from the current RamHourStager/source-view/finalized-hour SD writer model and must preserve immediate mid-hour sensor discovery.
+
 ### Task 10C-E1 — Add finalized-hour source/view streaming writer
 
 Type: focused execute follow-up after Task 10C-D validation.
@@ -472,6 +483,7 @@ Recommended sequence:
   -> 10C-C remove finalized-hour dynamic path construction
   -> 10C-D remove finalized-hour libc time conversion
   -> 10C-D checkpoint validation
+  -> 10C-E0 remove stale pre-roadmap history_aggregator
   -> 10C-E1 finalized-hour source/view streaming writer
   -> 10C-E1 checkpoint validation
   -> 10C-E2 fixed-size SD write coalescer
@@ -502,6 +514,7 @@ One draft PR branch should contain the first incomplete storage transition if th
 - 10C-B
 - 10C-C
 - 10C-D
+- 10C-E0
 - 10C-E1
 - 10C-E2
 - 10D
@@ -541,6 +554,7 @@ Can be focused execute tasks after 10A approval:
 - 10C-B finalized-hour vector helper removal.
 - 10C-C finalized-hour fixed path construction cleanup.
 - 10C-D finalized-hour epoch-day bucket path cleanup.
+- 10C-E0 stale pre-roadmap history_aggregator removal.
 - 10C-E1 finalized-hour source/view streaming writer.
 - 10C-E2 finalized-hour fixed-size SD write coalescer.
 - 10D HistoryAggregator snapshot path after 10C-E2 validation.
@@ -597,7 +611,7 @@ Generate the focused execute follow-up task:
 Task 10C-D — Remove libc time conversion from finalized-hour path construction
 ```
 
-Task 10C-D must be checkpoint-validated before Task 10C-E1. Task 10C-E1 should add a finalized-hour source/view streaming writer, and Task 10C-E2 should add a fixed-size SD write coalescer before Task 10D runtime aggregation.
+Task 10C-D must be checkpoint-validated before Task 10C-E0. Task 10C-E0 should remove the stale pre-roadmap `history_aggregator.h/.cpp` implementation if unreferenced. Task 10C-E1 should then add a finalized-hour source/view streaming writer, and Task 10C-E2 should add a fixed-size SD write coalescer before Task 10D runtime aggregation.
 
 ## 16. Last updated context
 
