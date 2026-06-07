@@ -42,6 +42,7 @@ Current product decisions:
 - Labels/ranks are UI metadata, not durable storage keys.
 - Production SD finalized-hour writer/verifier paths must be heap-free/bounded: no large dynamic allocations and no full-record heap buffers.
 - SD finalized-hour commit order is complete write, flush/close, then read-back verification with a fixed-size buffer; do not interleave write/read verification chunks during the write.
+- Finalized-hour SD path construction must use custom bounded append helpers and fixed caller-owned `char` buffers: no Arduino `String`, `std::string`, printf-family formatting, malloc/new, or hidden dynamic path building.
 
 ## 3. MVP / immediate tasks
 
@@ -155,10 +156,42 @@ Acceptance/checkpoint:
 - Header/payload CRCs are computed and verified with bounded buffers/chunks.
 - Tests use fixed-size capture buffers and validate production streaming/bounded writer behavior.
 
+### Task 10C-C — Remove Arduino String path allocation from finalized-hour SD path
+
+Type: focused execute follow-up after Task 10C-A/10C-B.
+PR: same draft PR branch as Tasks 10B/10C unless user says otherwise.
+Risk: high; checkpoint validation required before Task 10D.
+
+Scope:
+
+- Keep the finalized-hour file/block format and streaming writer unchanged.
+- Remove Arduino `String`, `std::string`, `std::vector`, printf-family formatting, malloc/new, and hidden dynamic path construction from the finalized-hour SD append/verify path.
+- Store/copy the base directory into bounded fixed storage before finalized-hour path use.
+- Build finalized-hour directory and file paths with custom bounded append helpers and caller-owned fixed `char` buffers.
+- Reject too-long base directories and path overflow safely.
+- Keep legacy `SdHistoryStore` minute/hourly/daily/rollup `String`/`std::function`/`std::vector` patterns as deferred allocation-audit debt unless compile requires a narrow adapter.
+- Add host tests for pure fixed path-builder helpers where feasible.
+
+Explicit exclusions:
+
+- No Task 10D runtime aggregator.
+- No chart migration.
+- No FRAM.
+- No SD reader/query service.
+- No rollups/indexes.
+- No serial command changes.
+- No broad allocation audit.
+
+Acceptance/checkpoint:
+
+- `AppendFinalizedHourSnapshot()` and `VerifyFinalizedHourRecord_()` use fixed `char` paths and no Arduino `String`/printf-family formatting.
+- Finalized-hour path builder rejects overflows and too-long base directories.
+- Existing heap-free streaming writer and fixed-buffer verifier behavior remains intact.
+
 ### Task 10D — Add history aggregator snapshot path
 
-Type: focused execute task after 10B, 10C, and 10C-A are validated.
-PR: should share the same draft PR branch as 10B/10C/10C-A unless branch size becomes unmanageable.
+Type: focused execute task after 10B, 10C, 10C-A, 10C-B, and 10C-C are validated.
+PR: should share the same draft PR branch as 10B/10C/10C-A/10C-B/10C-C unless branch size becomes unmanageable.
 Risk: high; checkpoint validation required.
 
 Scope:
@@ -170,7 +203,7 @@ Scope:
 - Log mid-hour new sensors immediately.
 - Do not hold mesh locks during storage I/O.
 - Do not write from LVGL event callbacks.
-- Treat SD finalization as a bounded batch operation that starts only after Task 10C-A checkpoint validation proves the writer/verifier avoids production full-record heap buffers.
+- Treat SD finalization as a bounded batch operation that starts only after Task 10C-A/10C-B/10C-C checkpoint validation proves the writer/verifier avoids production full-record heap buffers, vector-backed helpers, and dynamic path construction.
 - Add serial diagnostics for current-hour status.
 - Keep old chart behavior unchanged unless required to compile.
 
@@ -391,7 +424,9 @@ Recommended sequence:
   -> 10B checkpoint validation
   -> 10C SD finalized-hour writer
   -> 10C-A remove production SD full-record heap buffering
-  -> 10C-A checkpoint validation
+  -> 10C-B remove finalized-hour vector helpers
+  -> 10C-C remove finalized-hour dynamic path construction
+  -> 10C-C checkpoint validation
   -> 10D HistoryAggregator snapshot path
   -> 10D checkpoint validation
   -> 10E legacy RAM-history safety/bypass
@@ -415,6 +450,8 @@ One draft PR branch should contain the first incomplete storage transition if th
 - 10B
 - 10C
 - 10C-A
+- 10C-B
+- 10C-C
 - 10D
 - possibly 10E
 
@@ -449,7 +486,9 @@ Can be focused execute tasks after 10A approval:
 - 10B stager interface + RamHourStager.
 - 10C SD finalized-hour writer.
 - 10C-A production SD writer/verifier allocation cleanup.
-- 10D HistoryAggregator snapshot path after 10C-A validation.
+- 10C-B finalized-hour vector helper removal.
+- 10C-C finalized-hour fixed path construction cleanup.
+- 10D HistoryAggregator snapshot path after 10C-C validation.
 - 10E legacy RAM-history safety/bypass.
 - 10F SD reader/query service.
 - 10G chart migration, after 10F.
@@ -464,6 +503,8 @@ Checkpoint validation required after:
 - 10B, because it defines the core storage model.
 - 10C, because it defines SD archive format and corruption behavior.
 - 10C-A, because it gates heap-free production SD finalization before runtime integration.
+- 10C-B, because it removes vector-backed finalized-hour API/test patterns.
+- 10C-C, because it removes dynamic finalized-hour SD path construction before runtime integration.
 - 10D, because it touches live mesh state and timing.
 - 10E, because it changes/isolates legacy history behavior.
 - 10F, because it reads durable history and may affect chart data correctness.
@@ -495,10 +536,10 @@ The PT100 issue #367 bug report was created separately and is not a MeshTemps co
 Generate the focused execute follow-up task:
 
 ```text
-Task 10C-A — Remove production dynamic allocation from finalized-hour SD writer
+Task 10C-C — Remove Arduino String path allocation from finalized-hour SD path
 ```
 
-Task 10C-A must run before Task 10D. It must remove full-record heap buffers from production finalized-hour write/read-back paths while preserving the Task 10C finalized-hour format and host-test codec coverage.
+Task 10C-C must run before Task 10D. It must remove Arduino `String`, `std::string`, printf-family formatting, malloc/new, and hidden dynamic path construction from finalized-hour SD paths while preserving the Task 10C finalized-hour format and streaming writer behavior.
 
 ## 16. Last updated context
 
@@ -521,7 +562,7 @@ Used context:
   - `history_aggregator.h/.cpp`
 - PT100 issue #367 filed from this chat: `FramHourJournal undercounts required FRAM region by one header slot`.
 - Task 10C review finding that production finalized-hour write/read-back paths still use full-record `std::vector<uint8_t>` buffers.
-- Task 10C-R anchor update inserting Task 10C-A as a hard gate before Task 10D.
+- Task 10C-R/10C-C anchor updates inserting heap-free writer, vector-helper removal, and fixed-path construction gates before Task 10D.
 
 Unverified:
 

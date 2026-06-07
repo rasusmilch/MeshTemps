@@ -8,6 +8,7 @@
 #include <functional>
 
 #include "history_hour_stager.h"
+#include "sd_history_path_builder.h"
 
 class SdHistoryStore {
  public:
@@ -128,7 +129,6 @@ class SdHistoryStore {
   bool EnsureDirExists_(const char* path);
   String MakeMinuteFilePath_(uint32_t hour_start_epoch_minute) const;
   String MakeHourlyFilePath_(uint32_t hour_start_epoch_minute) const;
-  String MakeFinalizedHourFilePath_(uint32_t hour_start_epoch_minute) const;
 
   static bool WriteAll_(File& file, const void* data, size_t length);
   static uint32_t ComputeHeaderCrc32_(const void* header, size_t header_bytes);
@@ -138,10 +138,14 @@ class SdHistoryStore {
 
   String MakeDailyFilePath_(uint32_t day_start_epoch_minute) const;
   bool VerifyDailyRecord_(const String& path, uint32_t record_offset) const;
-  bool VerifyFinalizedHourRecord_(const String& path, uint32_t record_offset) const;
+  bool BuildFinalizedDirPath_(char* out, size_t out_size) const;
+  bool BuildFinalizedHourFilePath_(uint32_t hour_start_epoch_minute,
+                                   char* out,
+                                   size_t out_size) const;
+  bool VerifyFinalizedHourRecord_(const char* path, uint32_t record_offset) const;
 
   fs::FS* fs_ = nullptr;
-  String base_dir_;
+  char base_dir_[kSdHistoryBaseDirMax + 1U] = {};
 };
 
 #endif  // SD_HISTORY_STORE_H_

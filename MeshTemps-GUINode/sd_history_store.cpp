@@ -35,12 +35,16 @@ bool WriteFinalizedHourFileChunk(const uint8_t* data, size_t len, void* ctx) {
 }  // namespace
 
 bool SdHistoryStore::Begin(fs::FS& fs, const char* base_dir) {
+  if (!SdHistoryCopyBaseDir(base_dir, base_dir_, sizeof(base_dir_))) return false;
   fs_ = &fs;
-  base_dir_ = base_dir;
 
-  if (!EnsureDirExists_((base_dir_ + "/minute").c_str())) return false;
-  if (!EnsureDirExists_((base_dir_ + "/hourly").c_str())) return false;
-  if (!EnsureDirExists_((base_dir_ + "/daily").c_str())) return false;
+  // Legacy non-finalized-hour directories still use Arduino String and remain
+  // allocation-audit debt. The finalized-hour path below uses only fixed char
+  // buffers and custom bounded path builders.
+  const String legacy_base(base_dir_);
+  if (!EnsureDirExists_((legacy_base + "/minute").c_str())) return false;
+  if (!EnsureDirExists_((legacy_base + "/hourly").c_str())) return false;
+  if (!EnsureDirExists_((legacy_base + "/daily").c_str())) return false;
 
   return true;
 }
@@ -50,11 +54,16 @@ bool SdHistoryStore::AppendFinalizedHourSnapshot(
     const HistoryHourSnapshot& snapshot) {
   if (fs_ == nullptr) return false;
 
-  const String finalized_dir = base_dir_ + "/finalized";
-  if (!EnsureDirExists_(finalized_dir.c_str())) return false;
+  char finalized_dir[kSdHistoryPathMax];
+  if (!BuildFinalizedDirPath_(finalized_dir, sizeof(finalized_dir))) return false;
+  if (!EnsureDirExists_(finalized_dir)) return false;
 
-  const String path = MakeFinalizedHourFilePath_(snapshot.hour_start_epoch_minute);
-  File file = fs_->open(path.c_str(), FILE_APPEND);
+  char path[kSdHistoryPathMax];
+  if (!BuildFinalizedHourFilePath_(snapshot.hour_start_epoch_minute,
+                                   path, sizeof(path))) {
+    return false;
+  }
+  File file = fs_->open(path, FILE_APPEND);
   if (!file) return false;
 
   const uint32_t record_offset = static_cast<uint32_t>(file.position());
@@ -226,9 +235,9 @@ String SdHistoryStore::MakeMinuteFilePath_(uint32_t hour_start_epoch_minute) con
   char date_buf[16];
   if (localtime_r(&epoch_seconds, &tm_buf) == nullptr ||
       strftime(date_buf, sizeof(date_buf), "%Y%m%d", &tm_buf) == 0) {
-    return base_dir_ + "/minute/unknown.bin";
+    return String(base_dir_) + "/minute/unknown.bin";
   }
-  return base_dir_ + "/minute/" + String(date_buf) + ".bin";
+  return String(base_dir_) + "/minute/" + String(date_buf) + ".bin";
 }
 
 String SdHistoryStore::MakeHourlyFilePath_(uint32_t hour_start_epoch_minute) const {
@@ -237,21 +246,19 @@ String SdHistoryStore::MakeHourlyFilePath_(uint32_t hour_start_epoch_minute) con
   char month_buf[16];
   if (localtime_r(&epoch_seconds, &tm_buf) == nullptr ||
       strftime(month_buf, sizeof(month_buf), "%Y%m", &tm_buf) == 0) {
-    return base_dir_ + "/hourly/unknown.bin";
+    return String(base_dir_) + "/hourly/unknown.bin";
   }
-  return base_dir_ + "/hourly/" + String(month_buf) + ".bin";
+  return String(base_dir_) + "/hourly/" + String(month_buf) + ".bin";
 }
 
-String SdHistoryStore::MakeFinalizedHourFilePath_(
-    uint32_t hour_start_epoch_minute) const {
-  const time_t epoch_seconds = static_cast<time_t>(hour_start_epoch_minute) * 60;
-  struct tm tm_buf;
-  char date_buf[16];
-  if (localtime_r(&epoch_seconds, &tm_buf) == nullptr ||
-      strftime(date_buf, sizeof(date_buf), "%Y%m%d", &tm_buf) == 0) {
-    return base_dir_ + "/finalized/unknown.bin";
-  }
-  return base_dir_ + "/finalized/" + String(date_buf) + ".bin";
+bool SdHistoryStore::BuildFinalizedDirPath_(char* out, size_t out_size) const {
+  return SdHistoryBuildFinalizedDirPath(base_dir_, out, out_size);
+}
+
+bool SdHistoryStore::BuildFinalizedHourFilePath_(
+    uint32_t hour_start_epoch_minute, char* out, size_t out_size) const {
+  return SdHistoryBuildFinalizedHourFilePath(hour_start_epoch_minute, base_dir_,
+                                            out, out_size);
 }
 
 bool SdHistoryStore::WriteAll_(File& file, const void* data, size_t length) {
@@ -273,8 +280,9 @@ uint32_t SdHistoryStore::ComputeHeaderCrc32_(const void* header, size_t header_b
 
 
 bool SdHistoryStore::VerifyFinalizedHourRecord_(
-    const String& path, uint32_t record_offset) const {
-  File file = fs_->open(path.c_str(), FILE_READ);
+    const char* path, uint32_t record_offset) const {
+  if (path == nullptr || path[0] == '\0') return false;
+  File file = fs_->open(path, FILE_READ);
   if (!file) return false;
   if (!file.seek(record_offset)) { file.close(); return false; }
 
@@ -386,9 +394,9 @@ String SdHistoryStore::MakeDailyFilePath_(uint32_t day_start_epoch_minute) const
   char year_buf[8];
   if (localtime_r(&epoch_seconds, &tm_buf) == nullptr ||
       strftime(year_buf, sizeof(year_buf), "%Y", &tm_buf) == 0) {
-    return base_dir_ + "/daily/unknown.bin";
+    return String(base_dir_) + "/daily/unknown.bin";
   }
-  return base_dir_ + "/daily/" + String(year_buf) + ".bin";  // yearly rotation
+  return String(base_dir_) + "/daily/" + String(year_buf) + ".bin";  // yearly rotation
 }
 
 bool SdHistoryStore::AppendDailyRollupBlock(uint32_t day_start_epoch_minute,
@@ -400,7 +408,7 @@ bool SdHistoryStore::AppendDailyRollupBlock(uint32_t day_start_epoch_minute,
   if (sensor_count == 0 || sensor_count > 100) return false;
   if (sensor_node_ids == nullptr || sensor_rom64 == nullptr || daily_rollups == nullptr) return false;
 
-  const String daily_dir = base_dir_ + "/daily";
+  const String daily_dir = String(base_dir_) + "/daily";
   if (!EnsureDirExists_(daily_dir.c_str())) return false;
 
   const String path = MakeDailyFilePath_(day_start_epoch_minute);

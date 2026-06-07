@@ -202,7 +202,7 @@ SD writes must not run from LVGL event callbacks.
 
 SD file/block format must not depend on whether the hour was staged by RAM or FRAM.
 
-Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; finalized-hour tests should use fixed-size capture buffers rather than vector-backed full-record helpers.
+Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; finalized-hour tests should use fixed-size capture buffers rather than vector-backed full-record helpers. Finalized-hour SD path construction must not use Arduino `String`, `std::string`, `std::vector`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`calloc`/`realloc`, or `new`/`delete`; use custom bounded append helpers and caller-owned fixed `char` buffers.
 
 SD write endurance/commit rule: write the complete finalized-hour record once, flush/close it, then reopen/read back for verification with a fixed-size buffer. Do not interleave write/read verification chunks during the normal write path.
 
@@ -275,7 +275,8 @@ For SD writer/reader:
 - checks production finalized-hour writer/verifier paths for `std::vector<uint8_t>` full-record buffering,
 - verifies production SD finalization uses bounded buffers/chunks,
 - verifies no SD write/read interleaving during commit; read-back verification happens after full write and flush/close,
-- verifies Task 10F readers stream records and do not load whole files or full histories.
+- verifies Task 10F readers stream records and do not load whole files or full histories,
+- checks finalized-hour SD path construction for Arduino `String`, `std::string`, printf-family formatting, malloc/new, and hidden/dynamic path building.
 
 For aggregator:
 
@@ -524,7 +525,7 @@ Used context:
   - `history_aggregator.h/.cpp`.
 - PT100 issue #367 filed from this chat: `FramHourJournal undercounts required FRAM region by one header slot`.
 - Task 10C review finding that production finalized-hour write/read-back paths still use full-record `std::vector<uint8_t>` buffers.
-- Task 10C-R anchor update requiring bounded/heap-free production SD finalization and an allocation audit before runtime integration.
+- Task 10C-R/10C-C anchor updates requiring bounded/heap-free production SD finalization, fixed-buffer finalized-hour path construction, and an allocation audit before runtime integration.
 
 Unverified:
 
@@ -544,5 +545,6 @@ These constraints gate runtime SD finalization and chart integration:
 - SD finalized-hour production writes must write the complete record once, flush/close, then verify by read-back with a fixed-size buffer.
 - Verification must not be interleaved with the normal write path.
 - Vector-backed finalized-hour encoders/sinks must not remain in finalized-hour APIs, implementation, or tests; use streaming/fixed-size capture buffers instead.
+- Finalized-hour directory/file paths must be built with custom bounded append helpers and fixed caller-owned `char` buffers; no Arduino `String`, `std::string`, printf-family formatting, malloc/new, or hidden dynamic path construction.
 - Allocation audit must be completed before enabling runtime SD finalization from the aggregator path.
 - The allocation audit must include legacy `std::vector<SensorHistorySample>` history, chart/history copy paths, `SerialConsole` `String`/`std::vector` buffers, `SdHistoryStore` `String`/`File` and old direct-struct write paths, and production `std::vector`/`String`/`reserve()`/`resize()`/`malloc()`/`calloc()`/`realloc()`/`new` patterns in MeshTemps-GUINode application code.
