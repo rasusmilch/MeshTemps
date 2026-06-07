@@ -7,6 +7,8 @@
 #include <vector>
 #include <functional>
 
+#include "history_hour_stager.h"
+
 class SdHistoryStore {
  public:
   static constexpr uint16_t kVersion = 1;
@@ -19,6 +21,13 @@ class SdHistoryStore {
   };
 
   bool Begin(fs::FS& fs, const char* base_dir);
+
+  // Append one authoritative raw finalized-hour block exported from the
+  // backend-neutral current-hour stager. HistoryHourSnapshot is a logical
+  // in-memory shape; the SD record is explicitly serialized with its own
+  // magic/version/header CRC/payload CRC. Snapshot counters are diagnostics
+  // only and are not used as sample/payload counts.
+  bool AppendFinalizedHourSnapshot(const HistoryHourSnapshot& snapshot);
 
   bool AppendMinuteHourBlock(uint32_t hour_start_epoch_minute,
                              uint16_t sensor_count,
@@ -119,6 +128,7 @@ class SdHistoryStore {
   bool EnsureDirExists_(const char* path);
   String MakeMinuteFilePath_(uint32_t hour_start_epoch_minute) const;
   String MakeHourlyFilePath_(uint32_t hour_start_epoch_minute) const;
+  String MakeFinalizedHourFilePath_(uint32_t hour_start_epoch_minute) const;
 
   static bool WriteAll_(File& file, const void* data, size_t length);
   static uint32_t ComputeHeaderCrc32_(const void* header, size_t header_bytes);
@@ -128,6 +138,7 @@ class SdHistoryStore {
 
   String MakeDailyFilePath_(uint32_t day_start_epoch_minute) const;
   bool VerifyDailyRecord_(const String& path, uint32_t record_offset) const;
+  bool VerifyFinalizedHourRecord_(const String& path, uint32_t record_offset) const;
 
   fs::FS* fs_ = nullptr;
   String base_dir_;

@@ -1,5 +1,7 @@
 #include "sd_history_store.h"
 
+#include "sd_finalized_hour_block.h"
+
 #include <string.h>
 #include <time.h>
 
@@ -14,6 +16,33 @@ bool SdHistoryStore::Begin(fs::FS& fs, const char* base_dir) {
   if (!EnsureDirExists_((base_dir_ + "/daily").c_str())) return false;
 
   return true;
+}
+
+
+bool SdHistoryStore::AppendFinalizedHourSnapshot(
+    const HistoryHourSnapshot& snapshot) {
+  if (fs_ == nullptr) return false;
+
+  const String finalized_dir = base_dir_ + "/finalized";
+  if (!EnsureDirExists_(finalized_dir.c_str())) return false;
+
+  std::vector<uint8_t> record;
+  if (!EncodeSdFinalizedHourBlock(snapshot, &record)) return false;
+  if (record.empty()) return false;
+
+  const String path = MakeFinalizedHourFilePath_(snapshot.hour_start_epoch_minute);
+  File file = fs_->open(path.c_str(), FILE_APPEND);
+  if (!file) return false;
+
+  const uint32_t record_offset = static_cast<uint32_t>(file.position());
+  if (!WriteAll_(file, record.data(), record.size())) {
+    file.close();
+    return false;
+  }
+
+  file.flush();
+  file.close();
+  return VerifyFinalizedHourRecord_(path, record_offset);
 }
 
 bool SdHistoryStore::AppendMinuteHourBlock(
@@ -175,6 +204,18 @@ String SdHistoryStore::MakeHourlyFilePath_(uint32_t hour_start_epoch_minute) con
   return base_dir_ + "/hourly/" + String(month_buf) + ".bin";
 }
 
+String SdHistoryStore::MakeFinalizedHourFilePath_(
+    uint32_t hour_start_epoch_minute) const {
+  const time_t epoch_seconds = static_cast<time_t>(hour_start_epoch_minute) * 60;
+  struct tm tm_buf;
+  char date_buf[16];
+  if (localtime_r(&epoch_seconds, &tm_buf) == nullptr ||
+      strftime(date_buf, sizeof(date_buf), "%Y%m%d", &tm_buf) == 0) {
+    return base_dir_ + "/finalized/unknown.bin";
+  }
+  return base_dir_ + "/finalized/" + String(date_buf) + ".bin";
+}
+
 bool SdHistoryStore::WriteAll_(File& file, const void* data, size_t length) {
   const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
   size_t written_total = 0;
@@ -190,6 +231,37 @@ bool SdHistoryStore::WriteAll_(File& file, const void* data, size_t length) {
 uint32_t SdHistoryStore::ComputeHeaderCrc32_(const void* header, size_t header_bytes) {
   // Caller must have header_crc32 already set to 0.
   return Crc32(reinterpret_cast<const uint8_t*>(header), header_bytes);
+}
+
+
+bool SdHistoryStore::VerifyFinalizedHourRecord_(
+    const String& path, uint32_t record_offset) const {
+  File file = fs_->open(path.c_str(), FILE_READ);
+  if (!file) return false;
+  if (!file.seek(record_offset)) { file.close(); return false; }
+
+  uint8_t header_bytes[kSdFinalizedHourHeaderBytes];
+  if (file.read(header_bytes, sizeof(header_bytes)) != static_cast<int>(sizeof(header_bytes))) {
+    file.close();
+    return false;
+  }
+
+  SdFinalizedHourBlockHeader header;
+  if (!DecodeSdFinalizedHourBlockHeader(header_bytes, sizeof(header_bytes), &header)) {
+    file.close();
+    return false;
+  }
+
+  std::vector<uint8_t> record(header.record_bytes);
+  memcpy(record.data(), header_bytes, sizeof(header_bytes));
+  const uint32_t remaining = header.record_bytes - kSdFinalizedHourHeaderBytes;
+  if (file.read(record.data() + kSdFinalizedHourHeaderBytes, remaining) !=
+      static_cast<int>(remaining)) {
+    file.close();
+    return false;
+  }
+  file.close();
+  return VerifySdFinalizedHourBlock(record, nullptr);
 }
 
 bool SdHistoryStore::VerifyMinuteRecord_(const String& path, uint32_t record_offset) const {

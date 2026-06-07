@@ -146,6 +146,42 @@ void TestRecordSampleSingleSlotCounters() {
   assert(!snapshot.frames[10].IsPresent(0));
 }
 
+
+void TestInvalidIdentityDoesNotCreateSlot() {
+  RamHourStager stager;
+  assert(stager.ResetHour(kHour));
+
+  uint8_t slot = 0xFF;
+  assert(!stager.FindOrCreateSlot("28000000000000ZZ", 0x10000001U, 0, &slot));
+  assert(slot == 0xFF);
+  assert(!stager.RecordSample("280000000000001", 0x10000001U, 1, 22.0f, false));
+  assert(!stager.RecordMissing("280000000000001234", 0x10000001U, 2));
+
+  HistoryHourSnapshot snapshot;
+  assert(stager.ExportSnapshot(&snapshot));
+  assert(snapshot.active_slot_count == 0);
+  assert(snapshot.status.active_slot_count == 0);
+  assert(snapshot.status.invalid_argument_count == 3);
+}
+
+void TestRecordSampleCentiCSentinelIsInvalid() {
+  RamHourStager stager;
+  assert(stager.ResetHour(kHour));
+
+  assert(!stager.RecordSampleCentiC("2800000000000052", 0x10000001U, 11,
+                                    kHistoryInvalidTempCentiC, true));
+
+  HistoryHourSnapshot snapshot;
+  assert(stager.ExportSnapshot(&snapshot));
+  assert(snapshot.active_slot_count == 1);
+  assert(snapshot.slots[0].sample_count == 0);
+  assert(snapshot.slots[0].missing_or_invalid_count == 1);
+  assert(snapshot.status.invalid_temperature_count == 1);
+  assert(snapshot.status.missing_samples_recorded == 1);
+  assert(!snapshot.frames[11].IsPresent(0));
+  assert(!snapshot.frames[11].IsCorrected(0));
+}
+
 void TestSlotCap() {
   RamHourStager stager;
   assert(stager.ResetHour(kHour));
@@ -215,6 +251,8 @@ int main() {
   TestCorrectedBitmap();
   TestInvalidTemperature();
   TestRecordSampleSingleSlotCounters();
+  TestInvalidIdentityDoesNotCreateSlot();
+  TestRecordSampleCentiCSentinelIsInvalid();
   TestSlotCap();
   TestExportDeterministicAndNeutral();
   TestCentiConversion();

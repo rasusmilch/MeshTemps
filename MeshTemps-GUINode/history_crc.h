@@ -1,7 +1,6 @@
 #ifndef HISTORY_CRC_H_
 #define HISTORY_CRC_H_
 
-#include <Arduino.h>
 #include <stddef.h>
 #include <stdint.h>
 
