@@ -208,6 +208,8 @@ SD write endurance/commit rule: write the complete finalized-hour record once, f
 
 `HistoryHourSnapshot` is a logical export shape, not the SD binary ABI. A pure/testable codec is encouraged, but finalized-hour APIs and tests must not depend on a vector-backed full-record encode. Diagnostic counters are metadata only; presence bits are authoritative. Existing PT100-era `SdHistoryStore` methods are not authority for the new finalized-hour format.
 
+`HistoryHourSnapshot` is also a large logical export shape. Runtime finalization must not stack-allocate `HistoryHourSnapshot` in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. Task 10C-E1 must provide a source/view streaming writer before Task 10D runtime integration, and Task 10C-E2 must provide a fixed-size SD write coalescer before Task 10D runtime integration. Heap allocation, hidden statics, `malloc`/`new`, vector-backed ownership, or local stack snapshots are not acceptable substitutes for the source/view streaming path.
+
 ### Chart/query constraint
 
 Chart code must migrate away from full-history RAM copies.
