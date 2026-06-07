@@ -4,7 +4,7 @@ Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening  
 Anchor purpose: Keep future ChatGPT/Codex tasks sequenced, scoped, and aligned with current product intent.  
 Status: Roadmap anchor artifact; not yet committed to the repository.  
-Last updated: 2026-06-06
+Last updated: 2026-06-07
 
 ## 1. Current project/workstream objective
 
@@ -40,6 +40,8 @@ Current product decisions:
 - New sensors discovered mid-hour should be assigned a slot immediately and logged from that point forward.
 - DS18B20 ROM/physical address is the durable sensor identity.
 - Labels/ranks are UI metadata, not durable storage keys.
+- Production SD finalized-hour writer/verifier paths must be heap-free/bounded: no large dynamic allocations and no full-record heap buffers.
+- SD finalized-hour commit order is complete write, flush/close, then read-back verification with a fixed-size buffer; do not interleave write/read verification chunks during the write.
 
 ## 3. MVP / immediate tasks
 
@@ -117,10 +119,46 @@ Explicit exclusions:
 - No FRAM backend.
 - No frequent per-packet SD streaming.
 
+### Task 10C-A — Remove production dynamic allocation from finalized-hour SD writer
+
+Type: focused execute follow-up after Task 10C.
+PR: same draft PR branch as Tasks 10B/10C unless user says otherwise.
+Risk: high; checkpoint validation required.
+
+Scope:
+
+- Keep the finalized-hour file/block format from Task 10C.
+- Preserve the pure codec/host-test split.
+- Replace production `std::vector<uint8_t>` full-record buffering in `SdHistoryStore::AppendFinalizedHourSnapshot()`.
+- Replace production `std::vector<uint8_t> record(header.record_bytes)` full-record read-back in `VerifyFinalizedHourRecord_()`.
+- Write the complete finalized-hour record to SD first, flush/close, then perform a read-back verification pass.
+- Compute payload CRC without buffering the full record.
+- Write descriptor and frame bytes in bounded chunks.
+- Verify read-back with a fixed-size stack/static buffer, such as 256 or 512 bytes.
+- Allow vector-backed helpers only in tests or explicitly test-only wrappers.
+- Keep host tests for finalized-hour format and streaming writer behavior.
+
+Explicit exclusions:
+
+- No Task 10D runtime aggregator.
+- No chart migration.
+- No FRAM.
+- No SD reader/query service.
+- No retention/pruning.
+- No rollups/indexes.
+- No serial command changes unless required by compile.
+
+Acceptance/checkpoint:
+
+- Production finalized-hour writer/verifier has no full-record heap vector and no large dynamic allocation.
+- Full SD record is written and flushed/closed before read-back verification begins.
+- Header/payload CRCs are computed and verified with bounded buffers/chunks.
+- Tests distinguish vector-backed host codec helpers from production streaming/bounded writer behavior.
+
 ### Task 10D — Add history aggregator snapshot path
 
-Type: focused execute task after 10B and 10C are validated.  
-PR: should share the same draft PR branch as 10B/10C unless branch size becomes unmanageable.  
+Type: focused execute task after 10B, 10C, and 10C-A are validated.
+PR: should share the same draft PR branch as 10B/10C/10C-A unless branch size becomes unmanageable.
 Risk: high; checkpoint validation required.
 
 Scope:
@@ -132,6 +170,7 @@ Scope:
 - Log mid-hour new sensors immediately.
 - Do not hold mesh locks during storage I/O.
 - Do not write from LVGL event callbacks.
+- Treat SD finalization as a bounded batch operation that starts only after Task 10C-A checkpoint validation proves the writer/verifier avoids production full-record heap buffers.
 - Add serial diagnostics for current-hour status.
 - Keep old chart behavior unchanged unless required to compile.
 
@@ -171,7 +210,12 @@ Scope:
 
 - Read finalized-hour SD blocks.
 - Resolve sensor identity by ROM/slot descriptor.
-- Stream data for a requested time range without loading huge vectors.
+- Stream finalized-hour records and scan append files sequentially by record offset and `record_bytes`.
+- Do not load whole daily finalized files into RAM.
+- Do not load large record sets or full histories into heap vectors.
+- Validate each finalized-hour record by header and payload CRC before using its contents.
+- Use presence bitmaps as authoritative; do not treat diagnostic counters as authoritative sample counts.
+- Reduce/query requested ranges without full-history copies.
 - Provide bucket/reduction output for chart code.
 - Treat raw SD blocks as authoritative.
 - Optionally ignore/rebuild derived indexes.
@@ -344,11 +388,12 @@ Recommended sequence:
 10A read-only plan
   -> plan review
   -> 10B stager interface + RamHourStager
-  -> checkpoint validation
+  -> 10B checkpoint validation
   -> 10C SD finalized-hour writer
-  -> checkpoint validation
+  -> 10C-A remove production SD full-record heap buffering
+  -> 10C-A checkpoint validation
   -> 10D HistoryAggregator snapshot path
-  -> checkpoint validation
+  -> 10D checkpoint validation
   -> 10E legacy RAM-history safety/bypass
   -> integrated validation
   -> 10F SD history reader/query service
@@ -369,6 +414,7 @@ One draft PR branch should contain the first incomplete storage transition if th
 
 - 10B
 - 10C
+- 10C-A
 - 10D
 - possibly 10E
 
@@ -402,7 +448,8 @@ Can be focused execute tasks after 10A approval:
 
 - 10B stager interface + RamHourStager.
 - 10C SD finalized-hour writer.
-- 10D HistoryAggregator snapshot path.
+- 10C-A production SD writer/verifier allocation cleanup.
+- 10D HistoryAggregator snapshot path after 10C-A validation.
 - 10E legacy RAM-history safety/bypass.
 - 10F SD reader/query service.
 - 10G chart migration, after 10F.
@@ -416,6 +463,7 @@ Checkpoint validation required after:
 
 - 10B, because it defines the core storage model.
 - 10C, because it defines SD archive format and corruption behavior.
+- 10C-A, because it gates heap-free production SD finalization before runtime integration.
 - 10D, because it touches live mesh state and timing.
 - 10E, because it changes/isolates legacy history behavior.
 - 10F, because it reads durable history and may affect chart data correctness.
@@ -444,13 +492,13 @@ The PT100 issue #367 bug report was created separately and is not a MeshTemps co
 
 ## 15. Current next required action
 
-Generate the Codex read-only planning task:
+Generate the focused execute follow-up task:
 
 ```text
-Task 10A — Plan backend-agnostic current-hour staging and SD finalized-hour history architecture
+Task 10C-A — Remove production dynamic allocation from finalized-hour SD writer
 ```
 
-The task must require direct inspection of the latest MeshTemps snapshot and PT100_Mesh_Datalogger template, and must produce a staged plan before any implementation.
+Task 10C-A must run before Task 10D. It must remove full-record heap buffers from production finalized-hour write/read-back paths while preserving the Task 10C finalized-hour format and host-test codec coverage.
 
 ## 16. Last updated context
 
@@ -472,6 +520,8 @@ Used context:
   - `sd_history_store.h/.cpp`
   - `history_aggregator.h/.cpp`
 - PT100 issue #367 filed from this chat: `FramHourJournal undercounts required FRAM region by one header slot`.
+- Task 10C review finding that production finalized-hour write/read-back paths still use full-record `std::vector<uint8_t>` buffers.
+- Task 10C-R anchor update inserting Task 10C-A as a hard gate before Task 10D.
 
 Unverified:
 
@@ -480,3 +530,15 @@ Unverified:
 - Exact current PR number/branch for the next MeshTemps work was not confirmed.
 - SD card mount/write behavior on the target GUI node remains hardware-unverified.
 - FRAM hardware is now deferred and remains physically unverified.
+
+## 17. Allocation audit carry-forward
+
+Before runtime SD finalization is enabled, either as part of Task 10D/10E validation or a focused validation gate, audit production GUI-node allocation risks. The audit must separate MeshTemps application-code findings from vendor/demo library patterns and must inspect at least:
+
+- the legacy `std::vector<SensorHistorySample>` history path and resize/reserve behavior,
+- chart/history full-copy paths,
+- `SerialConsole` `String`/`std::vector` token or cache buffers,
+- `SdHistoryStore` Arduino `String`/`File` usage and old PT100-era direct struct writes,
+- any `std::vector`, `String`, `reserve()`, `resize()`, `malloc()`, `calloc()`, `realloc()`, or `new` patterns in MeshTemps-GUINode production code.
+
+Task receipts and validation reports must distinguish bounded, cold-path allocations from hot-path or storage-event allocations that can reintroduce ESP32 panic/freeze risk.

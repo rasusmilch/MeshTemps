@@ -4,7 +4,7 @@ Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening  
 Anchor purpose: Reusable requirements/constraints reference for future ChatGPT/Codex planning, execution, validation, and review tasks.  
 Status: Requirements anchor artifact; not yet committed to the repository.  
-Last updated: 2026-06-06
+Last updated: 2026-06-07
 
 ## 1. Product requirements
 
@@ -202,11 +202,19 @@ SD writes must not run from LVGL event callbacks.
 
 SD file/block format must not depend on whether the hour was staged by RAM or FRAM.
 
+Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; vector-backed sinks/helpers are allowed only for host tests or explicitly test-only wrappers.
+
+SD write endurance/commit rule: write the complete finalized-hour record once, flush/close it, then reopen/read back for verification with a fixed-size buffer. Do not interleave write/read verification chunks during the normal write path.
+
+`HistoryHourSnapshot` is a logical export shape, not the SD binary ABI. A pure/testable codec is encouraged, but production SD finalization must not depend on a vector-backed full-record encode. Diagnostic counters are metadata only; presence bits are authoritative. Existing PT100-era `SdHistoryStore` methods are not authority for the new finalized-hour format.
+
 ### Chart/query constraint
 
 Chart code must migrate away from full-history RAM copies.
 
 Chart range handling must use a storage-backed query/reduction path that streams or bounds memory use.
+
+Task 10F reader/query work must stream finalized-hour records, scan append files by record offset and `record_bytes`, validate header/payload CRCs, and reduce ranges without loading whole daily files, large record sets, or full histories into heap vectors.
 
 Range-button callbacks must remain responsive.
 
@@ -263,7 +271,11 @@ For SD writer/reader:
 - stores all 60 minute frames,
 - validates header/payload CRC/checksum,
 - detects partial/corrupt block,
-- decodes history without current live registry.
+- decodes history without current live registry,
+- checks production finalized-hour writer/verifier paths for `std::vector<uint8_t>` full-record buffering,
+- verifies production SD finalization uses bounded buffers/chunks,
+- verifies no SD write/read interleaving during commit; read-back verification happens after full write and flush/close,
+- verifies Task 10F readers stream records and do not load whole files or full histories.
 
 For aggregator:
 
@@ -280,18 +292,21 @@ For chart migration:
 - 1d/2d/5d/7d/30d views render without freeze,
 - missing samples do not appear as fabricated readings.
 
-For legacy RAM history isolation:
+For legacy RAM history isolation and allocation audit:
 
 - unsafe `std::vector<SensorHistorySample>::resize()` path is removed, capped, bypassed, or proven inactive for durable history,
-- misleading high-retention examples are removed or corrected.
+- misleading high-retention examples are removed or corrected,
+- production GUI-node hot paths are checked for `std::vector`, `String`, `reserve()`, `resize()`, `malloc()`, `calloc()`, `realloc()`, or `new` allocation risks, including old history vectors, chart copy paths, serial console buffers, and SD/history code.
 
 ### Command/build checks
 
 Codex tasks should run relevant compile/static checks available in the repo/environment.
 
+Task receipts must distinguish host-tested pure codec behavior from Arduino/SD wrapper behavior. Arduino/ESP32 compile and SD hardware behavior remain environment-limited unless they were actually run on the target/toolchain and reported with exact board/settings.
+
 If Arduino/ESP32 build cannot run in the environment, receipt must say so explicitly and identify what was checked instead.
 
-Host-side tests are preferred for pure binary format, CRC, slot catalog, SD block encoding/decoding, and stager behavior.
+Host-side tests are preferred for pure binary format, CRC, slot catalog, SD block encoding/decoding, and stager behavior. Host tests may use vector-backed sinks/helpers, but production firmware writer/verifier paths must use bounded streaming or fixed buffers.
 
 ### Hardware validation
 
@@ -508,6 +523,8 @@ Used context:
   - `sd_history_store.h/.cpp`,
   - `history_aggregator.h/.cpp`.
 - PT100 issue #367 filed from this chat: `FramHourJournal undercounts required FRAM region by one header slot`.
+- Task 10C review finding that production finalized-hour write/read-back paths still use full-record `std::vector<uint8_t>` buffers.
+- Task 10C-R anchor update requiring bounded/heap-free production SD finalization and an allocation audit before runtime integration.
 
 Unverified:
 
@@ -516,3 +533,16 @@ Unverified:
 - Exact current PR number/branch for the next MeshTemps work was not confirmed.
 - SD card mount/write behavior on target GUI node remains hardware-unverified.
 - FRAM hardware is deferred and remains physically unverified.
+
+## 16. Non-negotiable allocation/endurance constraints
+
+These constraints gate runtime SD finalization and chart integration:
+
+- No large dynamic allocations in production finalized-hour SD writer/verifier paths.
+- No full-record heap buffers in production SD finalization.
+- No unbounded allocations in storage, chart, or history event paths.
+- SD finalized-hour production writes must write the complete record once, flush/close, then verify by read-back with a fixed-size buffer.
+- Verification must not be interleaved with the normal write path.
+- Vector-backed finalized-hour encoders/sinks may remain in host tests or explicitly test-only utilities only.
+- Allocation audit must be completed before enabling runtime SD finalization from the aggregator path.
+- The allocation audit must include legacy `std::vector<SensorHistorySample>` history, chart/history copy paths, `SerialConsole` `String`/`std::vector` buffers, `SdHistoryStore` `String`/`File` and old direct-struct write paths, and production `std::vector`/`String`/`reserve()`/`resize()`/`malloc()`/`calloc()`/`realloc()`/`new` patterns in MeshTemps-GUINode application code.
