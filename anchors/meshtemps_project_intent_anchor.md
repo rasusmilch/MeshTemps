@@ -139,7 +139,7 @@ live/staged snapshot
   -> reopen/read-back verification with a fixed-size buffer
 ```
 
-Read-back verification must happen after the complete SD record has been written and flushed/closed. Do not interleave write/read/verify chunks during the normal write path. Vector-backed finalized-hour encoders or sinks are acceptable only for host tests or explicitly test-only utilities, not production firmware writer/verifier paths.
+Read-back verification must happen after the complete SD record has been written and flushed/closed. Do not interleave write/read/verify chunks during the normal write path. Finalized-hour encoders and tests should use streaming or fixed-size capture buffers; do not preserve vector-backed finalized-hour full-record helpers as an API or test pattern.
 
 Current-hour RAM/FRAM staging must stay bounded, and SD finalization must also stay bounded. Do not call SD finalization from LVGL callbacks. Do not hold mesh/history locks across SD I/O.
 
@@ -185,7 +185,7 @@ Do not mix sensor descriptor/catalog records into a wrapping sample ring.
 
 Do not write every mesh packet to SD. SD receives finalized batches from the current-hour stager.
 
-Do not implement production SD finalized-hour writing by building a complete `std::vector<uint8_t>` record before writing, or by reading a complete finalized-hour record into a heap vector for verification. That pattern is deprecated even if vector-backed helpers remain useful in host tests.
+Do not implement production SD finalized-hour writing by building a complete `std::vector<uint8_t>` record before writing, or by reading a complete finalized-hour record into a heap vector for verification. That pattern is deprecated; finalized-hour tests should use fixed-size capture buffers instead of vector-backed full-record helpers.
 
 Do not hold mesh/history locks during long storage I/O.
 

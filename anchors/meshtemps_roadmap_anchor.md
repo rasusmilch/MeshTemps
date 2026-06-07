@@ -135,7 +135,7 @@ Scope:
 - Compute payload CRC without buffering the full record.
 - Write descriptor and frame bytes in bounded chunks.
 - Verify read-back with a fixed-size stack/static buffer, such as 256 or 512 bytes.
-- Allow vector-backed helpers only in tests or explicitly test-only wrappers.
+- Remove vector-backed finalized-hour helpers from APIs, implementation, and tests; use fixed-size capture buffers for host tests.
 - Keep host tests for finalized-hour format and streaming writer behavior.
 
 Explicit exclusions:
@@ -153,7 +153,7 @@ Acceptance/checkpoint:
 - Production finalized-hour writer/verifier has no full-record heap vector and no large dynamic allocation.
 - Full SD record is written and flushed/closed before read-back verification begins.
 - Header/payload CRCs are computed and verified with bounded buffers/chunks.
-- Tests distinguish vector-backed host codec helpers from production streaming/bounded writer behavior.
+- Tests use fixed-size capture buffers and validate production streaming/bounded writer behavior.
 
 ### Task 10D — Add history aggregator snapshot path
 

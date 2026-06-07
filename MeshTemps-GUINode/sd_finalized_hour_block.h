@@ -3,7 +3,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <vector>
 
 #include "history_hour_stager.h"
 
@@ -22,6 +21,10 @@ constexpr uint16_t kSdFinalizedHourDescriptorBytes = 32;
 constexpr uint16_t kSdFinalizedHourFrameBytes =
     static_cast<uint16_t>((2U * kHistoryBitmapBytes) +
                           (kHistorySlotCapacity * sizeof(int16_t)));
+constexpr size_t kSdFinalizedHourMaxRecordBytes =
+    kSdFinalizedHourHeaderBytes +
+    (kHistorySlotCapacity * kSdFinalizedHourDescriptorBytes) +
+    (kHistoryMinutesPerHour * kSdFinalizedHourFrameBytes);
 
 struct SdFinalizedHourBlockHeader {
   uint32_t magic = 0;
@@ -59,12 +62,6 @@ bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
                                SdFinalizedHourBlockHeader* out_header = nullptr,
                                SdFinalizedHourWriteStatus* out_status = nullptr);
 
-// Test/convenience helper only. Production SD finalization must use
-// WriteSdFinalizedHourBlock() or another bounded sink, not this vector-backed
-// full-record encoder.
-bool EncodeSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
-                                std::vector<uint8_t>* out_record);
-
 bool DecodeSdFinalizedHourBlockHeader(const uint8_t* record,
                                       size_t record_length,
                                       SdFinalizedHourBlockHeader* out_header);
@@ -77,9 +74,6 @@ bool VerifySdFinalizedHourBlockHeaderCrc(const uint8_t* header_bytes,
 
 bool VerifySdFinalizedHourBlock(const uint8_t* record,
                                 size_t record_length,
-                                SdFinalizedHourBlockHeader* out_header = nullptr);
-
-bool VerifySdFinalizedHourBlock(const std::vector<uint8_t>& record,
                                 SdFinalizedHourBlockHeader* out_header = nullptr);
 
 #endif  // SD_FINALIZED_HOUR_BLOCK_H_

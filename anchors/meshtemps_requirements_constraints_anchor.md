@@ -202,11 +202,11 @@ SD writes must not run from LVGL event callbacks.
 
 SD file/block format must not depend on whether the hour was staged by RAM or FRAM.
 
-Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; vector-backed sinks/helpers are allowed only for host tests or explicitly test-only wrappers.
+Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; finalized-hour tests should use fixed-size capture buffers rather than vector-backed full-record helpers.
 
 SD write endurance/commit rule: write the complete finalized-hour record once, flush/close it, then reopen/read back for verification with a fixed-size buffer. Do not interleave write/read verification chunks during the normal write path.
 
-`HistoryHourSnapshot` is a logical export shape, not the SD binary ABI. A pure/testable codec is encouraged, but production SD finalization must not depend on a vector-backed full-record encode. Diagnostic counters are metadata only; presence bits are authoritative. Existing PT100-era `SdHistoryStore` methods are not authority for the new finalized-hour format.
+`HistoryHourSnapshot` is a logical export shape, not the SD binary ABI. A pure/testable codec is encouraged, but finalized-hour APIs and tests must not depend on a vector-backed full-record encode. Diagnostic counters are metadata only; presence bits are authoritative. Existing PT100-era `SdHistoryStore` methods are not authority for the new finalized-hour format.
 
 ### Chart/query constraint
 
@@ -306,7 +306,7 @@ Task receipts must distinguish host-tested pure codec behavior from Arduino/SD w
 
 If Arduino/ESP32 build cannot run in the environment, receipt must say so explicitly and identify what was checked instead.
 
-Host-side tests are preferred for pure binary format, CRC, slot catalog, SD block encoding/decoding, and stager behavior. Host tests may use vector-backed sinks/helpers, but production firmware writer/verifier paths must use bounded streaming or fixed buffers.
+Host-side tests are preferred for pure binary format, CRC, slot catalog, SD block encoding/decoding, and stager behavior. Finalized-hour host tests should use fixed-size capture buffers, and production firmware writer/verifier paths must use bounded streaming or fixed buffers.
 
 ### Hardware validation
 
@@ -543,6 +543,6 @@ These constraints gate runtime SD finalization and chart integration:
 - No unbounded allocations in storage, chart, or history event paths.
 - SD finalized-hour production writes must write the complete record once, flush/close, then verify by read-back with a fixed-size buffer.
 - Verification must not be interleaved with the normal write path.
-- Vector-backed finalized-hour encoders/sinks may remain in host tests or explicitly test-only utilities only.
+- Vector-backed finalized-hour encoders/sinks must not remain in finalized-hour APIs, implementation, or tests; use streaming/fixed-size capture buffers instead.
 - Allocation audit must be completed before enabling runtime SD finalization from the aggregator path.
 - The allocation audit must include legacy `std::vector<SensorHistorySample>` history, chart/history copy paths, `SerialConsole` `String`/`std::vector` buffers, `SdHistoryStore` `String`/`File` and old direct-struct write paths, and production `std::vector`/`String`/`reserve()`/`resize()`/`malloc()`/`calloc()`/`realloc()`/`new` patterns in MeshTemps-GUINode application code.

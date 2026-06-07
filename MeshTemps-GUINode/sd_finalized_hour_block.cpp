@@ -194,16 +194,6 @@ bool CrcSink(const uint8_t* data, size_t len, void* ctx) {
   return true;
 }
 
-struct VectorSinkContext {
-  std::vector<uint8_t>* out;
-};
-
-bool VectorSink(const uint8_t* data, size_t len, void* ctx) {
-  VectorSinkContext* vector_ctx = static_cast<VectorSinkContext*>(ctx);
-  vector_ctx->out->insert(vector_ctx->out->end(), data, data + len);
-  return true;
-}
-
 }  // namespace
 
 bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
@@ -242,21 +232,6 @@ bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
     out_status->payload_bytes = decoded_header.payload_bytes;
     out_status->payload_crc32 = decoded_header.payload_crc32;
     out_status->header_crc32 = decoded_header.header_crc32;
-  }
-  return true;
-}
-
-bool EncodeSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
-                                std::vector<uint8_t>* out_record) {
-  if (out_record == nullptr) {
-    return false;
-  }
-  out_record->clear();
-
-  VectorSinkContext ctx{out_record};
-  if (!WriteSdFinalizedHourBlock(snapshot, VectorSink, &ctx, nullptr, nullptr)) {
-    out_record->clear();
-    return false;
   }
   return true;
 }
@@ -338,9 +313,4 @@ bool VerifySdFinalizedHourBlock(const uint8_t* record,
     *out_header = header;
   }
   return true;
-}
-
-bool VerifySdFinalizedHourBlock(const std::vector<uint8_t>& record,
-                                SdFinalizedHourBlockHeader* out_header) {
-  return VerifySdFinalizedHourBlock(record.data(), record.size(), out_header);
 }
