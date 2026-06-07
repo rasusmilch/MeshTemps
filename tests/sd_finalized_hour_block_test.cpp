@@ -38,6 +38,33 @@ int16_t ReadI16(const std::vector<uint8_t>& bytes, size_t offset) {
   return static_cast<int16_t>(ReadU16(bytes, offset));
 }
 
+
+struct TestVectorSinkContext {
+  std::vector<uint8_t>* bytes = nullptr;
+};
+
+bool TestVectorSink(const uint8_t* data, size_t len, void* ctx) {
+  TestVectorSinkContext* sink = static_cast<TestVectorSinkContext*>(ctx);
+  if (sink == nullptr || sink->bytes == nullptr || data == nullptr) return false;
+  sink->bytes->insert(sink->bytes->end(), data, data + len);
+  return true;
+}
+
+struct FailingSinkContext {
+  size_t fail_after_bytes = 0;
+  size_t bytes_seen = 0;
+};
+
+bool FailingSink(const uint8_t*, size_t len, void* ctx) {
+  FailingSinkContext* sink = static_cast<FailingSinkContext*>(ctx);
+  if (sink == nullptr) return false;
+  if (sink->bytes_seen + len > sink->fail_after_bytes) {
+    return false;
+  }
+  sink->bytes_seen += len;
+  return true;
+}
+
 HistoryHourSnapshot BuildTwoSensorSnapshot() {
   RamHourStager stager;
   assert(stager.ResetHour(kHour));
@@ -157,6 +184,36 @@ void TestCorruptionDetection() {
   assert(!VerifySdFinalizedHourBlock(truncated));
 }
 
+
+void TestStreamingWriterMatchesVectorEncode() {
+  const HistoryHourSnapshot snapshot = BuildTwoSensorSnapshot();
+
+  std::vector<uint8_t> vector_encoded;
+  assert(EncodeSdFinalizedHourBlock(snapshot, &vector_encoded));
+
+  std::vector<uint8_t> streamed;
+  TestVectorSinkContext sink{&streamed};
+  SdFinalizedHourBlockHeader header;
+  SdFinalizedHourWriteStatus status;
+  assert(WriteSdFinalizedHourBlock(snapshot, TestVectorSink, &sink, &header, &status));
+
+  assert(streamed == vector_encoded);
+  assert(status.bytes_written == vector_encoded.size());
+  assert(status.payload_bytes == header.payload_bytes);
+  assert(status.payload_crc32 == header.payload_crc32);
+  assert(status.header_crc32 == header.header_crc32);
+  assert(VerifySdFinalizedHourBlockHeaderCrc(streamed.data(),
+                                            kSdFinalizedHourHeaderBytes));
+}
+
+void TestStreamingWriterPropagatesWriteFailure() {
+  const HistoryHourSnapshot snapshot = BuildTwoSensorSnapshot();
+  FailingSinkContext sink;
+  sink.fail_after_bytes = kSdFinalizedHourHeaderBytes - 1U;
+
+  assert(!WriteSdFinalizedHourBlock(snapshot, FailingSink, &sink, nullptr, nullptr));
+}
+
 void TestInvalidSnapshotsRejected() {
   std::vector<uint8_t> record;
   HistoryHourSnapshot snapshot = BuildTwoSensorSnapshot();
@@ -183,6 +240,8 @@ int main() {
   TestEncodeValidSnapshot();
   TestDescriptorAndFramePayload();
   TestCountersAreDiagnosticOnly();
+  TestStreamingWriterMatchesVectorEncode();
+  TestStreamingWriterPropagatesWriteFailure();
   TestCorruptionDetection();
   TestInvalidSnapshotsRejected();
   std::cout << "sd_finalized_hour_block_test: PASS" << std::endl;

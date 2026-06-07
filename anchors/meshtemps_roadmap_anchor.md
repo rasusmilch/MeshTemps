@@ -110,7 +110,7 @@ Scope:
 - Include header/payload validation/checksums.
 - Use append-only or otherwise corruption-tolerant write pattern.
 - Add tests for encoding/decoding, CRC failure, partial write detection where feasible.
-- Add serial diagnostics for SD archive status.
+- Add writer status/status return values or internal diagnostics as useful; defer operator-visible serial diagnostics to runtime integration or a later diagnostics/status task.
 
 Explicit exclusions:
 

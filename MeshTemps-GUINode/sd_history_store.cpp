@@ -7,6 +7,33 @@
 
 #include "history_crc.h"
 
+namespace {
+
+constexpr size_t kFinalizedVerifyBufferBytes = 256U;
+
+struct FinalizedHourFileWriteContext {
+  File* file = nullptr;
+  uint32_t bytes_written = 0;
+};
+
+bool WriteFinalizedHourFileChunk(const uint8_t* data, size_t len, void* ctx) {
+  FinalizedHourFileWriteContext* write_ctx =
+      static_cast<FinalizedHourFileWriteContext*>(ctx);
+  if (write_ctx == nullptr || write_ctx->file == nullptr || data == nullptr) {
+    return false;
+  }
+  if (len == 0U) return true;
+
+  const size_t written = write_ctx->file->write(data, len);
+  if (written != len) {
+    return false;
+  }
+  write_ctx->bytes_written += static_cast<uint32_t>(written);
+  return true;
+}
+
+}  // namespace
+
 bool SdHistoryStore::Begin(fs::FS& fs, const char* base_dir) {
   fs_ = &fs;
   base_dir_ = base_dir;
@@ -26,16 +53,27 @@ bool SdHistoryStore::AppendFinalizedHourSnapshot(
   const String finalized_dir = base_dir_ + "/finalized";
   if (!EnsureDirExists_(finalized_dir.c_str())) return false;
 
-  std::vector<uint8_t> record;
-  if (!EncodeSdFinalizedHourBlock(snapshot, &record)) return false;
-  if (record.empty()) return false;
-
   const String path = MakeFinalizedHourFilePath_(snapshot.hour_start_epoch_minute);
   File file = fs_->open(path.c_str(), FILE_APPEND);
   if (!file) return false;
 
   const uint32_t record_offset = static_cast<uint32_t>(file.position());
-  if (!WriteAll_(file, record.data(), record.size())) {
+  FinalizedHourFileWriteContext write_ctx;
+  write_ctx.file = &file;
+
+  SdFinalizedHourBlockHeader header;
+  SdFinalizedHourWriteStatus status;
+  // Production finalized-hour writes are bounded: the codec streams header,
+  // descriptors, and frames directly to File.write() and never builds a
+  // full-record heap buffer. Read-back verification starts only after the
+  // complete record has been flushed and closed.
+  if (!WriteSdFinalizedHourBlock(snapshot, WriteFinalizedHourFileChunk,
+                                 &write_ctx, &header, &status)) {
+    file.close();
+    return false;
+  }
+  if (write_ctx.bytes_written != header.record_bytes ||
+      status.bytes_written != header.record_bytes) {
     file.close();
     return false;
   }
@@ -241,27 +279,36 @@ bool SdHistoryStore::VerifyFinalizedHourRecord_(
   if (!file.seek(record_offset)) { file.close(); return false; }
 
   uint8_t header_bytes[kSdFinalizedHourHeaderBytes];
-  if (file.read(header_bytes, sizeof(header_bytes)) != static_cast<int>(sizeof(header_bytes))) {
+  if (file.read(header_bytes, sizeof(header_bytes)) !=
+      static_cast<int>(sizeof(header_bytes))) {
     file.close();
     return false;
   }
 
   SdFinalizedHourBlockHeader header;
-  if (!DecodeSdFinalizedHourBlockHeader(header_bytes, sizeof(header_bytes), &header)) {
+  if (!DecodeSdFinalizedHourBlockHeader(header_bytes, sizeof(header_bytes), &header) ||
+      !VerifySdFinalizedHourBlockHeaderCrc(header_bytes, sizeof(header_bytes))) {
     file.close();
     return false;
   }
 
-  std::vector<uint8_t> record(header.record_bytes);
-  memcpy(record.data(), header_bytes, sizeof(header_bytes));
-  const uint32_t remaining = header.record_bytes - kSdFinalizedHourHeaderBytes;
-  if (file.read(record.data() + kSdFinalizedHourHeaderBytes, remaining) !=
-      static_cast<int>(remaining)) {
-    file.close();
-    return false;
+  uint8_t buffer[kFinalizedVerifyBufferBytes];
+  uint32_t payload_crc = 0xFFFFFFFFu;
+  uint32_t remaining = header.payload_bytes;
+  while (remaining > 0U) {
+    const size_t chunk =
+        (remaining < sizeof(buffer)) ? static_cast<size_t>(remaining) : sizeof(buffer);
+    const int bytes_read = file.read(buffer, chunk);
+    if (bytes_read != static_cast<int>(chunk)) {
+      file.close();
+      return false;
+    }
+    payload_crc = Crc32Update(payload_crc, buffer, chunk);
+    remaining -= static_cast<uint32_t>(chunk);
   }
+
   file.close();
-  return VerifySdFinalizedHourBlock(record, nullptr);
+  return payload_crc == header.payload_crc32;
 }
 
 bool SdHistoryStore::VerifyMinuteRecord_(const String& path, uint32_t record_offset) const {

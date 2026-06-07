@@ -9,29 +9,29 @@ namespace {
 constexpr uint32_t kHeaderCrcOffset = 36U;
 constexpr uint32_t kPayloadOffset = kSdFinalizedHourHeaderBytes;
 
-void AppendU8(std::vector<uint8_t>* out, uint8_t value) {
-  out->push_back(value);
+void PutU8(uint8_t* out, size_t* offset, uint8_t value) {
+  out[(*offset)++] = value;
 }
 
-void AppendU16(std::vector<uint8_t>* out, uint16_t value) {
-  out->push_back(static_cast<uint8_t>(value & 0xFFU));
-  out->push_back(static_cast<uint8_t>((value >> 8U) & 0xFFU));
+void PutU16(uint8_t* out, size_t* offset, uint16_t value) {
+  out[(*offset)++] = static_cast<uint8_t>(value & 0xFFU);
+  out[(*offset)++] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
 }
 
-void AppendU32(std::vector<uint8_t>* out, uint32_t value) {
+void PutU32(uint8_t* out, size_t* offset, uint32_t value) {
   for (uint8_t i = 0; i < 4U; ++i) {
-    out->push_back(static_cast<uint8_t>((value >> (8U * i)) & 0xFFU));
+    out[(*offset)++] = static_cast<uint8_t>((value >> (8U * i)) & 0xFFU);
   }
 }
 
-void AppendU64(std::vector<uint8_t>* out, uint64_t value) {
+void PutU64(uint8_t* out, size_t* offset, uint64_t value) {
   for (uint8_t i = 0; i < 8U; ++i) {
-    out->push_back(static_cast<uint8_t>((value >> (8U * i)) & 0xFFU));
+    out[(*offset)++] = static_cast<uint8_t>((value >> (8U * i)) & 0xFFU);
   }
 }
 
-void AppendI16(std::vector<uint8_t>* out, int16_t value) {
-  AppendU16(out, static_cast<uint16_t>(value));
+void PutI16(uint8_t* out, size_t* offset, int16_t value) {
+  PutU16(out, offset, static_cast<uint16_t>(value));
 }
 
 uint16_t ReadU16(const uint8_t* data) {
@@ -47,9 +47,9 @@ uint32_t ReadU32(const uint8_t* data) {
   return value;
 }
 
-void WriteU32(std::vector<uint8_t>* record, size_t offset, uint32_t value) {
+void WriteU32(uint8_t* record, size_t offset, uint32_t value) {
   for (uint8_t i = 0; i < 4U; ++i) {
-    (*record)[offset + i] = static_cast<uint8_t>((value >> (8U * i)) & 0xFFU);
+    record[offset + i] = static_cast<uint8_t>((value >> (8U * i)) & 0xFFU);
   }
 }
 
@@ -86,58 +86,83 @@ bool SnapshotIsValid(const HistoryHourSnapshot& snapshot) {
   return true;
 }
 
-void AppendHeaderPlaceholder(const HistoryHourSnapshot& snapshot,
-                             uint32_t record_bytes,
-                             uint32_t descriptor_bytes,
-                             uint32_t payload_bytes,
-                             uint32_t payload_crc32,
-                             std::vector<uint8_t>* out) {
-  AppendU32(out, kSdFinalizedHourMagic);
-  AppendU16(out, kSdFinalizedHourVersion);
-  AppendU16(out, kSdFinalizedHourHeaderBytes);
-  AppendU32(out, record_bytes);
-  AppendU32(out, snapshot.hour_start_epoch_minute);
-  AppendU16(out, snapshot.active_slot_count);
-  AppendU16(out, kSdFinalizedHourDescriptorBytes);
-  AppendU16(out, kHistoryMinutesPerHour);
-  AppendU16(out, kSdFinalizedHourFrameBytes);
-  AppendU32(out, descriptor_bytes);
-  AppendU32(out, payload_bytes);
-  AppendU32(out, payload_crc32);
-  AppendU32(out, 0U);  // header_crc32 patched after header is complete.
-  AppendU16(out, snapshot.format_version);
-  AppendU16(out, 0U);  // reserved0
-  AppendU32(out, 0U);  // flags
+uint32_t DescriptorBytesFor(const HistoryHourSnapshot& snapshot) {
+  return static_cast<uint32_t>(snapshot.active_slot_count) *
+         kSdFinalizedHourDescriptorBytes;
 }
 
-void AppendDescriptors(const HistoryHourSnapshot& snapshot,
-                       std::vector<uint8_t>* out) {
+uint32_t FramePayloadBytes() {
+  return static_cast<uint32_t>(kHistoryMinutesPerHour) *
+         kSdFinalizedHourFrameBytes;
+}
+
+void FillHeader(const HistoryHourSnapshot& snapshot,
+                uint32_t payload_crc32,
+                uint8_t* out) {
+  const uint32_t descriptor_bytes = DescriptorBytesFor(snapshot);
+  const uint32_t payload_bytes = descriptor_bytes + FramePayloadBytes();
+  const uint32_t record_bytes = kSdFinalizedHourHeaderBytes + payload_bytes;
+
+  size_t offset = 0;
+  PutU32(out, &offset, kSdFinalizedHourMagic);
+  PutU16(out, &offset, kSdFinalizedHourVersion);
+  PutU16(out, &offset, kSdFinalizedHourHeaderBytes);
+  PutU32(out, &offset, record_bytes);
+  PutU32(out, &offset, snapshot.hour_start_epoch_minute);
+  PutU16(out, &offset, snapshot.active_slot_count);
+  PutU16(out, &offset, kSdFinalizedHourDescriptorBytes);
+  PutU16(out, &offset, kHistoryMinutesPerHour);
+  PutU16(out, &offset, kSdFinalizedHourFrameBytes);
+  PutU32(out, &offset, descriptor_bytes);
+  PutU32(out, &offset, payload_bytes);
+  PutU32(out, &offset, payload_crc32);
+  PutU32(out, &offset, 0U);  // header_crc32 patched after header is complete.
+  PutU16(out, &offset, snapshot.format_version);
+  PutU16(out, &offset, 0U);  // reserved0
+  PutU32(out, &offset, 0U);  // flags
+}
+
+void FillDescriptor(const HistorySlotDescriptor& slot, uint8_t* out) {
+  size_t offset = 0;
+  PutU8(out, &offset, slot.slot_id);
+  PutU8(out, &offset, slot.first_seen_minute);
+  PutU8(out, &offset, slot.last_seen_minute);
+  PutU8(out, &offset, slot.active ? 1U : 0U);
+  PutU32(out, &offset, slot.last_known_node_id);
+  PutU64(out, &offset, slot.rom64);
+  for (uint8_t i = 0; i < 16U; ++i) {
+    PutU8(out, &offset, static_cast<uint8_t>(slot.addr16[i]));
+  }
+}
+
+void FillFrame(const HistoryMinuteFrame& frame, uint8_t* out) {
+  size_t offset = 0;
+  for (uint8_t value : frame.presence) {
+    PutU8(out, &offset, value);
+  }
+  for (uint8_t value : frame.corrected) {
+    PutU8(out, &offset, value);
+  }
+  for (int16_t value : frame.temp_c_x100) {
+    PutI16(out, &offset, value);
+  }
+}
+
+bool EmitPayload(const HistoryHourSnapshot& snapshot,
+                 SdFinalizedHourWriteFn write_fn,
+                 void* ctx) {
+  uint8_t descriptor[kSdFinalizedHourDescriptorBytes];
   for (uint8_t slot_id = 0; slot_id < snapshot.active_slot_count; ++slot_id) {
-    const HistorySlotDescriptor& slot = snapshot.slots[slot_id];
-    AppendU8(out, slot.slot_id);
-    AppendU8(out, slot.first_seen_minute);
-    AppendU8(out, slot.last_seen_minute);
-    AppendU8(out, slot.active ? 1U : 0U);
-    AppendU32(out, slot.last_known_node_id);
-    AppendU64(out, slot.rom64);
-    for (uint8_t i = 0; i < 16U; ++i) {
-      AppendU8(out, static_cast<uint8_t>(slot.addr16[i]));
-    }
+    FillDescriptor(snapshot.slots[slot_id], descriptor);
+    if (!write_fn(descriptor, sizeof(descriptor), ctx)) return false;
   }
-}
 
-void AppendFrames(const HistoryHourSnapshot& snapshot, std::vector<uint8_t>* out) {
-  for (const HistoryMinuteFrame& frame : snapshot.frames) {
-    for (uint8_t value : frame.presence) {
-      AppendU8(out, value);
-    }
-    for (uint8_t value : frame.corrected) {
-      AppendU8(out, value);
-    }
-    for (int16_t value : frame.temp_c_x100) {
-      AppendI16(out, value);
-    }
+  uint8_t frame[kSdFinalizedHourFrameBytes];
+  for (const HistoryMinuteFrame& minute_frame : snapshot.frames) {
+    FillFrame(minute_frame, frame);
+    if (!write_fn(frame, sizeof(frame), ctx)) return false;
   }
+  return true;
 }
 
 bool HeaderFieldsAreSane(const SdFinalizedHourBlockHeader& header) {
@@ -163,16 +188,63 @@ bool HeaderFieldsAreSane(const SdFinalizedHourBlockHeader& header) {
   return true;
 }
 
-uint32_t ComputeHeaderCrc(const uint8_t* record) {
-  uint8_t header[kSdFinalizedHourHeaderBytes];
-  std::memcpy(header, record, sizeof(header));
-  for (uint8_t i = 0; i < sizeof(uint32_t); ++i) {
-    header[kHeaderCrcOffset + i] = 0U;
-  }
-  return Crc32(header, sizeof(header));
+bool CrcSink(const uint8_t* data, size_t len, void* ctx) {
+  uint32_t* crc = static_cast<uint32_t*>(ctx);
+  *crc = Crc32Update(*crc, data, len);
+  return true;
+}
+
+struct VectorSinkContext {
+  std::vector<uint8_t>* out;
+};
+
+bool VectorSink(const uint8_t* data, size_t len, void* ctx) {
+  VectorSinkContext* vector_ctx = static_cast<VectorSinkContext*>(ctx);
+  vector_ctx->out->insert(vector_ctx->out->end(), data, data + len);
+  return true;
 }
 
 }  // namespace
+
+bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
+                               SdFinalizedHourWriteFn write_fn,
+                               void* ctx,
+                               SdFinalizedHourBlockHeader* out_header,
+                               SdFinalizedHourWriteStatus* out_status) {
+  if (write_fn == nullptr) return false;
+  if (!SnapshotIsValid(snapshot)) return false;
+
+  uint32_t payload_crc32 = 0xFFFFFFFFu;
+  if (!EmitPayload(snapshot, CrcSink, &payload_crc32)) return false;
+
+  uint8_t header[kSdFinalizedHourHeaderBytes];
+  FillHeader(snapshot, payload_crc32, header);
+  const uint32_t header_crc32 = ComputeSdFinalizedHourHeaderCrc32(
+      header, sizeof(header));
+  WriteU32(header, kHeaderCrcOffset, header_crc32);
+
+  SdFinalizedHourBlockHeader decoded_header;
+  if (!DecodeSdFinalizedHourBlockHeader(header, sizeof(header), &decoded_header)) {
+    return false;
+  }
+  if (!VerifySdFinalizedHourBlockHeaderCrc(header, sizeof(header))) {
+    return false;
+  }
+
+  if (!write_fn(header, sizeof(header), ctx)) return false;
+  if (!EmitPayload(snapshot, write_fn, ctx)) return false;
+
+  if (out_header != nullptr) {
+    *out_header = decoded_header;
+  }
+  if (out_status != nullptr) {
+    out_status->bytes_written = decoded_header.record_bytes;
+    out_status->payload_bytes = decoded_header.payload_bytes;
+    out_status->payload_crc32 = decoded_header.payload_crc32;
+    out_status->header_crc32 = decoded_header.header_crc32;
+  }
+  return true;
+}
 
 bool EncodeSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
                                 std::vector<uint8_t>* out_record) {
@@ -180,33 +252,12 @@ bool EncodeSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
     return false;
   }
   out_record->clear();
-  if (!SnapshotIsValid(snapshot)) {
-    return false;
-  }
 
-  const uint32_t descriptor_bytes =
-      static_cast<uint32_t>(snapshot.active_slot_count) * kSdFinalizedHourDescriptorBytes;
-  const uint32_t frame_payload_bytes =
-      static_cast<uint32_t>(kHistoryMinutesPerHour) * kSdFinalizedHourFrameBytes;
-  const uint32_t payload_bytes = descriptor_bytes + frame_payload_bytes;
-  const uint32_t record_bytes = kSdFinalizedHourHeaderBytes + payload_bytes;
-
-  out_record->reserve(record_bytes);
-  AppendHeaderPlaceholder(snapshot, record_bytes, descriptor_bytes, payload_bytes,
-                          0U, out_record);
-  AppendDescriptors(snapshot, out_record);
-  AppendFrames(snapshot, out_record);
-
-  if (out_record->size() != record_bytes) {
+  VectorSinkContext ctx{out_record};
+  if (!WriteSdFinalizedHourBlock(snapshot, VectorSink, &ctx, nullptr, nullptr)) {
     out_record->clear();
     return false;
   }
-
-  const uint32_t payload_crc32 = Crc32(out_record->data() + kPayloadOffset,
-                                      out_record->size() - kPayloadOffset);
-  WriteU32(out_record, 32U, payload_crc32);
-  const uint32_t header_crc32 = ComputeHeaderCrc(out_record->data());
-  WriteU32(out_record, kHeaderCrcOffset, header_crc32);
   return true;
 }
 
@@ -243,6 +294,29 @@ bool DecodeSdFinalizedHourBlockHeader(const uint8_t* record,
   return true;
 }
 
+uint32_t ComputeSdFinalizedHourHeaderCrc32(const uint8_t* header_bytes,
+                                           size_t header_length) {
+  if (header_bytes == nullptr || header_length < kSdFinalizedHourHeaderBytes) {
+    return 0U;
+  }
+  uint8_t header[kSdFinalizedHourHeaderBytes];
+  std::memcpy(header, header_bytes, sizeof(header));
+  for (uint8_t i = 0; i < sizeof(uint32_t); ++i) {
+    header[kHeaderCrcOffset + i] = 0U;
+  }
+  return Crc32(header, sizeof(header));
+}
+
+bool VerifySdFinalizedHourBlockHeaderCrc(const uint8_t* header_bytes,
+                                         size_t header_length) {
+  SdFinalizedHourBlockHeader header;
+  if (!DecodeSdFinalizedHourBlockHeader(header_bytes, header_length, &header)) {
+    return false;
+  }
+  return ComputeSdFinalizedHourHeaderCrc32(header_bytes, header_length) ==
+         header.header_crc32;
+}
+
 bool VerifySdFinalizedHourBlock(const uint8_t* record,
                                 size_t record_length,
                                 SdFinalizedHourBlockHeader* out_header) {
@@ -253,7 +327,7 @@ bool VerifySdFinalizedHourBlock(const uint8_t* record,
   if (record_length < header.record_bytes) {
     return false;
   }
-  if (ComputeHeaderCrc(record) != header.header_crc32) {
+  if (!VerifySdFinalizedHourBlockHeaderCrc(record, kSdFinalizedHourHeaderBytes)) {
     return false;
   }
   const uint32_t payload_crc = Crc32(record + kPayloadOffset, header.payload_bytes);

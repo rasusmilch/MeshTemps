@@ -42,12 +42,38 @@ struct SdFinalizedHourBlockHeader {
   uint32_t flags = 0;
 };
 
+typedef bool (*SdFinalizedHourWriteFn)(const uint8_t* data, size_t len, void* ctx);
+
+struct SdFinalizedHourWriteStatus {
+  uint32_t bytes_written = 0;
+  uint32_t payload_bytes = 0;
+  uint32_t payload_crc32 = 0;
+  uint32_t header_crc32 = 0;
+};
+
+// Production writer path: streams the finalized-hour record to write_fn in
+// bounded header/descriptor/frame chunks and never builds a full-record buffer.
+bool WriteSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
+                               SdFinalizedHourWriteFn write_fn,
+                               void* ctx,
+                               SdFinalizedHourBlockHeader* out_header = nullptr,
+                               SdFinalizedHourWriteStatus* out_status = nullptr);
+
+// Test/convenience helper only. Production SD finalization must use
+// WriteSdFinalizedHourBlock() or another bounded sink, not this vector-backed
+// full-record encoder.
 bool EncodeSdFinalizedHourBlock(const HistoryHourSnapshot& snapshot,
                                 std::vector<uint8_t>* out_record);
 
 bool DecodeSdFinalizedHourBlockHeader(const uint8_t* record,
                                       size_t record_length,
                                       SdFinalizedHourBlockHeader* out_header);
+
+uint32_t ComputeSdFinalizedHourHeaderCrc32(const uint8_t* header_bytes,
+                                           size_t header_length);
+
+bool VerifySdFinalizedHourBlockHeaderCrc(const uint8_t* header_bytes,
+                                         size_t header_length);
 
 bool VerifySdFinalizedHourBlock(const uint8_t* record,
                                 size_t record_length,
