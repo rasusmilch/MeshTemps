@@ -139,9 +139,11 @@ live/staged snapshot
   -> reopen/read-back verification with a fixed-size buffer
 ```
 
-Read-back verification must happen after the complete SD record has been written and flushed/closed. Do not interleave write/read/verify chunks during the normal write path. Finalized-hour encoders and tests should use streaming or fixed-size capture buffers; do not preserve vector-backed finalized-hour full-record helpers as an API or test pattern. Finalized-hour SD path construction must also use custom bounded append helpers with caller-owned fixed `char` buffers: no Arduino `String`, `std::string`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`new`, or hidden/dynamic path building.
+Read-back verification must happen after the complete SD record has been written and flushed/closed. Do not interleave write/read/verify chunks during the normal write path. Finalized-hour encoders and tests should use streaming or fixed-size capture buffers; do not preserve vector-backed finalized-hour full-record helpers as an API or test pattern. Finalized-hour SD path construction must also use custom bounded append helpers with caller-owned fixed `char` buffers: no Arduino `String`, `std::string`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`new`, libc calendar/timezone conversion, or hidden/dynamic path building. Finalized-hour archive files use deterministic epoch-day buckets: `epoch_day = hour_start_epoch_minute / 1440`, with filename format `<base>/finalized/d<epoch_day>.bin`; display/local date conversion belongs to future UI/query code.
 
 Current-hour RAM/FRAM staging must stay bounded, and SD finalization must also stay bounded. Do not call SD finalization from LVGL callbacks. Do not hold mesh/history locks across SD I/O.
+
+Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. Before Task 10D runtime integration, add a source/view streaming writer so finalized-hour records can be produced from bounded source views, then add a fixed-size SD write coalescer for efficient bounded writes.
 
 Mesh churn is expected:
 
@@ -185,7 +187,7 @@ Do not mix sensor descriptor/catalog records into a wrapping sample ring.
 
 Do not write every mesh packet to SD. SD receives finalized batches from the current-hour stager.
 
-Do not implement production SD finalized-hour writing by building a complete `std::vector<uint8_t>` record before writing, or by reading a complete finalized-hour record into a heap vector for verification. That pattern is deprecated; finalized-hour tests should use fixed-size capture buffers instead of vector-backed full-record helpers. Do not use Arduino `String` concatenation or printf-family formatting for finalized-hour directory/file path construction.
+Do not implement production SD finalized-hour writing by building a complete `std::vector<uint8_t>` record before writing, or by reading a complete finalized-hour record into a heap vector for verification. That pattern is deprecated; finalized-hour tests should use fixed-size capture buffers instead of vector-backed full-record helpers. Do not use Arduino `String` concatenation, printf-family formatting, or libc calendar/timezone conversion for finalized-hour directory/file path construction.
 
 Do not hold mesh/history locks during long storage I/O.
 

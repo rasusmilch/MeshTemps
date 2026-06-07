@@ -1,7 +1,5 @@
 #include "sd_history_path_builder.h"
 
-#include <ctime>
-
 namespace {
 
 bool Init(char* out, size_t out_size, size_t* len) {
@@ -69,22 +67,13 @@ bool AppendFinalizedPrefix(const char* base_dir,
   return AppendLiteral(out, out_size, len, "/finalized");
 }
 
-bool AppendYyyyMmDd(uint32_t hour_start_epoch_minute,
-                    char* out,
-                    size_t out_size,
-                    size_t* len) {
-  const time_t epoch_seconds = static_cast<time_t>(hour_start_epoch_minute) * 60;
-  struct tm tm_buf;
-  if (localtime_r(&epoch_seconds, &tm_buf) == nullptr) {
-    return AppendLiteral(out, out_size, len, "unknown");
-  }
-
-  const uint32_t year = static_cast<uint32_t>(tm_buf.tm_year + 1900);
-  const uint32_t month = static_cast<uint32_t>(tm_buf.tm_mon + 1);
-  const uint32_t day = static_cast<uint32_t>(tm_buf.tm_mday);
-  return AppendUnsignedDecimal(out, out_size, len, year, 4) &&
-         AppendUnsignedDecimal(out, out_size, len, month, 2) &&
-         AppendUnsignedDecimal(out, out_size, len, day, 2);
+bool AppendEpochDayBucket(uint32_t hour_start_epoch_minute,
+                          char* out,
+                          size_t out_size,
+                          size_t* len) {
+  const uint32_t epoch_day = hour_start_epoch_minute / 1440U;
+  return AppendChar(out, out_size, len, 'd') &&
+         AppendUnsignedDecimal(out, out_size, len, epoch_day, 1);
 }
 
 }  // namespace
@@ -109,6 +98,6 @@ bool SdHistoryBuildFinalizedHourFilePath(uint32_t hour_start_epoch_minute,
   size_t len = 0U;
   if (!AppendFinalizedPrefix(base_dir, out, out_size, &len)) return false;
   if (!AppendChar(out, out_size, &len, '/')) return false;
-  if (!AppendYyyyMmDd(hour_start_epoch_minute, out, out_size, &len)) return false;
+  if (!AppendEpochDayBucket(hour_start_epoch_minute, out, out_size, &len)) return false;
   return AppendLiteral(out, out_size, &len, ".bin");
 }

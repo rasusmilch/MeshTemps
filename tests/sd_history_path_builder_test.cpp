@@ -16,10 +16,8 @@ void TestValidFinalizedPaths() {
   assert(std::strcmp(dir, "/history/finalized") == 0);
 
   char path[kSdHistoryPathMax];
-  // 2025-01-01 00:00 UTC is epoch minute 28928160. The builder uses localtime_r;
-  // the test environment is UTC, matching the task runner configuration.
   assert(SdHistoryBuildFinalizedHourFilePath(28928160U, base, path, sizeof(path)));
-  assert(std::strcmp(path, "/history/finalized/20250101.bin") == 0);
+  assert(std::strcmp(path, "/history/finalized/d20089.bin") == 0);
 }
 
 void TestMaxLengthBaseDir() {
@@ -51,11 +49,20 @@ void TestSmallOutputRejected() {
   assert(!SdHistoryBuildFinalizedHourFilePath(0U, "/history", small, sizeof(small)));
 }
 
-void TestRepresentativeEpochMinuteAndUnknownFallback() {
+void TestEpochDayBucketBoundaries() {
   char path[kSdHistoryPathMax];
   assert(SdHistoryBuildFinalizedHourFilePath(0U, "/h", path, sizeof(path)));
-  assert(std::strcmp(path, "/h/finalized/19700101.bin") == 0);
+  assert(std::strcmp(path, "/h/finalized/d0.bin") == 0);
 
+  assert(SdHistoryBuildFinalizedHourFilePath(1439U, "/h", path, sizeof(path)));
+  assert(std::strcmp(path, "/h/finalized/d0.bin") == 0);
+
+  assert(SdHistoryBuildFinalizedHourFilePath(1440U, "/h", path, sizeof(path)));
+  assert(std::strcmp(path, "/h/finalized/d1.bin") == 0);
+}
+
+void TestInvalidBaseInputsRejected() {
+  char path[kSdHistoryPathMax];
   assert(!SdHistoryCopyBaseDir("", path, sizeof(path)));
   assert(!SdHistoryBuildFinalizedDirPath(nullptr, path, sizeof(path)));
 }
@@ -67,7 +74,8 @@ int main() {
   TestMaxLengthBaseDir();
   TestTooLongBaseDirRejected();
   TestSmallOutputRejected();
-  TestRepresentativeEpochMinuteAndUnknownFallback();
+  TestEpochDayBucketBoundaries();
+  TestInvalidBaseInputsRejected();
   std::cout << "sd_history_path_builder_test: PASS" << std::endl;
   return 0;
 }

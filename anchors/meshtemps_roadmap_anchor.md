@@ -42,7 +42,7 @@ Current product decisions:
 - Labels/ranks are UI metadata, not durable storage keys.
 - Production SD finalized-hour writer/verifier paths must be heap-free/bounded: no large dynamic allocations and no full-record heap buffers.
 - SD finalized-hour commit order is complete write, flush/close, then read-back verification with a fixed-size buffer; do not interleave write/read verification chunks during the write.
-- Finalized-hour SD path construction must use custom bounded append helpers and fixed caller-owned `char` buffers: no Arduino `String`, `std::string`, printf-family formatting, malloc/new, or hidden dynamic path building.
+- Finalized-hour SD path construction must use custom bounded append helpers and fixed caller-owned `char` buffers: no Arduino `String`, `std::string`, printf-family formatting, libc calendar/timezone conversion, malloc/new, or hidden dynamic path building. Filenames use `<base>/finalized/d<epoch_day>.bin`, where `epoch_day = hour_start_epoch_minute / 1440`.
 
 ## 3. MVP / immediate tasks
 
@@ -160,7 +160,7 @@ Acceptance/checkpoint:
 
 Type: focused execute follow-up after Task 10C-A/10C-B.
 PR: same draft PR branch as Tasks 10B/10C unless user says otherwise.
-Risk: high; checkpoint validation required before Task 10D.
+Risk: high; checkpoint validation required before Task 10C-D.
 
 Scope:
 
@@ -188,10 +188,54 @@ Acceptance/checkpoint:
 - Finalized-hour path builder rejects overflows and too-long base directories.
 - Existing heap-free streaming writer and fixed-buffer verifier behavior remains intact.
 
+### Task 10C-D — Remove libc time conversion from finalized-hour path construction
+
+Type: focused execute follow-up after Task 10C-C.
+Risk: high; checkpoint validation required before Task 10C-E1.
+
+Scope:
+
+- Change finalized-hour append-file naming from local-calendar `YYYYMMDD.bin` to deterministic epoch-day buckets: `<base>/finalized/d<epoch_day>.bin`, where `epoch_day = hour_start_epoch_minute / 1440`.
+- Remove `<ctime>`, `<time.h>`, `localtime_r`, `localtime`, `gmtime`, `gmtime_r`, `mktime`, `strftime`, `setenv`, and `tzset` from finalized-hour path construction.
+- Keep custom bounded append helpers and fixed caller-owned `char` buffers.
+- Preserve finalized-hour binary record format, streaming writer, and fixed-buffer verifier behavior.
+- Keep legacy minute/hourly/daily/rollup calendar/String behavior as deferred allocation-audit debt.
+
+Explicit exclusions:
+
+- No source/view streaming writer.
+- No fixed-size SD write coalescer.
+- No Task 10D runtime aggregator.
+- No chart migration, FRAM, SD reader/query service, rollups/indexes, or broad allocation audit.
+
+### Task 10C-E1 — Add finalized-hour source/view streaming writer
+
+Type: focused execute follow-up after Task 10C-D validation.
+Risk: high; checkpoint validation required before Task 10C-E2.
+
+Scope:
+
+- Add a finalized-hour source/view streaming writer so runtime finalization does not need to materialize a large `HistoryHourSnapshot` on stack or heap.
+- Preserve the existing finalized-hour binary record format and CRC semantics.
+- Do not stack-allocate `HistoryHourSnapshot` in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks.
+- Do not add runtime aggregator integration in this task.
+
+### Task 10C-E2 — Add fixed-size SD write coalescer for finalized-hour writes
+
+Type: focused execute follow-up after Task 10C-E1 validation.
+Risk: high; checkpoint validation required before Task 10D.
+
+Scope:
+
+- Add a fixed-size SD write coalescer so finalized-hour output is written in larger bounded chunks without dynamic allocation.
+- Preserve complete-write, flush/close, then read-back verification ordering.
+- Do not change finalized-hour record format.
+- Do not add runtime aggregator integration in this task.
+
 ### Task 10D — Add history aggregator snapshot path
 
-Type: focused execute task after 10B, 10C, 10C-A, 10C-B, and 10C-C are validated.
-PR: should share the same draft PR branch as 10B/10C/10C-A/10C-B/10C-C unless branch size becomes unmanageable.
+Type: focused execute task after 10B, 10C, 10C-A, 10C-B, 10C-C, 10C-D, 10C-E1, and 10C-E2 are validated.
+PR: should share the same draft PR branch as 10B/10C/10C-A/10C-B/10C-C/10C-D/10C-E1/10C-E2 unless branch size becomes unmanageable.
 Risk: high; checkpoint validation required.
 
 Scope:
@@ -203,7 +247,7 @@ Scope:
 - Log mid-hour new sensors immediately.
 - Do not hold mesh locks during storage I/O.
 - Do not write from LVGL event callbacks.
-- Treat SD finalization as a bounded batch operation that starts only after Task 10C-A/10C-B/10C-C checkpoint validation proves the writer/verifier avoids production full-record heap buffers, vector-backed helpers, and dynamic path construction.
+- Treat SD finalization as a bounded batch operation that starts only after Task 10C-A/10C-B/10C-C/10C-D/10C-E1/10C-E2 checkpoint validation proves the writer/verifier avoids production full-record heap buffers, vector-backed helpers, dynamic path construction, large runtime snapshots, and uncoalesced tiny SD writes.
 - Add serial diagnostics for current-hour status.
 - Keep old chart behavior unchanged unless required to compile.
 
@@ -426,7 +470,12 @@ Recommended sequence:
   -> 10C-A remove production SD full-record heap buffering
   -> 10C-B remove finalized-hour vector helpers
   -> 10C-C remove finalized-hour dynamic path construction
-  -> 10C-C checkpoint validation
+  -> 10C-D remove finalized-hour libc time conversion
+  -> 10C-D checkpoint validation
+  -> 10C-E1 finalized-hour source/view streaming writer
+  -> 10C-E1 checkpoint validation
+  -> 10C-E2 fixed-size SD write coalescer
+  -> 10C-E2 checkpoint validation
   -> 10D HistoryAggregator snapshot path
   -> 10D checkpoint validation
   -> 10E legacy RAM-history safety/bypass
@@ -452,6 +501,9 @@ One draft PR branch should contain the first incomplete storage transition if th
 - 10C-A
 - 10C-B
 - 10C-C
+- 10C-D
+- 10C-E1
+- 10C-E2
 - 10D
 - possibly 10E
 
@@ -488,7 +540,10 @@ Can be focused execute tasks after 10A approval:
 - 10C-A production SD writer/verifier allocation cleanup.
 - 10C-B finalized-hour vector helper removal.
 - 10C-C finalized-hour fixed path construction cleanup.
-- 10D HistoryAggregator snapshot path after 10C-C validation.
+- 10C-D finalized-hour epoch-day bucket path cleanup.
+- 10C-E1 finalized-hour source/view streaming writer.
+- 10C-E2 finalized-hour fixed-size SD write coalescer.
+- 10D HistoryAggregator snapshot path after 10C-E2 validation.
 - 10E legacy RAM-history safety/bypass.
 - 10F SD reader/query service.
 - 10G chart migration, after 10F.
@@ -505,6 +560,9 @@ Checkpoint validation required after:
 - 10C-A, because it gates heap-free production SD finalization before runtime integration.
 - 10C-B, because it removes vector-backed finalized-hour API/test patterns.
 - 10C-C, because it removes dynamic finalized-hour SD path construction before runtime integration.
+- 10C-D, because it removes libc calendar/timezone conversion from finalized-hour path construction.
+- 10C-E1, because it prevents large `HistoryHourSnapshot` materialization in runtime finalization.
+- 10C-E2, because it coalesces finalized-hour SD writes with bounded buffers before runtime integration.
 - 10D, because it touches live mesh state and timing.
 - 10E, because it changes/isolates legacy history behavior.
 - 10F, because it reads durable history and may affect chart data correctness.
@@ -536,10 +594,10 @@ The PT100 issue #367 bug report was created separately and is not a MeshTemps co
 Generate the focused execute follow-up task:
 
 ```text
-Task 10C-C — Remove Arduino String path allocation from finalized-hour SD path
+Task 10C-D — Remove libc time conversion from finalized-hour path construction
 ```
 
-Task 10C-C must run before Task 10D. It must remove Arduino `String`, `std::string`, printf-family formatting, malloc/new, and hidden dynamic path construction from finalized-hour SD paths while preserving the Task 10C finalized-hour format and streaming writer behavior.
+Task 10C-D must be checkpoint-validated before Task 10C-E1. Task 10C-E1 should add a finalized-hour source/view streaming writer, and Task 10C-E2 should add a fixed-size SD write coalescer before Task 10D runtime aggregation.
 
 ## 16. Last updated context
 

@@ -202,7 +202,7 @@ SD writes must not run from LVGL event callbacks.
 
 SD file/block format must not depend on whether the hour was staged by RAM or FRAM.
 
-Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; finalized-hour tests should use fixed-size capture buffers rather than vector-backed full-record helpers. Finalized-hour SD path construction must not use Arduino `String`, `std::string`, `std::vector`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`calloc`/`realloc`, or `new`/`delete`; use custom bounded append helpers and caller-owned fixed `char` buffers.
+Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; finalized-hour tests should use fixed-size capture buffers rather than vector-backed full-record helpers. Finalized-hour SD path construction must not use Arduino `String`, `std::string`, `std::vector`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`calloc`/`realloc`, `new`/`delete`, or libc calendar/timezone APIs (`<ctime>`, `<time.h>`, `localtime_r`, `localtime`, `gmtime`, `gmtime_r`, `mktime`, `strftime`, `setenv`, `tzset`); use custom bounded append helpers and caller-owned fixed `char` buffers. Finalized-hour archive filenames are deterministic epoch-day buckets: `<base>/finalized/d<epoch_day>.bin`, where `epoch_day = hour_start_epoch_minute / 1440`.
 
 SD write endurance/commit rule: write the complete finalized-hour record once, flush/close it, then reopen/read back for verification with a fixed-size buffer. Do not interleave write/read verification chunks during the normal write path.
 
@@ -276,7 +276,7 @@ For SD writer/reader:
 - verifies production SD finalization uses bounded buffers/chunks,
 - verifies no SD write/read interleaving during commit; read-back verification happens after full write and flush/close,
 - verifies Task 10F readers stream records and do not load whole files or full histories,
-- checks finalized-hour SD path construction for Arduino `String`, `std::string`, printf-family formatting, malloc/new, and hidden/dynamic path building.
+- checks finalized-hour SD path construction for Arduino `String`, `std::string`, printf-family formatting, libc calendar/timezone conversion, malloc/new, and hidden/dynamic path building.
 
 For aggregator:
 
@@ -545,6 +545,7 @@ These constraints gate runtime SD finalization and chart integration:
 - SD finalized-hour production writes must write the complete record once, flush/close, then verify by read-back with a fixed-size buffer.
 - Verification must not be interleaved with the normal write path.
 - Vector-backed finalized-hour encoders/sinks must not remain in finalized-hour APIs, implementation, or tests; use streaming/fixed-size capture buffers instead.
-- Finalized-hour directory/file paths must be built with custom bounded append helpers and fixed caller-owned `char` buffers; no Arduino `String`, `std::string`, printf-family formatting, malloc/new, or hidden dynamic path construction.
+- Finalized-hour directory/file paths must be built with custom bounded append helpers and fixed caller-owned `char` buffers; no Arduino `String`, `std::string`, printf-family formatting, libc calendar/timezone conversion, malloc/new, or hidden dynamic path construction.
+- Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks; Task 10C-E1 source/view streaming and Task 10C-E2 fixed-size SD write coalescing must precede Task 10D runtime integration.
 - Allocation audit must be completed before enabling runtime SD finalization from the aggregator path.
 - The allocation audit must include legacy `std::vector<SensorHistorySample>` history, chart/history copy paths, `SerialConsole` `String`/`std::vector` buffers, `SdHistoryStore` `String`/`File` and old direct-struct write paths, and production `std::vector`/`String`/`reserve()`/`resize()`/`malloc()`/`calloc()`/`realloc()`/`new` patterns in MeshTemps-GUINode application code.
