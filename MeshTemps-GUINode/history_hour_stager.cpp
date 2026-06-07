@@ -262,14 +262,10 @@ bool RamHourStager::RecordSample(const char* addr16,
 
   const HistoryCentiCResult centi = HistoryTempCToCentiC(temp_c);
   if (!centi.valid) {
-    ++status_.invalid_temperature_count;
-    frames_[minute_index].ClearSample(slot_id);
-    ++slots_[slot_id].missing_or_invalid_count;
-    ++status_.missing_samples_recorded;
-    return false;
+    return RecordInvalidForSlot_(slot_id, minute_index);
   }
 
-  return RecordSampleCentiC(addr16, node_id, minute_index, centi.value, corrected);
+  return RecordSampleForSlot_(slot_id, minute_index, centi.value, corrected);
 }
 
 bool RamHourStager::RecordSampleCentiC(const char* addr16,
@@ -283,10 +279,18 @@ bool RamHourStager::RecordSampleCentiC(const char* addr16,
   }
 
   if (temp_c_x100 == kHistoryInvalidTempCentiC) {
-    ++status_.invalid_temperature_count;
-    frames_[minute_index].ClearSample(slot_id);
-    ++slots_[slot_id].missing_or_invalid_count;
-    ++status_.missing_samples_recorded;
+    return RecordInvalidForSlot_(slot_id, minute_index);
+  }
+
+  return RecordSampleForSlot_(slot_id, minute_index, temp_c_x100, corrected);
+}
+
+bool RamHourStager::RecordSampleForSlot_(uint8_t slot_id,
+                                         uint8_t minute_index,
+                                         int16_t temp_c_x100,
+                                         bool corrected) {
+  if (slot_id >= status_.active_slot_count || !MinuteInRange(minute_index)) {
+    ++status_.invalid_argument_count;
     return false;
   }
 
@@ -298,6 +302,20 @@ bool RamHourStager::RecordSampleCentiC(const char* addr16,
   ++slots_[slot_id].sample_count;
   ++status_.samples_recorded;
   return true;
+}
+
+bool RamHourStager::RecordInvalidForSlot_(uint8_t slot_id,
+                                          uint8_t minute_index) {
+  if (slot_id >= status_.active_slot_count || !MinuteInRange(minute_index)) {
+    ++status_.invalid_argument_count;
+    return false;
+  }
+
+  ++status_.invalid_temperature_count;
+  frames_[minute_index].ClearSample(slot_id);
+  ++slots_[slot_id].missing_or_invalid_count;
+  ++status_.missing_samples_recorded;
+  return false;
 }
 
 bool RamHourStager::RecordMissing(const char* addr16,
@@ -324,7 +342,6 @@ bool RamHourStager::ExportSnapshot(HistoryHourSnapshot* out_snapshot) const {
   out_snapshot->active_slot_count = status_.active_slot_count;
   out_snapshot->slots = slots_;
   out_snapshot->frames = frames_;
-  ++status_.exports_completed;
   out_snapshot->status = status_;
   return true;
 }

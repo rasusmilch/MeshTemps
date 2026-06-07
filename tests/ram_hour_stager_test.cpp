@@ -3,12 +3,25 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 
 namespace {
 
 constexpr uint32_t kHour = 30000000U;
+
+bool StatusSame(const HistoryStagerStatus& a, const HistoryStagerStatus& b) {
+  return a.hour_start_epoch_minute == b.hour_start_epoch_minute &&
+         a.active_slot_count == b.active_slot_count &&
+         a.samples_recorded == b.samples_recorded &&
+         a.missing_samples_recorded == b.missing_samples_recorded &&
+         a.overflow_count == b.overflow_count &&
+         a.invalid_argument_count == b.invalid_argument_count &&
+         a.invalid_temperature_count == b.invalid_temperature_count &&
+         a.hour_active == b.hour_active &&
+         a.overflowed == b.overflowed;
+}
 
 void TestSlotAssignment() {
   RamHourStager stager;
@@ -36,7 +49,10 @@ void TestMidHourDiscovery() {
   assert(!snapshot.frames[19].IsPresent(0));
   assert(snapshot.frames[20].IsPresent(0));
   assert(snapshot.frames[20].TemperatureCentiC(0) == 2125);
+  assert(snapshot.slots[0].sample_count == 1);
+  assert(snapshot.status.samples_recorded == 1);
 }
+
 
 void TestDisappearAndReturn() {
   RamHourStager stager;
@@ -98,7 +114,36 @@ void TestInvalidTemperature() {
   assert(!snapshot.frames[8].IsPresent(0));
   assert(!snapshot.frames[9].IsPresent(0));
   assert(!snapshot.frames[10].IsPresent(0));
+  assert(snapshot.slots[0].sample_count == 0);
+  assert(snapshot.slots[0].missing_or_invalid_count == 3);
+  assert(snapshot.status.samples_recorded == 0);
+  assert(snapshot.status.missing_samples_recorded == 3);
   assert(snapshot.status.invalid_temperature_count == 3);
+}
+
+
+void TestRecordSampleSingleSlotCounters() {
+  RamHourStager stager;
+  assert(stager.ResetHour(kHour));
+
+  assert(stager.RecordSample("2800000000000051", 0x10000001U, 8, 22.0f, false));
+  assert(stager.RecordSample("2800000000000051", 0x10000001U, 8, 22.5f, true));
+  assert(stager.RecordSample("2800000000000051", 0x10000001U, 9, 23.0f, false));
+  assert(!stager.RecordSample("2800000000000051", 0x10000001U, 10, NAN, false));
+
+  HistoryHourSnapshot snapshot;
+  assert(stager.ExportSnapshot(&snapshot));
+  assert(snapshot.active_slot_count == 1);
+  assert(snapshot.slots[0].sample_count == 3);
+  assert(snapshot.slots[0].missing_or_invalid_count == 1);
+  assert(snapshot.status.samples_recorded == 3);
+  assert(snapshot.status.missing_samples_recorded == 1);
+  assert(snapshot.status.invalid_temperature_count == 1);
+  assert(snapshot.frames[8].IsPresent(0));
+  assert(snapshot.frames[8].IsCorrected(0));
+  assert(snapshot.frames[8].TemperatureCentiC(0) == 2250);
+  assert(snapshot.frames[9].IsPresent(0));
+  assert(!snapshot.frames[10].IsPresent(0));
 }
 
 void TestSlotCap() {
@@ -136,12 +181,16 @@ void TestExportDeterministicAndNeutral() {
   assert(a.hour_start_epoch_minute == kHour);
   assert(a.active_slot_count == 2);
   assert(a.status.active_slot_count == 2);
-  assert(a.status.exports_completed == 1);
-  assert(b.status.exports_completed == 2);
   assert(a.frames.size() == kHistoryMinutesPerHour);
+  assert(StatusSame(a.status, b.status));
   assert(a.slots[0].rom64 == b.slots[0].rom64);
   assert(std::strcmp(a.slots[0].addr16, b.slots[0].addr16) == 0);
   assert(a.frames[0].presence == b.frames[0].presence);
+  assert(a.frames[0].corrected == b.frames[0].corrected);
+  assert(a.frames[0].temp_c_x100 == b.frames[0].temp_c_x100);
+  assert(a.frames[59].presence == b.frames[59].presence);
+  assert(a.frames[59].corrected == b.frames[59].corrected);
+  assert(a.frames[59].temp_c_x100 == b.frames[59].temp_c_x100);
   assert(a.frames[59].temp_c_x100[1] == -125);
 }
 
@@ -165,6 +214,7 @@ int main() {
   TestNodeContextChange();
   TestCorrectedBitmap();
   TestInvalidTemperature();
+  TestRecordSampleSingleSlotCounters();
   TestSlotCap();
   TestExportDeterministicAndNeutral();
   TestCentiConversion();

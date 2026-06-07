@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 // Backend-neutral current-hour history model for MeshTemps.
 //
@@ -17,7 +18,8 @@ constexpr std::size_t kHistoryMinutesPerHour = 60;
 constexpr std::size_t kHistoryBitmapBytes =
     (kHistorySlotCapacity + 7U) / 8U;
 constexpr uint16_t kHistoryHourSnapshotFormatVersion = 1;
-constexpr int16_t kHistoryInvalidTempCentiC = static_cast<int16_t>(0x8000);
+constexpr int16_t kHistoryInvalidTempCentiC =
+    std::numeric_limits<int16_t>::min();
 
 struct HistoryCentiCResult {
   bool valid = false;
@@ -61,7 +63,6 @@ struct HistoryStagerStatus {
   uint32_t overflow_count = 0;
   uint32_t invalid_argument_count = 0;
   uint32_t invalid_temperature_count = 0;
-  uint32_t exports_completed = 0;
   bool hour_active = false;
   bool overflowed = false;
 };
@@ -147,8 +148,13 @@ class RamHourStager final : public IHistoryHourStager {
   void MarkSlotSeen_(HistorySlotDescriptor* slot,
                      uint32_t node_id,
                      uint8_t minute_index);
+  bool RecordSampleForSlot_(uint8_t slot_id,
+                            uint8_t minute_index,
+                            int16_t temp_c_x100,
+                            bool corrected);
+  bool RecordInvalidForSlot_(uint8_t slot_id, uint8_t minute_index);
 
-  mutable HistoryStagerStatus status_{};
+  HistoryStagerStatus status_{};
   std::array<HistorySlotDescriptor, kHistorySlotCapacity> slots_{};
   std::array<HistoryMinuteFrame, kHistoryMinutesPerHour> frames_{};
 };
