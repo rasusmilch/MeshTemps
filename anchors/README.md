@@ -23,9 +23,12 @@ Before generating or reviewing MeshTemps storage/history tasks, read these ancho
    - Task sequence, dependencies, checkpoint gates, and explicit exclusions.
 
 5. `anchors/meshtemps_requirements_constraints_anchor.md`
-   - Non-negotiable data, allocation, identity, SD-write, chart/query, and Codex workflow constraints.
+   - Non-negotiable data, allocation, identity, SD-write, chart/query, testing, and Codex workflow constraints.
 
-6. `anchors/meshtemps_sd_durability_recovery_anchor.md`
+6. `anchors/meshtemps_testing_hardening_anchor.md`
+   - Testing policy for future tests and existing/past tests that future work touches, relies on, or cites as validation evidence.
+
+7. `anchors/meshtemps_sd_durability_recovery_anchor.md`
    - Power-loss durability risk, FAT32 append/recovery contract, scanner/repair/quarantine plan, and required recovery tests.
 
 ## Current planned storage sequence
@@ -42,6 +45,10 @@ Current intended sequence after PR #53 merge:
 ```
 
 If older anchor text still says Task 10D may follow directly after Task 10C-E3V, use this index and `meshtemps_current_next_action_anchor.md` as the current sequencing authority.
+
+## Testing hardening caveat
+
+Future and existing tests are not automatically trusted just because they compile or already exist. Use `meshtemps_testing_hardening_anchor.md` when planning, executing, or validating tests. Storage/recovery/chart-freeze work must harden weak tests before relying on them for final confidence.
 
 ## Current PR caveat
 
