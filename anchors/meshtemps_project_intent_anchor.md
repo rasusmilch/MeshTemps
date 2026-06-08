@@ -143,7 +143,7 @@ Read-back verification must happen after the complete SD record has been written
 
 Current-hour RAM/FRAM staging must stay bounded, and SD finalization must also stay bounded. Do not call SD finalization from LVGL callbacks. Do not hold mesh/history locks across SD I/O.
 
-Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. Before Task 10D runtime integration, add a source/view streaming writer so finalized-hour records can be produced from bounded source views, then add a fixed-size SD write coalescer for efficient bounded writes.
+Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. The source/view streaming writer, fixed-size SD write coalescer, and file-scope static finalized-hour write/verify buffers are the required storage foundation for Task 10D runtime integration.
 
 Mesh churn is expected:
 
@@ -491,24 +491,21 @@ Current unresolved assumptions:
 
 ## 16. Next recommended Codex workflow
 
-Current Task 10C storage-foundation status: Tasks 10C-D, 10C-DV, 10C-E0, 10C-E1, 10C-E1-A, and 10C-E2 have been completed/reviewed in this workstream, but Task 10C-E2 is **not ready for checkpoint validation** because the production finalized-hour write coalescer buffer and read-back verify buffer are still local/stack buffers and the sizes do not match the final embedded contract.
+Current Task 10C storage-foundation status: Tasks through 10C-E2/10C-E2-A have completed targeted validation for the finalized-hour source/view writer, coalesced SD writes, and file-scope static finalized-hour write/verify buffers. Task 10C-E3 removes the remaining legacy non-finalized `SdHistoryStore` minute/hourly/daily/rollup APIs so Task 10D cannot accidentally copy those old PT100-era storage patterns.
 
-Do **not** generate Task 10C-E2 checkpoint validation yet, and do **not** start Task 10D.
+Do **not** start Task 10D until Task 10C-E3 receives targeted validation.
 
-Immediate next execute task:
+Immediate next checkpoint after Task 10C-E3 implementation:
 
 ```text
-Task 10C-E2-A — Move finalized-hour SD write/verify buffers to file-scope static storage
+Task 10C-E3V — Targeted validation for legacy non-finalized SdHistoryStore debt removal
 ```
 
-Task 10C-E2-A must:
+Task 10C-E3V must confirm:
 
-- move the finalized-hour SD write coalescer buffer out of `SdHistoryStore::AppendFinalizedHourSnapshot()` local stack storage and into file-scope static storage;
-- resize the write coalescer buffer to 4096 bytes;
-- move the finalized-hour read-back verification buffer out of local stack storage and into file-scope static storage;
-- resize the read-back verification buffer to 512 bytes;
-- preserve finalized-hour binary record format, source/view writer behavior, path behavior, and complete-write -> flush/close -> read-back verification order;
-- add an explicit single-writer/non-reentrant ownership comment because file-scope static buffers are shared state;
-- avoid runtime aggregator, chart, FRAM, reader/query, retention, serial-command, and broad allocation-audit work.
+- old `SdHistoryStore` minute/hourly/daily/rollup public APIs and private direct-struct helpers are absent;
+- `sd_history_store.h/.cpp` no longer explicitly use Arduino `String`, `std::function`, `std::vector`, libc calendar/time conversion, printf-family path formatting, or heap allocation patterns;
+- finalized-hour behavior remains intact: `AppendFinalizedHourSnapshot()`, file-scope static 4096-byte write buffer, file-scope static 512-byte verify buffer, bounded finalized path helpers, and complete-write -> coalescer flush -> `file.flush()` -> `file.close()` -> read-back verification order;
+- no Task 10D runtime aggregator, chart, FRAM, reader/query, retention, serial-command, or broad allocation-audit work was introduced.
 
-Static finalized-hour SD buffers are the approved production storage primitive for this path: no task-stack/large local buffers, heap, PSRAM, `std::array`, `std::vector`, Arduino `String`, `std::function`, `malloc`/`new`, printf-family path formatting, or libc calendar/timezone conversion. Small fixed caller-owned path buffers may remain unless a later audit proves they are unsafe.
+After Task 10C-E3V passes, the next execute task may be Task 10D runtime aggregation. Task 10D must be built fresh from the current `RamHourStager` / source-view finalized-hour writer / finalized-hour `SdHistoryStore` path and must not resurrect deleted `history_aggregator.h/.cpp` or the removed non-finalized `SdHistoryStore` APIs.

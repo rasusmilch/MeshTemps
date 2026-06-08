@@ -199,7 +199,7 @@ Scope:
 - Remove `<ctime>`, `<time.h>`, `localtime_r`, `localtime`, `gmtime`, `gmtime_r`, `mktime`, `strftime`, `setenv`, and `tzset` from finalized-hour path construction.
 - Keep custom bounded append helpers and fixed caller-owned `char` buffers.
 - Preserve finalized-hour binary record format, streaming writer, and fixed-buffer verifier behavior.
-- Keep legacy minute/hourly/daily/rollup calendar/String behavior as deferred allocation-audit debt.
+- Legacy minute/hourly/daily/rollup `SdHistoryStore` calendar/String APIs were removed later by Task 10C-E3; legacy GUI/chart RAM-history allocation debt remains separate.
 
 Explicit exclusions:
 
@@ -525,6 +525,8 @@ Recommended sequence:
   -> 10C-E2 fixed-size SD write coalescer
   -> 10C-E2-A static finalized-hour SD buffer correction
   -> 10C-E2 checkpoint validation
+  -> 10C-E3 remove legacy non-finalized SdHistoryStore debt
+  -> 10C-E3 checkpoint validation
   -> 10D HistoryAggregator snapshot path
   -> 10D checkpoint validation
   -> 10E legacy RAM-history safety/bypass
@@ -555,6 +557,7 @@ One draft PR branch should contain the first incomplete storage transition if th
 - 10C-E1
 - 10C-E2
 - 10C-E2-A
+- 10C-E3
 - 10D
 - possibly 10E
 
@@ -580,7 +583,7 @@ Read-only planning required:
 - 12A derived rollups/indexes.
 - Any SD retention/pruning policy.
 - Any GUI diagnostic/status screen that changes user workflow substantially.
-- Any removal of legacy history code before replacement query path is proven.
+- Any removal of legacy GUI/chart RAM-history code before replacement query path is proven. Focused removal of obsolete non-finalized `SdHistoryStore` APIs is covered by Task 10C-E3 and targeted validation.
 
 ## 12. Tasks that can be focused execute tasks
 
@@ -596,7 +599,8 @@ Can be focused execute tasks after 10A approval:
 - 10C-E1 finalized-hour source/view streaming writer.
 - 10C-E2 finalized-hour fixed-size SD write coalescer.
 - 10C-E2-A finalized-hour static write/verify buffer correction.
-- 10D HistoryAggregator snapshot path after 10C-E2-A and 10C-E2 validation.
+- 10C-E3 legacy non-finalized `SdHistoryStore` debt removal after 10C-E2 validation.
+- 10D HistoryAggregator snapshot path after 10C-E3 validation.
 - 10E legacy RAM-history safety/bypass.
 - 10F SD reader/query service.
 - 10G chart migration, after 10F.
@@ -617,6 +621,7 @@ Checkpoint validation required after:
 - 10C-E1, because it prevents large `HistoryHourSnapshot` materialization in runtime finalization.
 - 10C-E2, because it coalesces finalized-hour SD writes with bounded buffers before runtime integration.
 - 10C-E2-A, because it moves finalized-hour write/verify buffers to approved file-scope static storage before runtime integration.
+- 10C-E3, because it removes obsolete `SdHistoryStore` APIs and must prove finalized-hour storage still works before runtime integration.
 - 10D, because it touches live mesh state and timing.
 - 10E, because it changes/isolates legacy history behavior.
 - 10F, because it reads durable history and may affect chart data correctness.
@@ -693,7 +698,7 @@ Before runtime SD finalization is enabled, either as part of Task 10D/10E valida
 - the legacy `std::vector<SensorHistorySample>` history path and resize/reserve behavior,
 - chart/history full-copy paths,
 - `SerialConsole` `String`/`std::vector` token or cache buffers,
-- `SdHistoryStore` Arduino `String`/`File` usage and old PT100-era direct struct writes,
+- verify old PT100-era `SdHistoryStore` direct struct writes remain absent and inspect remaining Arduino `File` usage,
 - any `std::vector`, `String`, `reserve()`, `resize()`, `malloc()`, `calloc()`, `realloc()`, or `new` patterns in MeshTemps-GUINode production code.
 
 Task receipts and validation reports must distinguish bounded, cold-path allocations from hot-path or storage-event allocations that can reintroduce ESP32 panic/freeze risk.

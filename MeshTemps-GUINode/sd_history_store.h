@@ -4,8 +4,6 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <stdint.h>
-#include <vector>
-#include <functional>
 
 #include "history_hour_stager.h"
 #include "sd_history_path_builder.h"
@@ -13,13 +11,6 @@
 class SdHistoryStore {
  public:
   static constexpr uint16_t kVersion = 1;
-
-  struct HourlyRollupEntry {
-    int16_t mean_centi_c;   // 0x8000 if no samples
-    int16_t min_centi_c;    // 0x8000 if no samples
-    int16_t max_centi_c;    // 0x8000 if no samples
-    uint16_t sample_count;  // 0..60
-  };
 
   bool Begin(fs::FS& fs, const char* base_dir);
 
@@ -30,114 +21,8 @@ class SdHistoryStore {
   // only and are not used as sample/payload counts.
   bool AppendFinalizedHourSnapshot(const HistoryHourSnapshot& snapshot);
 
-  bool AppendMinuteHourBlock(uint32_t hour_start_epoch_minute,
-                             uint16_t sensor_count,
-                             uint16_t frame_bytes,
-                             uint16_t presence_bytes_padded,
-                             uint64_t bad_frame_mask,
-                             uint32_t payload_crc32,
-                             const uint32_t* sensor_node_ids,
-                             const uint64_t* sensor_rom64,
-                             const std::function<bool(std::function<bool(const void*, size_t)>)>& payload_streamer);
-
-  bool AppendHourlyRollupBlock(uint32_t hour_start_epoch_minute,
-                               uint16_t sensor_count,
-                               const uint32_t* sensor_node_ids,
-                               const uint64_t* sensor_rom64,
-                               const HourlyRollupEntry* rollups);
-
-  bool AppendDailyRollupBlock(uint32_t day_start_epoch_minute,
-                              uint16_t sensor_count,
-                              const uint32_t* sensor_node_ids,
-                              const uint64_t* sensor_rom64,
-                              const HourlyRollupEntry* daily_rollups);
-
-  // Scan hourly rollup records in [start_epoch_minute, end_epoch_minute).
-  // Callback pointers are only valid during the callback.
-  bool ScanHourlyRollups(
-      uint32_t start_epoch_minute,
-      uint32_t end_epoch_minute,
-      const std::function<void(uint32_t hour_start_epoch_minute,
-                               uint16_t sensor_count,
-                               const uint32_t* sensor_node_ids,
-                               const uint64_t* sensor_rom64,
-                               const HourlyRollupEntry* rollups)>& on_record) const;
-  
-  bool HasMinuteHourBlock(uint32_t hour_start_epoch_minute) const;
-  bool HasHourlyRollupBlock(uint32_t hour_start_epoch_minute) const;
-
-  private:
-  // FourCC values stored little-endian in the file header.
-  // 'MINH' = Minute frames for an hour, 'HROL' = Hourly rollup, 'DROL' = Daily rollup.
-  static constexpr uint32_t kMagicMinute = 0x484E494Du;  // 'MINH'
-  static constexpr uint32_t kMagicRollup = 0x4C4F5248u;  // 'HROL'
-
-  struct MinuteHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_bytes;
-    uint32_t record_bytes;
-
-    uint32_t hour_start_epoch_minute;
-    uint16_t sensor_count;
-    uint16_t frame_bytes;
-    uint16_t presence_bytes_padded;
-    uint16_t reserved0;
-
-    uint64_t bad_frame_mask;   // 1 bit per minute (0..59) that was replaced with a missing frame
-    uint32_t descriptor_bytes;
-    uint32_t payload_bytes;
-    uint32_t payload_crc32;    // CRC32 over descriptor + payload
-
-    uint32_t header_crc32;     // CRC32 over header with header_crc32=0
-  };
-
-  struct RollupHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_bytes;
-    uint32_t record_bytes;
-
-    uint32_t hour_start_epoch_minute;
-    uint16_t sensor_count;
-    uint16_t reserved0;
-
-    uint32_t descriptor_bytes;
-    uint32_t rollup_bytes;
-    uint32_t payload_crc32;    // CRC32 over descriptor + rollup payload
-    uint32_t header_crc32;     // CRC32 over header with header_crc32=0
-  };
-
-  static constexpr uint32_t kMagicDaily = 0x4C4F5244u;  // 'DROL' Daily rollup
-
-  struct DailyHeader {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_bytes;
-    uint32_t record_bytes;
-
-    uint32_t day_start_epoch_minute;  // local midnight, epoch_minutes
-    uint16_t sensor_count;
-    uint16_t reserved0;
-
-    uint32_t descriptor_bytes;        // sensor_count * (u32 + u64)
-    uint32_t rollup_bytes;            // sensor_count * sizeof(HourlyRollupEntry)
-    uint32_t payload_crc32;           // CRC32 over descriptor + rollup payload
-    uint32_t header_crc32;            // CRC32 over header with header_crc32=0
-  };
-
+ private:
   bool EnsureDirExists_(const char* path);
-  String MakeMinuteFilePath_(uint32_t hour_start_epoch_minute) const;
-  String MakeHourlyFilePath_(uint32_t hour_start_epoch_minute) const;
-
-  static bool WriteAll_(File& file, const void* data, size_t length);
-  static uint32_t ComputeHeaderCrc32_(const void* header, size_t header_bytes);
-
-  bool VerifyMinuteRecord_(const String& path, uint32_t record_offset) const;
-  bool VerifyRollupRecord_(const String& path, uint32_t record_offset) const;
-
-  String MakeDailyFilePath_(uint32_t day_start_epoch_minute) const;
-  bool VerifyDailyRecord_(const String& path, uint32_t record_offset) const;
   bool BuildFinalizedDirPath_(char* out, size_t out_size) const;
   bool BuildFinalizedHourFilePath_(uint32_t hour_start_epoch_minute,
                                    char* out,
