@@ -168,6 +168,13 @@ class FakeFinalizedHourSource final : public ISdFinalizedHourSource {
     if (override_inactive_) status.hour_active = false;
     if (override_hour_start_) status.hour_start_epoch_minute = 0U;
     if (override_slot_count_) status.active_slot_count = kHistorySlotCapacity + 1U;
+    if (mismatch_status_hour_start_) {
+      status.hour_start_epoch_minute = snapshot_.hour_start_epoch_minute + 1U;
+    }
+    if (mismatch_status_active_slot_count_) {
+      status.active_slot_count =
+          (snapshot_.active_slot_count > 0U) ? snapshot_.active_slot_count - 1U : 1U;
+    }
     return status;
   }
   const HistorySlotDescriptor* slot(uint8_t slot_id) const override {
@@ -190,6 +197,8 @@ class FakeFinalizedHourSource final : public ISdFinalizedHourSource {
   bool override_inactive_ = false;
   bool override_hour_start_ = false;
   bool override_slot_count_ = false;
+  bool mismatch_status_hour_start_ = false;
+  bool mismatch_status_active_slot_count_ = false;
   bool override_bad_format_ = false;
   bool return_null_slot_ = false;
   bool return_null_frame_ = false;
@@ -383,6 +392,16 @@ void TestInvalidSourcesRejected() {
 
   source = FakeFinalizedHourSource();
   source.override_slot_count_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.mismatch_status_hour_start_ = true;
+  assert(!EncodeSourceToCapture(source, &record));
+  assert(record.used == 0);
+
+  source = FakeFinalizedHourSource();
+  source.mismatch_status_active_slot_count_ = true;
   assert(!EncodeSourceToCapture(source, &record));
   assert(record.used == 0);
 
