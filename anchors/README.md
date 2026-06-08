@@ -10,31 +10,30 @@ Last updated: 2026-06-08
 
 Before generating or reviewing MeshTemps storage/history tasks, read these anchors in this order:
 
-1. `anchors/meshtemps_project_intent_anchor.md`
-   - Product intent, durable-history direction, user/operator workflow, terminology, and current next workflow.
+1. `anchors/README.md`
+   - Anchor index and current workflow tie-breaker.
 
-2. `anchors/meshtemps_roadmap_anchor.md`
-   - Task sequence, dependencies, checkpoint gates, explicit exclusions, and current next task.
+2. `anchors/meshtemps_current_next_action_anchor.md`
+   - Current near-term sequencing for PR #53 and the next PR. Supersedes stale direct-to-Task-10D wording in older large anchors.
 
-3. `anchors/meshtemps_requirements_constraints_anchor.md`
+3. `anchors/meshtemps_project_intent_anchor.md`
+   - Product intent, durable-history direction, user/operator workflow, and terminology.
+
+4. `anchors/meshtemps_roadmap_anchor.md`
+   - Task sequence, dependencies, checkpoint gates, and explicit exclusions.
+
+5. `anchors/meshtemps_requirements_constraints_anchor.md`
    - Non-negotiable data, allocation, identity, SD-write, chart/query, and Codex workflow constraints.
 
-4. `anchors/meshtemps_sd_durability_recovery_anchor.md`
+6. `anchors/meshtemps_sd_durability_recovery_anchor.md`
    - Power-loss durability risk, FAT32 append/recovery contract, scanner/repair/quarantine plan, and required recovery tests.
-
-## Current durability warning
-
-Raw capacity is not the limiting SD-card issue for the planned finalized-hour data rate. The major durability risk is power loss or reset during FAT32 append/write/flush/close.
-
-Future runtime SD finalization must not silently assume that `file.flush()` and `file.close()` are enough. The finalized-hour append-file recovery contract in `meshtemps_sd_durability_recovery_anchor.md` must be planned and implemented before normal runtime SD finalization is enabled, or runtime finalization must remain explicitly guarded/disabled until recovery passes validation.
 
 ## Current planned storage sequence
 
-Current intended sequence after the legacy SdHistoryStore cleanup gate:
+Current intended sequence after PR #53 merge:
 
 ```text
-10C-E3V legacy SdHistoryStore debt-removal validation
-  -> 10C-F0 read-only SD recovery plan
+10C-F0 read-only SD recovery plan
   -> 10C-F1 finalized-hour append-file scanner / validation service
   -> 10C-F1 validation
   -> 10C-F2 safe tail repair or quarantine policy
@@ -42,9 +41,7 @@ Current intended sequence after the legacy SdHistoryStore cleanup gate:
   -> 10D runtime HistoryAggregator snapshot path
 ```
 
-If the user explicitly chooses to start Task 10D before 10C-F1/10C-F2, Task 10D must keep normal runtime SD finalization disabled or behind a reviewed compile/runtime guard. Do not enable normal hourly SD appends without finalized-file recovery behavior.
-
-This anchor index is the current workflow tie-breaker if older anchor text still says Task 10D may follow directly after Task 10C-E3V. Final integrated validation must flag any such stale direct-to-10D wording as documentation debt before merge, or confirm it has been corrected.
+If older anchor text still says Task 10D may follow directly after Task 10C-E3V, use this index and `meshtemps_current_next_action_anchor.md` as the current sequencing authority.
 
 ## Current PR caveat
 
