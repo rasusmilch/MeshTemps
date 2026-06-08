@@ -3,8 +3,8 @@
 Project: MeshTemps  
 Area: GUI-node history storage and chart hardening  
 Anchor purpose: Guide future ChatGPT/Codex planning, execution, and validation tasks.  
-Status: Intent anchor artifact; not yet committed to the repository.  
-Last updated: 2026-06-07
+Status: Committed repository anchor for PR #53 storage-foundation workstream.
+Last updated: 2026-06-08
 
 ## 1. Project purpose
 
@@ -457,12 +457,11 @@ Available context references:
 - PT100 bug filed from this chat: issue #367, `FramHourJournal undercounts required FRAM region by one header slot`.
 - Prior generated but not repo-confirmed roadmap artifact: `meshtemps_history_chart_roadmap_anchor.md`.
 
-Unverified repository anchors:
+Repository anchor status:
 
-- No committed MeshTemps project intent anchor was found in a quick connector search.
-- The prior roadmap anchor was reported by handoff as a downloadable artifact and not present in the repository at that time.
-- A formal validation ledger anchor was not found or inspected in this pass.
-- A decision log anchor was not found or inspected in this pass.
+- This file is now present in the MeshTemps repository under `anchors/` and is current guidance for PR #53 / branch `codex/plan-backend-agnostic-current-hour-staging-architecture` as of local head `381bdcae7a14c21092c22810a3a4041ed8a94f81` inspected for Task 10C-R2.
+- The PR body may lag behind this workstream and should be rewritten before final integrated review/merge.
+- A formal validation ledger anchor and decision log anchor were not found or inspected in this pass.
 
 ## 15. Last updated context
 
@@ -482,7 +481,7 @@ This anchor used:
   - Waveshare ESP32-S3-Touch-LCD-7 board config showing shared I²C bus on GPIO8/GPIO9.
   - PT100_Mesh_Datalogger FRAM/SD storage files.
   - Task 10C review finding that production `SdHistoryStore` finalized-hour write/read-back paths still allocate full-record `std::vector<uint8_t>` buffers.
-  - Task 10C-R anchor update requiring heap-free SD finalization and Task 10C-A before Task 10D runtime aggregation.
+  - Task 10C-R/10C-C/10C-D/10C-E* updates requiring heap-free finalized-hour SD finalization, deterministic epoch-day paths, source/view streaming, fixed-size coalescing, and Task 10C-E2-A static buffer correction before Task 10D runtime aggregation.
 
 Current unresolved assumptions:
 
@@ -492,12 +491,24 @@ Current unresolved assumptions:
 
 ## 16. Next recommended Codex workflow
 
-Next Codex task should be a focused execute follow-up, not Task 10D.
+Current Task 10C storage-foundation status: Tasks 10C-D, 10C-DV, 10C-E0, 10C-E1, 10C-E1-A, and 10C-E2 have been completed/reviewed in this workstream, but Task 10C-E2 is **not ready for checkpoint validation** because the production finalized-hour write coalescer buffer and read-back verify buffer are still local/stack buffers and the sizes do not match the final embedded contract.
 
-Recommended task title:
+Do **not** generate Task 10C-E2 checkpoint validation yet, and do **not** start Task 10D.
+
+Immediate next execute task:
 
 ```text
-Task 10C-A — Remove production dynamic allocation from finalized-hour SD writer
+Task 10C-E2-A — Move finalized-hour SD write/verify buffers to file-scope static storage
 ```
 
-The task should keep the Task 10C finalized-hour file/block format, preserve host-test codec coverage, and replace production full-record heap buffers in `SdHistoryStore::AppendFinalizedHourSnapshot()` and `VerifyFinalizedHourRecord_()` with a streaming/bounded write and read-back verification path. Task 10D runtime aggregation must wait until Task 10C-A checkpoint validation passes.
+Task 10C-E2-A must:
+
+- move the finalized-hour SD write coalescer buffer out of `SdHistoryStore::AppendFinalizedHourSnapshot()` local stack storage and into file-scope static storage;
+- resize the write coalescer buffer to 4096 bytes;
+- move the finalized-hour read-back verification buffer out of local stack storage and into file-scope static storage;
+- resize the read-back verification buffer to 512 bytes;
+- preserve finalized-hour binary record format, source/view writer behavior, path behavior, and complete-write -> flush/close -> read-back verification order;
+- add an explicit single-writer/non-reentrant ownership comment because file-scope static buffers are shared state;
+- avoid runtime aggregator, chart, FRAM, reader/query, retention, serial-command, and broad allocation-audit work.
+
+Static finalized-hour SD buffers are the approved production storage primitive for this path: no task-stack/large local buffers, heap, PSRAM, `std::array`, `std::vector`, Arduino `String`, `std::function`, `malloc`/`new`, printf-family path formatting, or libc calendar/timezone conversion. Small fixed caller-owned path buffers may remain unless a later audit proves they are unsafe.
