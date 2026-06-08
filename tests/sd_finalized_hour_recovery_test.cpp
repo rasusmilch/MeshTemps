@@ -69,6 +69,15 @@ void WriteU16(std::vector<uint8_t>* bytes, size_t offset, uint16_t value) {
   (*bytes)[offset + 1U] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
 }
 
+uint32_t ReadU32(const std::vector<uint8_t>& bytes, size_t offset) {
+  assert(offset + 4U <= bytes.size());
+  uint32_t value = 0;
+  for (uint8_t i = 0; i < 4U; ++i) {
+    value |= static_cast<uint32_t>(bytes[offset + i]) << (8U * i);
+  }
+  return value;
+}
+
 void WriteU32(std::vector<uint8_t>* bytes, size_t offset, uint32_t value) {
   assert(bytes != nullptr);
   assert(offset + 4U <= bytes->size());
@@ -255,6 +264,25 @@ void TestBadHeaderSize() {
                 SdFinalizedHourScanFailureReason::kBadHeaderSize, 0U, 0U, 0U);
 }
 
+void TestBadSnapshotFormatVersion() {
+  std::vector<uint8_t> bytes = BuildRecord(kHourA);
+  WriteU16(&bytes, 40U, kHistoryHourSnapshotFormatVersion + 1U);
+  RecomputeHeaderCrc(&bytes);
+  const SdFinalizedHourScanResult result = Scan(bytes);
+  ExpectFailure(result, SdFinalizedHourScanStatus::kUnsupportedFormat,
+                SdFinalizedHourScanFailureReason::kBadSnapshotFormatVersion,
+                0U, 0U, 0U);
+}
+
+void TestZeroHourRejected() {
+  std::vector<uint8_t> bytes = BuildRecord(kHourA);
+  WriteU32(&bytes, 12U, 0U);
+  RecomputeHeaderCrc(&bytes);
+  const SdFinalizedHourScanResult result = Scan(bytes);
+  ExpectFailure(result, SdFinalizedHourScanStatus::kInvalidAtZero,
+                SdFinalizedHourScanFailureReason::kZeroHour, 0U, 0U, 0U);
+}
+
 void TestBadHeaderCrc() {
   std::vector<uint8_t> bytes = BuildRecord(kHourA);
   bytes[kHeaderCrcOffset] ^= 0x01U;
@@ -311,6 +339,19 @@ void TestRecordBytesTooLarge() {
   assert(reader.max_requested_len == kSdFinalizedHourHeaderBytes);
 }
 
+void TestRecordBytesMismatch() {
+  std::vector<uint8_t> bytes = BuildRecord(kHourA);
+  const uint32_t record_bytes = ReadU32(bytes, 8U);
+  assert(record_bytes >= kSdFinalizedHourHeaderBytes);
+  assert(record_bytes < kSdFinalizedHourMaxRecordBytes);
+  WriteU32(&bytes, 8U, record_bytes + 1U);
+  RecomputeHeaderCrc(&bytes);
+  const SdFinalizedHourScanResult result = Scan(bytes);
+  ExpectFailure(result, SdFinalizedHourScanStatus::kDangerousHeader,
+                SdFinalizedHourScanFailureReason::kRecordBytesMismatch, 0U, 0U,
+                0U);
+}
+
 void TestDescriptorBytesMismatch() {
   std::vector<uint8_t> bytes = BuildRecord(kHourA);
   WriteU32(&bytes, 24U, 999U);
@@ -318,6 +359,16 @@ void TestDescriptorBytesMismatch() {
   const SdFinalizedHourScanResult result = Scan(bytes);
   ExpectFailure(result, SdFinalizedHourScanStatus::kDangerousHeader,
                 SdFinalizedHourScanFailureReason::kDescriptorBytesMismatch, 0U,
+                0U, 0U);
+}
+
+void TestBadDescriptorEntryBytes() {
+  std::vector<uint8_t> bytes = BuildRecord(kHourA);
+  WriteU16(&bytes, 18U, kSdFinalizedHourDescriptorBytes + 1U);
+  RecomputeHeaderCrc(&bytes);
+  const SdFinalizedHourScanResult result = Scan(bytes);
+  ExpectFailure(result, SdFinalizedHourScanStatus::kDangerousHeader,
+                SdFinalizedHourScanFailureReason::kBadDescriptorEntryBytes, 0U,
                 0U, 0U);
 }
 
@@ -422,6 +473,27 @@ void TestTinyScratchBufferStillStreams() {
   assert(reader.max_requested_len == kSdFinalizedHourHeaderBytes);
 }
 
+void TestNullScratchRejected() {
+  const std::vector<uint8_t> record = BuildRecord(kHourA);
+  MemoryReader reader(record);
+  const SdFinalizedHourScanResult result =
+      ScanSdFinalizedHourAppendFile(reader, nullptr, kScratchBytes);
+  ExpectFailure(result, SdFinalizedHourScanStatus::kReadError,
+                SdFinalizedHourScanFailureReason::kReadError, 0U, 0U, 0U);
+  assert(reader.read_count == 0U);
+}
+
+void TestZeroScratchSizeRejected() {
+  const std::vector<uint8_t> record = BuildRecord(kHourA);
+  MemoryReader reader(record);
+  uint8_t scratch[kScratchBytes] = {};
+  const SdFinalizedHourScanResult result =
+      ScanSdFinalizedHourAppendFile(reader, scratch, 0U);
+  ExpectFailure(result, SdFinalizedHourScanStatus::kReadError,
+                SdFinalizedHourScanFailureReason::kReadError, 0U, 0U, 0U);
+  assert(reader.read_count == 0U);
+}
+
 }  // namespace
 
 int main() {
@@ -435,13 +507,17 @@ int main() {
   TestBadMagicAfterOneValidRecord();
   TestUnsupportedVersion();
   TestBadHeaderSize();
+  TestBadSnapshotFormatVersion();
+  TestZeroHourRejected();
   TestBadHeaderCrc();
   TestBadPayloadCrc();
   TestPartialPayloadAtOffsetZero();
   TestPartialPayloadAfterOneValidRecord();
   TestRecordBytesTooSmall();
   TestRecordBytesTooLarge();
+  TestRecordBytesMismatch();
   TestDescriptorBytesMismatch();
+  TestBadDescriptorEntryBytes();
   TestFrameCountMismatch();
   TestFrameBytesMismatch();
   TestActiveSlotCountGreaterThanCapacity();
@@ -452,6 +528,8 @@ int main() {
   TestInvalidAtZeroDiffersFromCorruptTail();
   TestScannerRejectsInvalidSizesBeforePayloadReads();
   TestTinyScratchBufferStillStreams();
+  TestNullScratchRejected();
+  TestZeroScratchSizeRejected();
   std::cout << "sd_finalized_hour_recovery_test: PASS" << std::endl;
   return 0;
 }
