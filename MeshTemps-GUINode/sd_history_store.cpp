@@ -1,6 +1,7 @@
 #include "sd_history_store.h"
 
 #include "sd_finalized_hour_block.h"
+#include "sd_finalized_hour_write_coalescer.h"
 
 #include <string.h>
 #include <time.h>
@@ -13,23 +14,17 @@ constexpr size_t kFinalizedVerifyBufferBytes = 256U;
 
 struct FinalizedHourFileWriteContext {
   File* file = nullptr;
-  uint32_t bytes_written = 0;
 };
 
 bool WriteFinalizedHourFileChunk(const uint8_t* data, size_t len, void* ctx) {
   FinalizedHourFileWriteContext* write_ctx =
       static_cast<FinalizedHourFileWriteContext*>(ctx);
-  if (write_ctx == nullptr || write_ctx->file == nullptr || data == nullptr) {
-    return false;
-  }
+  if (write_ctx == nullptr || write_ctx->file == nullptr) return false;
   if (len == 0U) return true;
+  if (data == nullptr) return false;
 
   const size_t written = write_ctx->file->write(data, len);
-  if (written != len) {
-    return false;
-  }
-  write_ctx->bytes_written += static_cast<uint32_t>(written);
-  return true;
+  return written == len;
 }
 
 }  // namespace
@@ -69,20 +64,30 @@ bool SdHistoryStore::AppendFinalizedHourSnapshot(
   const uint32_t record_offset = static_cast<uint32_t>(file.position());
   FinalizedHourFileWriteContext write_ctx;
   write_ctx.file = &file;
+  uint8_t coalescer_buffer[kSdFinalizedHourWriteCoalescerBufferBytes];
+  SdFinalizedHourWriteCoalescer coalescer(WriteFinalizedHourFileChunk,
+                                          &write_ctx,
+                                          coalescer_buffer,
+                                          sizeof(coalescer_buffer));
 
   SdFinalizedHourBlockHeader header;
   SdFinalizedHourWriteStatus status;
   // Production finalized-hour writes are bounded: the codec streams header,
-  // descriptors, and frames directly to File.write() and never builds a
-  // full-record heap buffer. Read-back verification starts only after the
-  // complete record has been flushed and closed.
-  if (!WriteSdFinalizedHourBlock(snapshot, WriteFinalizedHourFileChunk,
-                                 &write_ctx, &header, &status)) {
+  // descriptors, and frames into a fixed-size coalescing sink. The coalescer is
+  // flushed before File.flush()/close(), and read-back verification starts only
+  // after the complete record has been flushed and closed.
+  if (!WriteSdFinalizedHourBlock(snapshot, SdFinalizedHourCoalescerWriteFn,
+                                 &coalescer, &header, &status)) {
     file.close();
     return false;
   }
-  if (write_ctx.bytes_written != header.record_bytes ||
-      status.bytes_written != header.record_bytes) {
+  if (status.bytes_written != header.record_bytes ||
+      coalescer.logical_bytes() != header.record_bytes) {
+    file.close();
+    return false;
+  }
+  if (!coalescer.Flush() || coalescer.failed() ||
+      coalescer.physical_bytes() != header.record_bytes) {
     file.close();
     return false;
   }
