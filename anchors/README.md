@@ -44,6 +44,8 @@ Current intended sequence after the legacy SdHistoryStore cleanup gate:
 
 If the user explicitly chooses to start Task 10D before 10C-F1/10C-F2, Task 10D must keep normal runtime SD finalization disabled or behind a reviewed compile/runtime guard. Do not enable normal hourly SD appends without finalized-file recovery behavior.
 
+This anchor index is the current workflow tie-breaker if older anchor text still says Task 10D may follow directly after Task 10C-E3V. Final integrated validation must flag any such stale direct-to-10D wording as documentation debt before merge, or confirm it has been corrected.
+
 ## Current PR caveat
 
 PR #53's body may lag behind this workstream. Treat the repository anchors and current source as authoritative over the PR body until the PR description is rewritten before final integrated review/merge.
