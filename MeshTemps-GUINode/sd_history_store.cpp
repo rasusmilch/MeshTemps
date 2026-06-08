@@ -10,7 +10,15 @@
 
 namespace {
 
-constexpr size_t kFinalizedVerifyBufferBytes = 256U;
+constexpr size_t kFinalizedHourWriteCoalescerBufferBytes = 4096U;
+constexpr size_t kFinalizedVerifyBufferBytes = 512U;
+
+// Shared finalized-hour SD I/O buffers. The owning storage/runtime service must
+// serialize finalized-hour append/verify calls: this path is single-writer and
+// non-reentrant, and must not be called concurrently or from LVGL callbacks.
+alignas(4) static uint8_t
+    g_finalized_hour_write_buffer[kFinalizedHourWriteCoalescerBufferBytes];
+alignas(4) static uint8_t g_finalized_verify_buffer[kFinalizedVerifyBufferBytes];
 
 struct FinalizedHourFileWriteContext {
   File* file = nullptr;
@@ -64,11 +72,10 @@ bool SdHistoryStore::AppendFinalizedHourSnapshot(
   const uint32_t record_offset = static_cast<uint32_t>(file.position());
   FinalizedHourFileWriteContext write_ctx;
   write_ctx.file = &file;
-  uint8_t coalescer_buffer[kSdFinalizedHourWriteCoalescerBufferBytes];
   SdFinalizedHourWriteCoalescer coalescer(WriteFinalizedHourFileChunk,
                                           &write_ctx,
-                                          coalescer_buffer,
-                                          sizeof(coalescer_buffer));
+                                          g_finalized_hour_write_buffer,
+                                          sizeof(g_finalized_hour_write_buffer));
 
   SdFinalizedHourBlockHeader header;
   SdFinalizedHourWriteStatus status;
@@ -305,18 +312,18 @@ bool SdHistoryStore::VerifyFinalizedHourRecord_(
     return false;
   }
 
-  uint8_t buffer[kFinalizedVerifyBufferBytes];
   uint32_t payload_crc = 0xFFFFFFFFu;
   uint32_t remaining = header.payload_bytes;
   while (remaining > 0U) {
-    const size_t chunk =
-        (remaining < sizeof(buffer)) ? static_cast<size_t>(remaining) : sizeof(buffer);
-    const int bytes_read = file.read(buffer, chunk);
+    const size_t chunk = (remaining < sizeof(g_finalized_verify_buffer))
+                             ? static_cast<size_t>(remaining)
+                             : sizeof(g_finalized_verify_buffer);
+    const int bytes_read = file.read(g_finalized_verify_buffer, chunk);
     if (bytes_read != static_cast<int>(chunk)) {
       file.close();
       return false;
     }
-    payload_crc = Crc32Update(payload_crc, buffer, chunk);
+    payload_crc = Crc32Update(payload_crc, g_finalized_verify_buffer, chunk);
     remaining -= static_cast<uint32_t>(chunk);
   }
 

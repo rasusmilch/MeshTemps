@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-constexpr size_t kSdFinalizedHourWriteCoalescerBufferBytes = 512U;
 
 typedef bool (*SdFinalizedHourRawWriteFn)(const uint8_t* data,
                                           size_t len,
