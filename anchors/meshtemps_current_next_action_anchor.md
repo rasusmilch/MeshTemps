@@ -17,6 +17,8 @@ They supersede older direct-to-Task-10D wording in:
 
 Do not treat older statements that Task 10D may directly follow Task 10C-E3V as current workflow guidance.
 
+`anchors/meshtemps_testing_hardening_anchor.md` is the current workflow authority for test quality. Future tasks must harden weak tests they add, touch, rely on, or cite as validation evidence. Existing tests are not grandfathered as sufficient.
+
 ## PR #53 scope
 
 PR #53 is a storage-foundation PR only. It establishes bounded current-hour staging, finalized-hour SD archive format, source/view writing, fixed-size SD write coalescing, static finalized-hour write/verify buffers, deterministic finalized paths, and cleanup of stale storage debt.
@@ -37,6 +39,12 @@ The intended next sequence is:
 ```
 
 Task 10D must not be treated as the normal next task unless the user explicitly chooses to defer recovery implementation and keep normal runtime SD finalization behind a reviewed guard.
+
+## Immediate testing gate
+
+PR #54 / Task 10C-F1 scanner readiness now includes test hardening. The scanner tests must not rely on raw `assert()` for behavior expectations before the draft PR is marked ready. Use a local explicit-check harness or equivalent, while allowing raw `assert()` only for internal fixture sanity.
+
+Before moving to Task 10C-F2 or Task 10D, validate that the scanner tests cover all public scanner failure-reason enum paths, defensive scratch-buffer rejection, corrupt-tail offset handling, and dangerous-size rejection before payload reads.
 
 ## Durability rule
 
