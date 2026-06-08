@@ -3,8 +3,8 @@
 Project: MeshTemps  
 Workstream: GUI-node history storage and chart hardening  
 Anchor purpose: Reusable requirements/constraints reference for future ChatGPT/Codex planning, execution, validation, and review tasks.  
-Status: Requirements anchor artifact; not yet committed to the repository.  
-Last updated: 2026-06-06
+Status: Committed repository anchor for PR #53 storage-foundation workstream.
+Last updated: 2026-06-08
 
 ## 1. Product requirements
 
@@ -202,11 +202,23 @@ SD writes must not run from LVGL event callbacks.
 
 SD file/block format must not depend on whether the hour was staged by RAM or FRAM.
 
+Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; finalized-hour tests should use fixed-size capture buffers rather than vector-backed full-record helpers. Finalized-hour SD path construction must not use Arduino `String`, `std::string`, `std::vector`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`calloc`/`realloc`, `new`/`delete`, or libc calendar/timezone APIs (`<ctime>`, `<time.h>`, `localtime_r`, `localtime`, `gmtime`, `gmtime_r`, `mktime`, `strftime`, `setenv`, `tzset`); use custom bounded append helpers and caller-owned fixed `char` buffers. Finalized-hour archive filenames are deterministic epoch-day buckets: `<base>/finalized/d<epoch_day>.bin`, where `epoch_day = hour_start_epoch_minute / 1440`.
+
+SD write endurance/commit rule: write the complete finalized-hour record once, flush/close it, then reopen/read back for verification with a fixed-size buffer. Do not interleave write/read verification chunks during the normal write path.
+
+Finalized-hour SD I/O buffer policy: production finalized-hour write/verify buffers must not be large task-stack or callback-stack locals. The finalized-hour write coalescer buffer must be file-scope static storage sized to 4096 bytes. The finalized-hour read-back verification buffer must be file-scope static storage sized to 512 bytes. These buffers must not use heap, PSRAM, `std::array`, `std::vector`, Arduino `String`, `std::function`, `malloc`/`calloc`/`realloc`, `new`/`delete`, or hidden dynamic allocation. PSRAM is not approved for finalized-hour SD I/O buffers unless a future task verifies the exact SD stack/DMA/backend behavior and explicitly changes this decision. Because file-scope static buffers are shared state, finalized-hour append/verify must be serialized as single-writer and non-reentrant under the owning storage/runtime service. Small fixed caller-owned path buffers may remain unless later audit finds them unsafe.
+
+`HistoryHourSnapshot` is a logical export shape, not the SD binary ABI. A pure/testable codec is encouraged, but finalized-hour APIs and tests must not depend on a vector-backed full-record encode. Diagnostic counters are metadata only; presence bits are authoritative. Existing PT100-era `SdHistoryStore` methods are not authority for the new finalized-hour format.
+
+`HistoryHourSnapshot` is also a large logical export shape. Runtime finalization must not stack-allocate `HistoryHourSnapshot` in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. Task 10D runtime integration must use the current source/view streaming writer, fixed-size SD write coalescer, and approved file-scope static finalized-hour write/verify buffers. Heap allocation, hidden statics, `malloc`/`new`, vector-backed ownership, or local stack snapshots are not acceptable substitutes for the source/view streaming path.
+
 ### Chart/query constraint
 
 Chart code must migrate away from full-history RAM copies.
 
 Chart range handling must use a storage-backed query/reduction path that streams or bounds memory use.
+
+Task 10F reader/query work must stream finalized-hour records, scan append files by record offset and `record_bytes`, validate header/payload CRCs, and reduce ranges without loading whole daily files, large record sets, or full histories into heap vectors.
 
 Range-button callbacks must remain responsive.
 
@@ -263,7 +275,12 @@ For SD writer/reader:
 - stores all 60 minute frames,
 - validates header/payload CRC/checksum,
 - detects partial/corrupt block,
-- decodes history without current live registry.
+- decodes history without current live registry,
+- checks production finalized-hour writer/verifier paths for `std::vector<uint8_t>` full-record buffering,
+- verifies production SD finalization uses bounded buffers/chunks,
+- verifies no SD write/read interleaving during commit; read-back verification happens after full write and flush/close,
+- verifies Task 10F readers stream records and do not load whole files or full histories,
+- checks finalized-hour SD path construction for Arduino `String`, `std::string`, printf-family formatting, libc calendar/timezone conversion, malloc/new, and hidden/dynamic path building.
 
 For aggregator:
 
@@ -280,18 +297,21 @@ For chart migration:
 - 1d/2d/5d/7d/30d views render without freeze,
 - missing samples do not appear as fabricated readings.
 
-For legacy RAM history isolation:
+For legacy RAM history isolation and allocation audit:
 
 - unsafe `std::vector<SensorHistorySample>::resize()` path is removed, capped, bypassed, or proven inactive for durable history,
-- misleading high-retention examples are removed or corrected.
+- misleading high-retention examples are removed or corrected,
+- production GUI-node hot paths are checked for `std::vector`, `String`, `reserve()`, `resize()`, `malloc()`, `calloc()`, `realloc()`, or `new` allocation risks, including old history vectors, chart copy paths, serial console buffers, and SD/history code.
 
 ### Command/build checks
 
 Codex tasks should run relevant compile/static checks available in the repo/environment.
 
+Task receipts must distinguish host-tested pure codec behavior from Arduino/SD wrapper behavior. Arduino/ESP32 compile and SD hardware behavior remain environment-limited unless they were actually run on the target/toolchain and reported with exact board/settings.
+
 If Arduino/ESP32 build cannot run in the environment, receipt must say so explicitly and identify what was checked instead.
 
-Host-side tests are preferred for pure binary format, CRC, slot catalog, SD block encoding/decoding, and stager behavior.
+Host-side tests are preferred for pure binary format, CRC, slot catalog, SD block encoding/decoding, and stager behavior. Finalized-hour host tests should use fixed-size capture buffers, and production firmware writer/verifier paths must use bounded streaming or fixed buffers.
 
 ### Hardware validation
 
@@ -468,7 +488,7 @@ Settled as of this anchor:
 - Temperatures are stored as fixed-point centi-C.
 - Corrected status must be preserved.
 - Chart migration must avoid full-history RAM copies.
-- Codex must do read-only planning before implementation.
+- Codex must do read-only planning before nontrivial or new architecture implementation; approved focused execute tasks and anchor-consistency updates may proceed within their explicit scope.
 
 ## 14. Provisional requirements / user decisions still needed
 
@@ -508,11 +528,33 @@ Used context:
   - `sd_history_store.h/.cpp`,
   - `history_aggregator.h/.cpp`.
 - PT100 issue #367 filed from this chat: `FramHourJournal undercounts required FRAM region by one header slot`.
+- Task 10C review finding that production finalized-hour write/read-back paths still use full-record `std::vector<uint8_t>` buffers.
+- Task 10C-R/10C-C anchor updates requiring bounded/heap-free production SD finalization, fixed-buffer finalized-hour path construction, and an allocation audit before runtime integration.
 
-Unverified:
+Current context and unverified items:
 
-- No committed MeshTemps requirements anchor was found in a quick connector search.
-- Exact latest branch state after the handoff was not revalidated from a fresh local checkout.
-- Exact current PR number/branch for the next MeshTemps work was not confirmed.
+- Anchors are now present in this repository branch and should be treated as current guidance after Task 10C-R2.
+- Local Task 10C-R2 inspection used branch `work` at head `381bdcae7a14c21092c22810a3a4041ed8a94f81`; the expected PR context is PR #53 / branch `codex/plan-backend-agnostic-current-hour-staging-architecture`.
+- The PR body is stale relative to these anchors and should be rewritten before final integrated review/merge.
 - SD card mount/write behavior on target GUI node remains hardware-unverified.
 - FRAM hardware is deferred and remains physically unverified.
+
+## 16. Non-negotiable allocation/endurance constraints
+
+These constraints gate runtime SD finalization and chart integration:
+
+- No large dynamic allocations in production finalized-hour SD writer/verifier paths.
+- Production finalized-hour write coalescer buffer must be file-scope static storage sized to 4096 bytes.
+- Production finalized-hour read-back verify buffer must be file-scope static storage sized to 512 bytes.
+- No large finalized-hour write/verify buffers may live on task stack or callback stack; the static buffers are shared and require single-writer/non-reentrant ownership.
+- PSRAM is not approved for finalized-hour SD I/O buffers unless a future task explicitly verifies and changes that decision.
+- No full-record heap buffers in production SD finalization.
+- No unbounded allocations in storage, chart, or history event paths.
+- SD finalized-hour production writes must write the complete record once, flush/close, then verify by read-back with a fixed-size buffer.
+- Verification must not be interleaved with the normal write path.
+- Vector-backed finalized-hour encoders/sinks must not remain in finalized-hour APIs, implementation, or tests; use streaming/fixed-size capture buffers instead.
+- Finalized-hour directory/file paths must be built with custom bounded append helpers and fixed caller-owned `char` buffers; no Arduino `String`, `std::string`, printf-family formatting, libc calendar/timezone conversion, malloc/new, or hidden dynamic path construction.
+- Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks; Task 10C-E1 source/view streaming, Task 10C-E2 fixed-size SD write coalescing, and Task 10C-E2-A static finalized-hour SD buffer correction must precede Task 10D runtime integration.
+- Stale pre-roadmap MeshTemps `history_aggregator.h/.cpp` must not be copied forward; Task 10D must be built fresh from the current bounded stager/source-view/finalized-hour SD writer model and must preserve immediate mid-hour sensor discovery.
+- Allocation audit must be completed before enabling runtime SD finalization from the aggregator path.
+- The allocation audit must include legacy `std::vector<SensorHistorySample>` history, chart/history copy paths, `SerialConsole` `String`/`std::vector` buffers, remaining `SdHistoryStore` Arduino `File` usage, verification that old `SdHistoryStore` direct-struct write paths remain absent after Task 10C-E3, and production `std::vector`/`String`/`reserve()`/`resize()`/`malloc()`/`calloc()`/`realloc()`/`new` patterns in MeshTemps-GUINode application code.

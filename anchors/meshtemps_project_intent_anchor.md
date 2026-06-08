@@ -3,8 +3,8 @@
 Project: MeshTemps  
 Area: GUI-node history storage and chart hardening  
 Anchor purpose: Guide future ChatGPT/Codex planning, execution, and validation tasks.  
-Status: Intent anchor artifact; not yet committed to the repository.  
-Last updated: 2026-06-06
+Status: Committed repository anchor for PR #53 storage-foundation workstream.
+Last updated: 2026-06-08
 
 ## 1. Project purpose
 
@@ -126,7 +126,24 @@ SD finalized-hour storage must:
 - store raw minute-level data as authoritative history,
 - optionally store derived indexes/rollups only as rebuildable acceleration data,
 - verify writes where practical,
-- remain decodable even if FRAM/NVS/current labels are lost.
+- remain decodable even if FRAM/NVS/current labels are lost,
+- use **heap-free SD finalization** in production: no large dynamic allocations and no full-record heap buffers in the finalized-hour writer or read-back verifier.
+
+Production heap-free SD finalization means:
+
+```text
+live/staged snapshot
+  -> streaming finalized-hour encoder
+  -> bounded File.write chunks
+  -> flush/close completed record
+  -> reopen/read-back verification with a fixed-size buffer
+```
+
+Read-back verification must happen after the complete SD record has been written and flushed/closed. Do not interleave write/read/verify chunks during the normal write path. Finalized-hour encoders and tests should use streaming or fixed-size capture buffers; do not preserve vector-backed finalized-hour full-record helpers as an API or test pattern. Finalized-hour SD path construction must also use custom bounded append helpers with caller-owned fixed `char` buffers: no Arduino `String`, `std::string`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`new`, libc calendar/timezone conversion, or hidden/dynamic path building. Finalized-hour archive files use deterministic epoch-day buckets: `epoch_day = hour_start_epoch_minute / 1440`, with filename format `<base>/finalized/d<epoch_day>.bin`; display/local date conversion belongs to future UI/query code.
+
+Current-hour RAM/FRAM staging must stay bounded, and SD finalization must also stay bounded. Do not call SD finalization from LVGL callbacks. Do not hold mesh/history locks across SD I/O.
+
+Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. The source/view streaming writer, fixed-size SD write coalescer, and file-scope static finalized-hour write/verify buffers are the required storage foundation for Task 10D runtime integration.
 
 Mesh churn is expected:
 
@@ -142,7 +159,7 @@ The current GUI history implementation has used a per-sensor `std::vector<MeshNo
 
 The current sample object has contained monotonic milliseconds, optional epoch, float temperature, and flags. It has been observed to occupy 24 bytes per sample on ESP32-S3.
 
-The known failure mode is a panic when the GUI node attempts to resize per-sensor history vectors under unsafe history settings. The failure path is through `MaybeLogHistorySample()` and `std::vector<MeshNode::SensorHistorySample>::resize()`.
+The known failure mode is a panic when the GUI node attempts to resize per-sensor history vectors under unsafe history settings. The failure path is through `MaybeLogHistorySample()` and `std::vector<MeshNode::SensorHistorySample>::resize()`. Legacy per-sensor `std::vector` history remains a known allocation hazard until isolated, bypassed, or removed from the durable-history path.
 
 Chart range buttons previously froze the UI with more than roughly one day of history. Earlier work added fake-history diagnostics, chart-series preparation seams, and ring-buffer helpers, but the storage allocation model remains the larger blocker.
 
@@ -169,6 +186,8 @@ Do not use `node_id` alone as durable sensor identity.
 Do not mix sensor descriptor/catalog records into a wrapping sample ring.
 
 Do not write every mesh packet to SD. SD receives finalized batches from the current-hour stager.
+
+Do not implement production SD finalized-hour writing by building a complete `std::vector<uint8_t>` record before writing, or by reading a complete finalized-hour record into a heap vector for verification. That pattern is deprecated; finalized-hour tests should use fixed-size capture buffers instead of vector-backed full-record helpers. Do not use Arduino `String` concatenation, printf-family formatting, or libc calendar/timezone conversion for finalized-hour directory/file path construction.
 
 Do not hold mesh/history locks during long storage I/O.
 
@@ -438,12 +457,11 @@ Available context references:
 - PT100 bug filed from this chat: issue #367, `FramHourJournal undercounts required FRAM region by one header slot`.
 - Prior generated but not repo-confirmed roadmap artifact: `meshtemps_history_chart_roadmap_anchor.md`.
 
-Unverified repository anchors:
+Repository anchor status:
 
-- No committed MeshTemps project intent anchor was found in a quick connector search.
-- The prior roadmap anchor was reported by handoff as a downloadable artifact and not present in the repository at that time.
-- A formal validation ledger anchor was not found or inspected in this pass.
-- A decision log anchor was not found or inspected in this pass.
+- This file is now present in the MeshTemps repository under `anchors/` and is current guidance for PR #53 / branch `codex/plan-backend-agnostic-current-hour-staging-architecture` as of local head `381bdcae7a14c21092c22810a3a4041ed8a94f81` inspected for Task 10C-R2.
+- The PR body may lag behind this workstream and should be rewritten before final integrated review/merge.
+- A formal validation ledger anchor and decision log anchor were not found or inspected in this pass.
 
 ## 15. Last updated context
 
@@ -462,6 +480,8 @@ This anchor used:
   - MeshTemps GUI receive path for `tC` and `corr`.
   - Waveshare ESP32-S3-Touch-LCD-7 board config showing shared I²C bus on GPIO8/GPIO9.
   - PT100_Mesh_Datalogger FRAM/SD storage files.
+  - Task 10C review finding that production `SdHistoryStore` finalized-hour write/read-back paths still allocate full-record `std::vector<uint8_t>` buffers.
+  - Task 10C-R/10C-C/10C-D/10C-E* updates requiring heap-free finalized-hour SD finalization, deterministic epoch-day paths, source/view streaming, fixed-size coalescing, and Task 10C-E2-A static buffer correction before Task 10D runtime aggregation.
 
 Current unresolved assumptions:
 
@@ -471,28 +491,21 @@ Current unresolved assumptions:
 
 ## 16. Next recommended Codex workflow
 
-Next Codex task should be read-only planning.
+Current Task 10C storage-foundation status: Tasks through 10C-E2/10C-E2-A have completed targeted validation for the finalized-hour source/view writer, coalesced SD writes, and file-scope static finalized-hour write/verify buffers. Task 10C-E3 removes the remaining legacy non-finalized `SdHistoryStore` minute/hourly/daily/rollup APIs so Task 10D cannot accidentally copy those old PT100-era storage patterns.
 
-Recommended task title:
+Do **not** start Task 10D until Task 10C-E3 receives targeted validation.
+
+Immediate next checkpoint after Task 10C-E3 implementation:
 
 ```text
-Task 10A — Plan backend-agnostic current-hour staging and SD finalized-hour history architecture
+Task 10C-E3V — Targeted validation for legacy non-finalized SdHistoryStore debt removal
 ```
 
-The task should require Codex to inspect the latest MeshTemps snapshot and the PT100_Mesh_Datalogger template directly, then produce a narrow implementation roadmap.
+Task 10C-E3V must confirm:
 
-The plan must account for:
+- old `SdHistoryStore` minute/hourly/daily/rollup public APIs and private direct-struct helpers are absent;
+- `sd_history_store.h/.cpp` no longer explicitly use Arduino `String`, `std::function`, `std::vector`, libc calendar/time conversion, printf-family path formatting, or heap allocation patterns;
+- finalized-hour behavior remains intact: `AppendFinalizedHourSnapshot()`, file-scope static 4096-byte write buffer, file-scope static 512-byte verify buffer, bounded finalized path helpers, and complete-write -> coalescer flush -> `file.flush()` -> `file.close()` -> read-back verification order;
+- no Task 10D runtime aggregator, chart, FRAM, reader/query, retention, serial-command, or broad allocation-audit work was introduced.
 
-- RAM-first `RamHourStager`,
-- backend-agnostic `IHistoryHourStager` or equivalent seam,
-- later optional `FramHourStager`,
-- 64-slot current-hour cap,
-- protected slot catalog,
-- fixed current-hour minute frames,
-- mid-hour sensor discovery,
-- corrected-temperature bitmap,
-- SD self-describing finalized hour blocks,
-- raw SD blocks as authoritative,
-- no long-term RAM or FRAM history,
-- chart migration away from RAM history vectors,
-- recovery and checkpoint validation.
+After Task 10C-E3V passes, the next execute task may be Task 10D runtime aggregation. Task 10D must be built fresh from the current `RamHourStager` / source-view finalized-hour writer / finalized-hour `SdHistoryStore` path and must not resurrect deleted `history_aggregator.h/.cpp` or the removed non-finalized `SdHistoryStore` APIs.
