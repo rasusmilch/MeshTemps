@@ -1,10 +1,10 @@
 # MeshTemps Current Next Action Anchor
 
-Project: MeshTemps  
-Workstream: GUI-node history storage and chart hardening  
-Anchor purpose: Current near-term sequencing for PR #53 and the next PR.  
-Status: Committed repository anchor for PR #53 storage-foundation workstream.  
-Last updated: 2026-06-08
+Project: MeshTemps
+Workstream: GUI-node history storage and chart hardening
+Anchor purpose: Current near-term sequencing for PR #53 and the next PR.
+Status: Committed repository anchor after PR #54 scanner merge; current work is split 10C-F2 recovery.
+Last updated: 2026-06-09
 
 ## Authority
 
@@ -31,10 +31,12 @@ The intended next sequence is:
 
 ```text
 10C-F0 read-only SD recovery plan
-  -> 10C-F1 finalized-hour append-file scanner / validation service
-  -> 10C-F1 validation
-  -> 10C-F2 safe tail repair or quarantine policy
-  -> 10C-F2 validation
+  -> 10C-F1 finalized-hour append-file scanner / validation service (merged in PR #54)
+  -> 10C-F2-A non-destructive recovery policy seam and append-safety classifier
+  -> 10C-F2-A validation
+  -> 10C-F2-B approved repair/quarantine/fault implementation
+  -> 10C-F2-C runtime integration / append guard
+  -> 10C-F2V recovery validation
   -> 10D runtime HistoryAggregator snapshot path
 ```
 
@@ -42,15 +44,15 @@ Task 10D must not be treated as the normal next task unless the user explicitly 
 
 ## Immediate testing gate
 
-PR #54 / Task 10C-F1 scanner readiness now includes test hardening. The scanner tests must not rely on raw `assert()` for behavior expectations before the draft PR is marked ready. Use a local explicit-check harness or equivalent, while allowing raw `assert()` only for internal fixture sanity.
+PR #54 / Task 10C-F1 scanner work is merged. Its scanner tests use an explicit-check harness and cover the public scanner failure-reason paths needed before split 10C-F2 work.
 
-Before moving to Task 10C-F2 or Task 10D, validate that the scanner tests cover all public scanner failure-reason enum paths, defensive scratch-buffer rejection, corrupt-tail offset handling, and dangerous-size rejection before payload reads.
+Before moving from 10C-F2-A into mutating repair/quarantine work, validate that the non-destructive policy seam blocks append for every non-clean scanner status and that no automatic repair/truncate/remove/rename/quarantine behavior was added.
 
 ## Durability rule
 
 Power interruption during FAT32 append/write/flush/close is expected. The current finalized-hour append path verifies clean write/flush/close behavior, but it does not by itself define append-file recovery after an interrupted write.
 
-Before normal runtime SD finalization is enabled, the project needs the recovery scanner and repair/quarantine policy described in `anchors/meshtemps_sd_durability_recovery_anchor.md`, or the runtime path must remain guarded so it cannot perform normal SD finalization.
+Before normal runtime SD finalization is enabled, the project needs the recovery scanner plus approved repair/quarantine/fault behavior described in `anchors/meshtemps_sd_durability_recovery_anchor.md`, or the runtime path must remain guarded so it cannot perform normal SD finalization. 10C-F2-A is intentionally non-destructive and does not approve automatic repair.
 
 ## Final validation requirement before merge
 
