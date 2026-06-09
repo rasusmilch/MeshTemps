@@ -3,7 +3,6 @@
 #include "sd_finalized_hour_recovery.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -16,6 +15,47 @@ constexpr uint32_t kHourA = 30000000U;
 constexpr uint32_t kHourB = kHourA + 60U;
 constexpr size_t kScratchBytes = 17U;
 constexpr size_t kHeaderCrcOffset = 36U;
+
+
+struct TestHarness {
+  const char* current_test = nullptr;
+  uint32_t failures = 0;
+};
+
+TestHarness g_test;
+
+bool CheckTrue(bool condition, const char* expr, const char* file, int line) {
+  if (condition) return true;
+  std::cerr << file << ":" << line;
+  if (g_test.current_test != nullptr) {
+    std::cerr << " in " << g_test.current_test;
+  }
+  std::cerr << ": CHECK_TRUE failed: " << expr << std::endl;
+  ++g_test.failures;
+  return false;
+}
+
+template <typename Actual, typename Expected>
+bool CheckEq(const Actual& actual,
+             const Expected& expected,
+             const char* actual_expr,
+             const char* expected_expr,
+             const char* file,
+             int line) {
+  if (actual == expected) return true;
+  std::cerr << file << ":" << line;
+  if (g_test.current_test != nullptr) {
+    std::cerr << " in " << g_test.current_test;
+  }
+  std::cerr << ": CHECK_EQ failed: " << actual_expr << " != "
+            << expected_expr << std::endl;
+  ++g_test.failures;
+  return false;
+}
+
+#define CHECK_TRUE(expr) CheckTrue(static_cast<bool>(expr), #expr, __FILE__, __LINE__)
+#define CHECK_EQ(actual, expected) \
+  CheckEq((actual), (expected), #actual, #expected, __FILE__, __LINE__)
 
 class MemoryReader final : public ISdFinalizedHourByteReader {
  public:
@@ -63,14 +103,14 @@ bool VectorSink(const uint8_t* data, size_t len, void* ctx) {
 }
 
 void WriteU16(std::vector<uint8_t>* bytes, size_t offset, uint16_t value) {
-  assert(bytes != nullptr);
-  assert(offset + 2U <= bytes->size());
+  if (!CHECK_TRUE(bytes != nullptr)) return;
+  if (!CHECK_TRUE(offset + 2U <= bytes->size())) return;
   (*bytes)[offset] = static_cast<uint8_t>(value & 0xFFU);
   (*bytes)[offset + 1U] = static_cast<uint8_t>((value >> 8U) & 0xFFU);
 }
 
 uint32_t ReadU32(const std::vector<uint8_t>& bytes, size_t offset) {
-  assert(offset + 4U <= bytes.size());
+  if (!CHECK_TRUE(offset + 4U <= bytes.size())) return 0U;
   uint32_t value = 0;
   for (uint8_t i = 0; i < 4U; ++i) {
     value |= static_cast<uint32_t>(bytes[offset + i]) << (8U * i);
@@ -79,16 +119,18 @@ uint32_t ReadU32(const std::vector<uint8_t>& bytes, size_t offset) {
 }
 
 void WriteU32(std::vector<uint8_t>* bytes, size_t offset, uint32_t value) {
-  assert(bytes != nullptr);
-  assert(offset + 4U <= bytes->size());
+  if (!CHECK_TRUE(bytes != nullptr)) return;
+  if (!CHECK_TRUE(offset + 4U <= bytes->size())) return;
   for (uint8_t i = 0; i < 4U; ++i) {
     (*bytes)[offset + i] = static_cast<uint8_t>((value >> (8U * i)) & 0xFFU);
   }
 }
 
 void RecomputeHeaderCrc(std::vector<uint8_t>* bytes, size_t record_offset = 0U) {
-  assert(bytes != nullptr);
-  assert(record_offset + kSdFinalizedHourHeaderBytes <= bytes->size());
+  if (!CHECK_TRUE(bytes != nullptr)) return;
+  if (!CHECK_TRUE(record_offset + kSdFinalizedHourHeaderBytes <= bytes->size())) {
+    return;
+  }
   for (uint8_t i = 0; i < sizeof(uint32_t); ++i) {
     (*bytes)[record_offset + kHeaderCrcOffset + i] = 0U;
   }
@@ -99,19 +141,26 @@ void RecomputeHeaderCrc(std::vector<uint8_t>* bytes, size_t record_offset = 0U) 
 
 std::vector<uint8_t> BuildRecord(uint32_t hour_start_epoch_minute) {
   RamHourStager stager;
-  assert(stager.ResetHour(hour_start_epoch_minute));
-  assert(stager.RecordSample("2800000000000060", 0x10000001U, 0U, 12.34f,
-                             true));
-  assert(stager.RecordSample("2800000000000061", 0x20000002U, 20U, 21.25f,
-                             false));
-  assert(stager.RecordSample("2800000000000061", 0x20000002U, 21U, 21.50f,
-                             true));
+  bool fixture_ok = true;
+  fixture_ok = CHECK_TRUE(stager.ResetHour(hour_start_epoch_minute)) && fixture_ok;
+  fixture_ok = CHECK_TRUE(stager.RecordSample("2800000000000060", 0x10000001U,
+                                               0U, 12.34f, true)) &&
+               fixture_ok;
+  fixture_ok = CHECK_TRUE(stager.RecordSample("2800000000000061", 0x20000002U,
+                                               20U, 21.25f, false)) &&
+               fixture_ok;
+  fixture_ok = CHECK_TRUE(stager.RecordSample("2800000000000061", 0x20000002U,
+                                               21U, 21.50f, true)) &&
+               fixture_ok;
+  if (!fixture_ok) return {};
 
   std::vector<uint8_t> bytes;
   RamHourStagerFinalizedHourSource source(stager);
-  assert(WriteSdFinalizedHourBlock(source, VectorSink, &bytes));
-  assert(VerifySdFinalizedHourBlock(bytes.data(), bytes.size()));
-  return bytes;
+  fixture_ok = CHECK_TRUE(WriteSdFinalizedHourBlock(source, VectorSink, &bytes)) &&
+               fixture_ok;
+  fixture_ok = CHECK_TRUE(VerifySdFinalizedHourBlock(bytes.data(), bytes.size())) &&
+               fixture_ok;
+  return fixture_ok ? bytes : std::vector<uint8_t>{};
 }
 
 std::vector<uint8_t> AppendBytes(std::vector<uint8_t> a,
@@ -130,17 +179,17 @@ void ExpectClean(const SdFinalizedHourScanResult& result,
                  uint32_t record_count,
                  uint64_t expected_offset,
                  uint32_t last_hour) {
-  assert(result.status == SdFinalizedHourScanStatus::kClean);
-  assert(result.first_failure_reason == SdFinalizedHourScanFailureReason::kNone);
-  assert(result.valid_record_count == record_count);
-  assert(result.last_good_offset == expected_offset);
-  assert(result.first_bad_offset == expected_offset);
-  assert(result.expected_next_offset == expected_offset);
-  assert(result.last_valid_hour_start_epoch_minute == last_hour);
-  assert(!result.saw_partial_header);
-  assert(!result.saw_partial_payload);
-  assert(!result.saw_bad_header_crc);
-  assert(!result.saw_bad_payload_crc);
+  CHECK_EQ(result.status, SdFinalizedHourScanStatus::kClean);
+  CHECK_EQ(result.first_failure_reason, SdFinalizedHourScanFailureReason::kNone);
+  CHECK_EQ(result.valid_record_count, record_count);
+  CHECK_EQ(result.last_good_offset, expected_offset);
+  CHECK_EQ(result.first_bad_offset, expected_offset);
+  CHECK_EQ(result.expected_next_offset, expected_offset);
+  CHECK_EQ(result.last_valid_hour_start_epoch_minute, last_hour);
+  CHECK_TRUE(!result.saw_partial_header);
+  CHECK_TRUE(!result.saw_partial_payload);
+  CHECK_TRUE(!result.saw_bad_header_crc);
+  CHECK_TRUE(!result.saw_bad_payload_crc);
 }
 
 void ExpectFailure(const SdFinalizedHourScanResult& result,
@@ -149,19 +198,19 @@ void ExpectFailure(const SdFinalizedHourScanResult& result,
                    uint32_t record_count,
                    uint64_t last_good_offset,
                    uint64_t first_bad_offset) {
-  assert(result.status == status);
-  assert(result.first_failure_reason == reason);
-  assert(result.valid_record_count == record_count);
-  assert(result.last_good_offset == last_good_offset);
-  assert(result.first_bad_offset == first_bad_offset);
-  assert(result.expected_next_offset == last_good_offset);
-  assert(result.saw_partial_header ==
+  CHECK_EQ(result.status, status);
+  CHECK_EQ(result.first_failure_reason, reason);
+  CHECK_EQ(result.valid_record_count, record_count);
+  CHECK_EQ(result.last_good_offset, last_good_offset);
+  CHECK_EQ(result.first_bad_offset, first_bad_offset);
+  CHECK_EQ(result.expected_next_offset, last_good_offset);
+  CHECK_TRUE(result.saw_partial_header ==
          (reason == SdFinalizedHourScanFailureReason::kPartialHeader));
-  assert(result.saw_partial_payload ==
+  CHECK_TRUE(result.saw_partial_payload ==
          (reason == SdFinalizedHourScanFailureReason::kPartialPayload));
-  assert(result.saw_bad_header_crc ==
+  CHECK_TRUE(result.saw_bad_header_crc ==
          (reason == SdFinalizedHourScanFailureReason::kBadHeaderCrc));
-  assert(result.saw_bad_payload_crc ==
+  CHECK_TRUE(result.saw_bad_payload_crc ==
          (reason == SdFinalizedHourScanFailureReason::kBadPayloadCrc));
 }
 
@@ -173,18 +222,18 @@ void ExpectCorruptTailAfterPrefix(
   const SdFinalizedHourScanResult result = Scan(bytes);
   ExpectFailure(result, SdFinalizedHourScanStatus::kCorruptTail, reason, 1U,
                 valid_prefix.size(), valid_prefix.size());
-  assert(result.last_valid_hour_start_epoch_minute == kHourA);
+  CHECK_EQ(result.last_valid_hour_start_epoch_minute, kHourA);
 }
 
 void TestEmptyFile() {
   const std::vector<uint8_t> bytes;
   const SdFinalizedHourScanResult result = Scan(bytes);
-  assert(result.status == SdFinalizedHourScanStatus::kEmpty);
-  assert(result.first_failure_reason == SdFinalizedHourScanFailureReason::kNone);
-  assert(result.valid_record_count == 0U);
-  assert(result.last_good_offset == 0U);
-  assert(result.first_bad_offset == 0U);
-  assert(result.expected_next_offset == 0U);
+  CHECK_EQ(result.status, SdFinalizedHourScanStatus::kEmpty);
+  CHECK_EQ(result.first_failure_reason, SdFinalizedHourScanFailureReason::kNone);
+  CHECK_EQ(result.valid_record_count, 0U);
+  CHECK_EQ(result.last_good_offset, 0U);
+  CHECK_EQ(result.first_bad_offset, 0U);
+  CHECK_EQ(result.expected_next_offset, 0U);
 }
 
 void TestOneValidRecord() {
@@ -210,7 +259,7 @@ void TestValidRecordsFollowedByCleanEof() {
   const SdFinalizedHourScanResult result =
       ScanSdFinalizedHourAppendFile(reader, scratch, sizeof(scratch));
   ExpectClean(result, 2U, bytes.size(), kHourB);
-  assert(reader.read_count > 2U);
+  CHECK_TRUE(reader.read_count > 2U);
 }
 
 void TestPartialHeaderAtOffsetZero() {
@@ -336,14 +385,14 @@ void TestRecordBytesTooLarge() {
   ExpectFailure(result, SdFinalizedHourScanStatus::kDangerousHeader,
                 SdFinalizedHourScanFailureReason::kRecordBytesTooLarge, 0U, 0U,
                 0U);
-  assert(reader.max_requested_len == kSdFinalizedHourHeaderBytes);
+  CHECK_EQ(reader.max_requested_len, kSdFinalizedHourHeaderBytes);
 }
 
 void TestRecordBytesMismatch() {
   std::vector<uint8_t> bytes = BuildRecord(kHourA);
   const uint32_t record_bytes = ReadU32(bytes, 8U);
-  assert(record_bytes >= kSdFinalizedHourHeaderBytes);
-  assert(record_bytes < kSdFinalizedHourMaxRecordBytes);
+  CHECK_TRUE(record_bytes >= kSdFinalizedHourHeaderBytes);
+  CHECK_TRUE(record_bytes < kSdFinalizedHourMaxRecordBytes);
   WriteU32(&bytes, 8U, record_bytes + 1U);
   RecomputeHeaderCrc(&bytes);
   const SdFinalizedHourScanResult result = Scan(bytes);
@@ -442,7 +491,7 @@ void TestInvalidAtZeroDiffersFromCorruptTail() {
   WriteU32(&invalid_first, 0U, 0x11111111U);
   RecomputeHeaderCrc(&invalid_first);
   const SdFinalizedHourScanResult invalid = Scan(invalid_first);
-  assert(invalid.status == SdFinalizedHourScanStatus::kInvalidAtZero);
+  CHECK_EQ(invalid.status, SdFinalizedHourScanStatus::kInvalidAtZero);
 
   const std::vector<uint8_t> record = BuildRecord(kHourA);
   ExpectCorruptTailAfterPrefix(
@@ -460,7 +509,7 @@ void TestScannerRejectsInvalidSizesBeforePayloadReads() {
   ExpectFailure(result, SdFinalizedHourScanStatus::kDangerousHeader,
                 SdFinalizedHourScanFailureReason::kPayloadBytesMismatch, 0U,
                 0U, 0U);
-  assert(reader.max_requested_len == kSdFinalizedHourHeaderBytes);
+  CHECK_EQ(reader.max_requested_len, kSdFinalizedHourHeaderBytes);
 }
 
 void TestTinyScratchBufferStillStreams() {
@@ -470,7 +519,7 @@ void TestTinyScratchBufferStillStreams() {
   const SdFinalizedHourScanResult result =
       ScanSdFinalizedHourAppendFile(reader, scratch, sizeof(scratch));
   ExpectClean(result, 1U, record.size(), kHourA);
-  assert(reader.max_requested_len == kSdFinalizedHourHeaderBytes);
+  CHECK_EQ(reader.max_requested_len, kSdFinalizedHourHeaderBytes);
 }
 
 void TestNullScratchRejected() {
@@ -480,7 +529,7 @@ void TestNullScratchRejected() {
       ScanSdFinalizedHourAppendFile(reader, nullptr, kScratchBytes);
   ExpectFailure(result, SdFinalizedHourScanStatus::kReadError,
                 SdFinalizedHourScanFailureReason::kReadError, 0U, 0U, 0U);
-  assert(reader.read_count == 0U);
+  CHECK_EQ(reader.read_count, 0U);
 }
 
 void TestZeroScratchSizeRejected() {
@@ -491,45 +540,63 @@ void TestZeroScratchSizeRejected() {
       ScanSdFinalizedHourAppendFile(reader, scratch, 0U);
   ExpectFailure(result, SdFinalizedHourScanStatus::kReadError,
                 SdFinalizedHourScanFailureReason::kReadError, 0U, 0U, 0U);
-  assert(reader.read_count == 0U);
+  CHECK_EQ(reader.read_count, 0U);
 }
 
 }  // namespace
 
+void RunTest(const char* name, void (*test_fn)()) {
+  const uint32_t failures_before = g_test.failures;
+  g_test.current_test = name;
+  test_fn();
+  if (g_test.failures == failures_before) {
+    std::cout << name << ": PASS" << std::endl;
+  } else {
+    std::cerr << name << ": FAIL" << std::endl;
+  }
+  g_test.current_test = nullptr;
+}
+
 int main() {
-  TestEmptyFile();
-  TestOneValidRecord();
-  TestMultipleValidRecords();
-  TestValidRecordsFollowedByCleanEof();
-  TestPartialHeaderAtOffsetZero();
-  TestPartialHeaderAfterOneValidRecord();
-  TestBadMagicAtOffsetZero();
-  TestBadMagicAfterOneValidRecord();
-  TestUnsupportedVersion();
-  TestBadHeaderSize();
-  TestBadSnapshotFormatVersion();
-  TestZeroHourRejected();
-  TestBadHeaderCrc();
-  TestBadPayloadCrc();
-  TestPartialPayloadAtOffsetZero();
-  TestPartialPayloadAfterOneValidRecord();
-  TestRecordBytesTooSmall();
-  TestRecordBytesTooLarge();
-  TestRecordBytesMismatch();
-  TestDescriptorBytesMismatch();
-  TestBadDescriptorEntryBytes();
-  TestFrameCountMismatch();
-  TestFrameBytesMismatch();
-  TestActiveSlotCountGreaterThanCapacity();
-  TestGarbageBytesAfterValidRecord();
-  TestReadErrorWhileReadingHeader();
-  TestReadErrorWhileReadingPayload();
-  TestCorruptTailOffsetsForBadPayloadCrc();
-  TestInvalidAtZeroDiffersFromCorruptTail();
-  TestScannerRejectsInvalidSizesBeforePayloadReads();
-  TestTinyScratchBufferStillStreams();
-  TestNullScratchRejected();
-  TestZeroScratchSizeRejected();
+  RunTest("TestEmptyFile", TestEmptyFile);
+  RunTest("TestOneValidRecord", TestOneValidRecord);
+  RunTest("TestMultipleValidRecords", TestMultipleValidRecords);
+  RunTest("TestValidRecordsFollowedByCleanEof", TestValidRecordsFollowedByCleanEof);
+  RunTest("TestPartialHeaderAtOffsetZero", TestPartialHeaderAtOffsetZero);
+  RunTest("TestPartialHeaderAfterOneValidRecord", TestPartialHeaderAfterOneValidRecord);
+  RunTest("TestBadMagicAtOffsetZero", TestBadMagicAtOffsetZero);
+  RunTest("TestBadMagicAfterOneValidRecord", TestBadMagicAfterOneValidRecord);
+  RunTest("TestUnsupportedVersion", TestUnsupportedVersion);
+  RunTest("TestBadHeaderSize", TestBadHeaderSize);
+  RunTest("TestBadSnapshotFormatVersion", TestBadSnapshotFormatVersion);
+  RunTest("TestZeroHourRejected", TestZeroHourRejected);
+  RunTest("TestBadHeaderCrc", TestBadHeaderCrc);
+  RunTest("TestBadPayloadCrc", TestBadPayloadCrc);
+  RunTest("TestPartialPayloadAtOffsetZero", TestPartialPayloadAtOffsetZero);
+  RunTest("TestPartialPayloadAfterOneValidRecord", TestPartialPayloadAfterOneValidRecord);
+  RunTest("TestRecordBytesTooSmall", TestRecordBytesTooSmall);
+  RunTest("TestRecordBytesTooLarge", TestRecordBytesTooLarge);
+  RunTest("TestRecordBytesMismatch", TestRecordBytesMismatch);
+  RunTest("TestDescriptorBytesMismatch", TestDescriptorBytesMismatch);
+  RunTest("TestBadDescriptorEntryBytes", TestBadDescriptorEntryBytes);
+  RunTest("TestFrameCountMismatch", TestFrameCountMismatch);
+  RunTest("TestFrameBytesMismatch", TestFrameBytesMismatch);
+  RunTest("TestActiveSlotCountGreaterThanCapacity", TestActiveSlotCountGreaterThanCapacity);
+  RunTest("TestGarbageBytesAfterValidRecord", TestGarbageBytesAfterValidRecord);
+  RunTest("TestReadErrorWhileReadingHeader", TestReadErrorWhileReadingHeader);
+  RunTest("TestReadErrorWhileReadingPayload", TestReadErrorWhileReadingPayload);
+  RunTest("TestCorruptTailOffsetsForBadPayloadCrc", TestCorruptTailOffsetsForBadPayloadCrc);
+  RunTest("TestInvalidAtZeroDiffersFromCorruptTail", TestInvalidAtZeroDiffersFromCorruptTail);
+  RunTest("TestScannerRejectsInvalidSizesBeforePayloadReads", TestScannerRejectsInvalidSizesBeforePayloadReads);
+  RunTest("TestTinyScratchBufferStillStreams", TestTinyScratchBufferStillStreams);
+  RunTest("TestNullScratchRejected", TestNullScratchRejected);
+  RunTest("TestZeroScratchSizeRejected", TestZeroScratchSizeRejected);
+
+  if (g_test.failures != 0U) {
+    std::cerr << "sd_finalized_hour_recovery_test: FAIL ("
+              << g_test.failures << " check failures)" << std::endl;
+    return 1;
+  }
   std::cout << "sd_finalized_hour_recovery_test: PASS" << std::endl;
   return 0;
 }
