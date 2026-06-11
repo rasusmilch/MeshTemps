@@ -1,10 +1,10 @@
 # MeshTemps Anchor Index
 
-Project: MeshTemps  
-Workstream: GUI-node history storage and chart hardening  
-Purpose: Quick entry point for future ChatGPT/Codex planning, execution, validation, and review tasks.  
-Status: Committed repository anchor index for PR #53 storage-foundation workstream.  
-Last updated: 2026-06-08
+Project: MeshTemps
+Workstream: GUI-node history storage and chart hardening
+Purpose: Quick entry point for future ChatGPT/Codex planning, execution, validation, and review tasks.
+Status: Committed repository anchor index for PR #54 scanner merge and split 10C-F2 recovery workstream.
+Last updated: 2026-06-09
 
 ## Required anchor reading order
 
@@ -37,10 +37,12 @@ Current intended sequence after PR #53 merge:
 
 ```text
 10C-F0 read-only SD recovery plan
-  -> 10C-F1 finalized-hour append-file scanner / validation service
-  -> 10C-F1 validation
-  -> 10C-F2 safe tail repair or quarantine policy
-  -> 10C-F2 validation
+  -> 10C-F1 finalized-hour append-file scanner / validation service (merged in PR #54)
+  -> 10C-F2-A non-destructive recovery policy seam and append-safety classifier
+  -> 10C-F2-A validation
+  -> 10C-F2-B approved repair/quarantine/fault implementation
+  -> 10C-F2-C runtime integration / append guard
+  -> 10C-F2V recovery validation
   -> 10D runtime HistoryAggregator snapshot path
 ```
 

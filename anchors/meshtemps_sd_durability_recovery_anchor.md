@@ -1,10 +1,10 @@
 # MeshTemps SD Durability and Recovery Anchor
 
-Project: MeshTemps  
-Workstream: GUI-node history storage and chart hardening  
-Anchor purpose: Durable SD finalized-hour recovery guidance for future ChatGPT/Codex planning, execution, validation, and review tasks.  
-Status: Committed repository anchor for PR #53 storage-foundation workstream.  
-Last updated: 2026-06-08
+Project: MeshTemps
+Workstream: GUI-node history storage and chart hardening
+Anchor purpose: Durable SD finalized-hour recovery guidance for future ChatGPT/Codex planning, execution, validation, and review tasks.
+Status: Committed repository anchor after PR #54 scanner merge; current recovery work is split across 10C-F2 subtasks.
+Last updated: 2026-06-09
 
 ## 1. Why this anchor exists
 
@@ -231,8 +231,8 @@ If the user chooses to start Task 10D before recovery implementation, Task 10D m
 
 ## 10. Task 10C-F0 — read-only SD recovery plan
 
-Type: read-only planning task.  
-Risk: high.  
+Type: read-only planning task.
+Risk: high.
 Dependency: Task 10C-E3V complete.
 
 Scope:
@@ -263,7 +263,7 @@ Acceptance:
 
 ## 11. Task 10C-F1 — finalized-hour append-file scanner
 
-Type: focused execute after 10C-F0 approval.  
+Type: focused execute after 10C-F0 approval.
 Risk: high; checkpoint validation required.
 
 Scope:
@@ -291,40 +291,68 @@ Acceptance:
 
 ## 12. Task 10C-F2 — safe tail repair or quarantine
 
-Type: focused execute after 10C-F1 validation.  
+Type: split execute sequence after PR #54 / 10C-F1 scanner merge.
 Risk: high; checkpoint validation and hardware validation required before declaring durability complete.
 
-Scope:
+Current split sequence:
 
-- Implement the approved 10C-F0 repair policy.
-- Prefer truncate if verified available and safe enough.
-- Otherwise implement copy/replace/quarantine fallback or explicit fault behavior.
-- Ensure repair is idempotent across reset/power loss.
-- Do not append to a known-corrupt canonical file.
-- Add diagnostics counters/status.
+```text
+10C-F2-A non-destructive recovery policy seam and append-safety classifier
+  -> 10C-F2-A validation
+  -> 10C-F2-B approved repair/quarantine/fault implementation
+  -> 10C-F2-C runtime integration / append guard
+  -> 10C-F2V recovery validation
+  -> 10D runtime HistoryAggregator snapshot path
+```
 
-Explicit exclusions:
+10C-F2-A scope:
 
+- Add a pure, non-destructive policy seam that consumes scanner results.
+- Classify append as allowed only for clean/empty scan results.
+- Block append for corrupt tail, invalid-at-zero, read error, unsupported format, dangerous header, and unknown/default statuses.
+- Add plain diagnostics/status fields for scan decisions.
+- Add host tests and a fake byte/file store that proves no mutation was attempted.
+- Do not integrate runtime append/boot behavior yet.
+
+10C-F2-A explicit exclusions:
+
+- No automatic repair.
+- No truncate.
+- No remove/delete of canonical finalized-hour files.
+- No rename/quarantine/promotion.
+- No copy/replace repair.
+- No `SdHistoryStore` runtime behavior change.
 - No chart/query migration.
+- No runtime aggregator.
 - No FRAM.
 - No retention/pruning.
 - No broad GUI diagnostics unless separately scoped.
+- No hardware durability claim.
 
-Acceptance:
+Later 10C-F2-B/C scope after approval:
+
+- Implement the approved recovery policy only after product decision.
+- Prefer truncate only if verified available and safe enough; in-place truncate is not assumed safe or available.
+- Otherwise implement copy/replace/quarantine fallback or explicit fault behavior.
+- Ensure repair/fault handling is idempotent across reset/power loss.
+- Do not append to a known-corrupt canonical file.
+- Add diagnostics counters/status.
+
+Overall 10C-F2 acceptance:
 
 - Corrupt tail is handled deterministically.
 - Valid prefix is preserved.
-- Repair failure blocks append and reports a clear fault.
-- Reboot after interrupted repair has deterministic behavior.
+- Repair failure or fault-only policy blocks append and reports a clear fault.
+- Reboot after interrupted repair has deterministic behavior if mutating repair is implemented.
 - Host tests pass.
 - Hardware power-loss validation remains clearly marked until actually run.
 
 ## 13. Current open decisions
 
-Open decisions for 10C-F0:
+Open decisions for 10C-F2 recovery policy:
 
-- Whether to repair by truncate or copy/replace/quarantine.
-- Whether recovery runs at `SdHistoryStore::Begin()` or lazily before appending each epoch-day file.
+- Whether to repair by truncate, copy/replace/quarantine, or explicit fault-only behavior. Automatic destructive repair is not approved in 10C-F2-A.
+- Whether recovery runs at `SdHistoryStore::Begin()` or lazily before appending each epoch-day file. 10C-F2-A does not change runtime `SdHistoryStore` behavior.
 - How many finalized files to scan at boot before UI becomes available.
 - Whether scanning all historical files is required or only current/recent append targets.
 - How recovery status is exposed initially: serial only, GUI later, or both.
