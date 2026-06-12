@@ -1,30 +1,26 @@
 # Project Intent Anchor
 
 Project: MeshTemps  
-Area: GUI-node history storage and chart hardening  
-Anchor purpose: Guide future ChatGPT/Codex planning, execution, and validation tasks.  
-Status: Committed repository anchor for PR #53 storage-foundation workstream.
-Last updated: 2026-06-08
+Area: GUI-node history storage, SD archive, recovery, and chart hardening  
+Anchor purpose: Guide future ChatGPT/Codex planning, execution, validation, and review tasks.  
+Status: Committed repository anchor; updated after PR #55 merge and user clarification of finalized-hour SD archive intent.  
+Last updated: 2026-06-11
 
 ## 1. Project purpose
 
-MeshTemps is an ESP32-based mesh temperature monitoring system. Leaf nodes collect DS18B20 temperature readings, apply per-sensor calibration/correction, and report values through the mesh. The GUI node displays current room/sensor temperatures and historical chart views.
+MeshTemps is an ESP32-based mesh temperature monitoring system. Leaf nodes read DS18B20 temperature sensors, apply calibration/correction, and report corrected/display temperatures to the GUI node. The GUI node displays live room/sensor values and historical chart views.
 
-The current workstream is to replace fragile GUI-node per-sensor RAM history vectors with a bounded, backend-agnostic current-hour staging pipeline that writes finalized, self-describing history blocks to SD.
+The current workstream replaces fragile retention-scaled GUI-node RAM history vectors with a bounded current-hour staging pipeline and a durable SD finalized-hour archive.
 
-The immediate implementation direction is **RAM-first current-hour staging plus SD finalized-hour archive**.
-
-The architecture must remain open to a later **Adafruit-style I²C FRAM current-hour staging backend** connected to the Waveshare ESP32-S3-Touch-LCD-7 exposed I²C header. FRAM is optional/later hardware, not required for the first storage rewrite.
-
-The product goal is reliable multi-day/multi-week chart history without ESP32 panics, UI freezes, large retention-scaled RAM vectors, or loss of sensor identity when mesh sensors appear, disappear, or move.
+The product goal is reliable multi-day/multi-week chart history without ESP32 panics, UI freezes, large retention-scaled RAM vectors, unbounded heap growth, or loss of historical context when labels, nodes, mappings, or sensors change over time.
 
 ## 2. Primary users/operators/systems
 
 Primary users/operators:
 
 - MeshTemps owner/operator using the GUI touchscreen.
-- Developer/operator using serial diagnostics, fake-history tools, storage status checks, and hardware validation.
-- Future Codex/ChatGPT workflows producing firmware changes.
+- Developer/operator using serial diagnostics, fake-history tools, SD/recovery checks, and hardware validation.
+- Future ChatGPT/Codex workflows producing firmware changes.
 
 Primary systems:
 
@@ -32,7 +28,7 @@ Primary systems:
 - MeshTemps leaf nodes with DS18B20 sensors and calibration/correction logic.
 - Mesh/root transport delivering `temps` messages to the GUI node.
 - Current target backend: bounded RAM current-hour stager.
-- Later optional backend: Adafruit-style I²C FRAM current-hour stager on the Waveshare exposed I²C header.
+- Later optional backend: I2C FRAM current-hour stager behind the same staging interface.
 - TF/microSD card on the Waveshare board for finalized history archive.
 - LVGL chart UI and range buttons.
 
@@ -40,16 +36,7 @@ Primary systems:
 
 ### Live temperature workflow
 
-Leaf nodes read raw DS18B20 temperatures, apply stored calibration coefficients, and transmit corrected output temperature as `tC` with a `corr` flag indicating whether a non-identity correction was applied.
-
-The GUI node receives the message and updates live `MeshNode::Sensor` state:
-
-- physical sensor address / DS18B20 ROM hex string,
-- latest corrected/display temperature,
-- valid-value state,
-- corrected-value state,
-- last receive timestamp,
-- UI label/rank metadata.
+Leaf nodes read DS18B20 sensors, apply calibration/correction, and transmit corrected/display temperature as `tC` with a `corr` flag. The GUI node updates live `MeshNode::Sensor` state and UI labels/ranks.
 
 ### Durable history workflow
 
@@ -57,455 +44,332 @@ Canonical workflow:
 
 ```text
 live mesh sensor state
-  -> periodic GUI-node snapshot
+  -> periodic GUI-node snapshot / aggregator
   -> backend-agnostic current-hour stager
        -> RamHourStager first
-       -> FramHourStager later if wanted
-  -> verified SD finalized-hour block
-  -> chart/query layer reads SD history and/or derived indexes
+       -> FramHourStager later if explicitly chosen
+  -> sensor-major SD finalized-hour archive
+  -> SD reader/query/reduction layer
+  -> chart UI
 ```
 
 RAM or FRAM is only current-hour staging. SD is the authoritative long-term archive.
 
 ### Chart workflow
 
-User taps a room/sensor and views ranges such as 1d, 2d, 5d, 7d, and 30d.
-
-Future chart code should query a storage/history service and stream/reduce into chart buckets. It should not copy full per-sensor histories into RAM and should not run long scans synchronously in LVGL event callbacks.
+The user taps a room/sensor and views ranges such as 1d, 2d, 5d, 7d, and 30d. Future chart code should query a storage/history service and stream/reduce records into chart buckets. It must not copy full per-sensor histories into RAM and must not perform long synchronous scans inside LVGL event callbacks.
 
 ### Diagnostic workflow
 
-Serial diagnostics should expose:
-
-- current stager backend: RAM now, FRAM later if enabled,
-- SD status and finalized-hour archive health,
-- active current-hour state,
-- slot catalog contents,
-- current slot count versus 64-slot cap,
-- current minute/frame status,
-- SD flush status,
-- recovery/CRC/error counters,
-- chart storage source.
-
-If FRAM is later implemented, diagnostics should also expose FRAM detection, address/size assumptions, metadata/catalog/frame status, and recovery state.
+Serial diagnostics should expose storage health, current-hour status, SD archive status, recovery/CRC/error counters, append-blocked state, and whether chart data is coming from legacy RAM or validated SD records. GUI diagnostics may be later work.
 
 ## 4. Desired product behavior
 
 The GUI node should survive multi-week operation with charts enabled.
 
-History logging must not allocate large vectors based on retention days. The old retention-scaled RAM history model must be replaced or tightly isolated.
+History logging must not allocate large vectors based on retention days. The old per-sensor `std::vector<MeshNode::SensorHistorySample>` retention model is a legacy hazard and must be bypassed, isolated, capped, or removed from the durable-history path.
 
-Current-hour staging must:
+Current-hour staging must remain bounded, backend-neutral, and RAM-first for the initial implementation. FRAM remains optional later hardware, not a requirement for the first SD-backed rewrite.
 
-- be accessed through an interface that hides whether the backend is RAM or FRAM,
-- cap active history slots at 64 for now,
-- store a slot catalog mapping compact slot IDs to durable sensor identity,
-- allow sensors to appear mid-hour and be logged immediately,
-- treat prior minutes for newly seen sensors as missing,
-- preserve corrected-temperature status,
-- store temperatures as fixed-point centi-C, not floats,
-- use checksums/CRCs where practical,
-- avoid descriptor records inside a wrapping sample stream.
+SD finalized-hour storage must be a durable, auditable, self-describing, sensor-major archive:
 
-RAM-first behavior:
+- one finalized hour record per completed hour;
+- one sensor block per sensor seen at least once during that hour;
+- ROM64 as the canonical sensor identity;
+- node ID only as reporting provenance/context;
+- node label and sensor label captured as historical context at the time of logging;
+- one fixed-width sample position per minute for each emitted sensor block;
+- presence bitmap marking valid minutes;
+- corrected bitmap marking corrected samples;
+- temperatures stored as signed fixed-point centi-C, not floats;
+- explicit lengths, counts, offsets, magic/sentinel values, and CRCs;
+- validated records only exposed to chart/query code.
 
-- current unflushed hour can be lost on reset/power loss;
-- this is acceptable for the first implementation if documented and surfaced in diagnostics;
-- SD finalized-hour format must not depend on whether RAM or FRAM produced the hour.
-
-Later FRAM behavior:
-
-- FRAM should provide current-hour recovery across reset/power loss;
-- FRAM should use the same logical stager interface and export the same finalized-hour structure to SD;
-- FRAM hardware details must not leak into chart, SD writer, or MeshNode code.
-
-SD finalized-hour storage must:
-
-- receive finalized hour batches from the current-hour stager,
-- store a complete descriptor/catalog snapshot with every hour block,
-- store raw minute-level data as authoritative history,
-- optionally store derived indexes/rollups only as rebuildable acceleration data,
-- verify writes where practical,
-- remain decodable even if FRAM/NVS/current labels are lost,
-- use **heap-free SD finalization** in production: no large dynamic allocations and no full-record heap buffers in the finalized-hour writer or read-back verifier.
-
-Production heap-free SD finalization means:
-
-```text
-live/staged snapshot
-  -> streaming finalized-hour encoder
-  -> bounded File.write chunks
-  -> flush/close completed record
-  -> reopen/read-back verification with a fixed-size buffer
-```
-
-Read-back verification must happen after the complete SD record has been written and flushed/closed. Do not interleave write/read/verify chunks during the normal write path. Finalized-hour encoders and tests should use streaming or fixed-size capture buffers; do not preserve vector-backed finalized-hour full-record helpers as an API or test pattern. Finalized-hour SD path construction must also use custom bounded append helpers with caller-owned fixed `char` buffers: no Arduino `String`, `std::string`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`new`, libc calendar/timezone conversion, or hidden/dynamic path building. Finalized-hour archive files use deterministic epoch-day buckets: `epoch_day = hour_start_epoch_minute / 1440`, with filename format `<base>/finalized/d<epoch_day>.bin`; display/local date conversion belongs to future UI/query code.
-
-Current-hour RAM/FRAM staging must stay bounded, and SD finalization must also stay bounded. Do not call SD finalization from LVGL callbacks. Do not hold mesh/history locks across SD I/O.
-
-Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. The source/view streaming writer, fixed-size SD write coalescer, and file-scope static finalized-hour write/verify buffers are the required storage foundation for Task 10D runtime integration.
-
-Mesh churn is expected:
-
-- sensor disappears briefly: absence/presence bit marks missing samples,
-- sensor returns: reuse same slot if in current catalog,
-- new sensor appears mid-hour: assign next free slot immediately and log current/future samples,
-- sensor moves to another leaf: preserve DS18B20 ROM identity and update last-known node ID,
-- label changes: do not split physical history.
+The archive should remain understandable years later even if current labels, node mappings, NVS state, or live configuration are lost.
 
 ## 5. Current known behavior
 
-The current GUI history implementation has used a per-sensor `std::vector<MeshNode::SensorHistorySample>` ring buffer.
+Current source still contains a slot/minute-major staging model. `HistoryHourSnapshot` contains 64-slot descriptors and 60 minute frames. `HistoryMinuteFrame` stores presence bitmap, corrected bitmap, and `temp_c_x100[64]`. The current finalized-hour writer serializes each minute frame by writing all presence bytes, corrected bytes, and all 64 temperature slots.
 
-The current sample object has contained monotonic milliseconds, optional epoch, float temperature, and flags. It has been observed to occupy 24 bytes per sample on ESP32-S3.
+That current v1 binary behavior does not match the clarified SD archive intent. Slot IDs and fixed 64-slot minute frames may remain internal current-hour staging details, but they must not be treated as the desired finalized SD binary ABI.
 
-The known failure mode is a panic when the GUI node attempts to resize per-sensor history vectors under unsafe history settings. The failure path is through `MaybeLogHistorySample()` and `std::vector<MeshNode::SensorHistorySample>::resize()`. Legacy per-sensor `std::vector` history remains a known allocation hazard until isolated, bypassed, or removed from the durable-history path.
+PR #54 added a read-only finalized-hour append-file scanner for the existing finalized-hour format. PR #55 added a non-destructive recovery policy seam/classifier. Both are useful recovery architecture work, but future work must account for the clarified v2 sensor-major SD format before building more repair/quarantine behavior around the v1 layout.
 
-Chart range buttons previously froze the UI with more than roughly one day of history. Earlier work added fake-history diagnostics, chart-series preparation seams, and ring-buffer helpers, but the storage allocation model remains the larger blocker.
-
-Leaf nodes already send corrected/display temperatures, not both raw and corrected values. The GUI stores incoming `tC` as the sensor temperature and stores `corr` as corrected status.
+Known legacy hazard: the GUI history path has used per-sensor RAM `std::vector<MeshNode::SensorHistorySample>` rings. The observed failure class included UI freezes/panics during larger history/chart use and unsafe vector resizing under retention-scaled settings.
 
 ## 6. Explicit non-goals and exclusions
 
-Do not continue chart Phase 3C bounded chart-scan work until storage architecture is planned and the RAM vector panic path is contained or bypassed.
+Do not treat fixed 64-slot minute-frame SD records as the intended final archive format.
 
-Do not implement a large RAM-budget hardening plan as the long-term architecture.
+Do not store `slot_id` in finalized SD records.
 
-Do not implement RAM-first staging as another retention-scaled `std::vector<SensorHistorySample>` model.
+Do not store `addr16` in finalized SD records unless a future task proves a specific need. `addr16` is a printable form derived from ROM64.
 
-Do not require FRAM hardware for the first SD-backed storage rewrite.
+Do not use labels as primary identity. Labels are historical annotations.
 
-Do not try to store multi-week history entirely in RAM or I²C FRAM.
+Do not use `node_id` as primary sensor identity. Node ID is reporting provenance/context.
 
-Do not make rollups the only retained record. Raw finalized hour blocks are authoritative.
+Do not stream every mesh packet to SD. SD receives finalized hourly batches.
 
-Do not use labels as durable history keys.
+Do not make rollups the only retained record. Raw finalized minute-level hour records are authoritative. Rollups/indexes may be added only as rebuildable acceleration data.
 
-Do not use `node_id` alone as durable sensor identity.
+Do not implement production SD finalized-hour writing by building a full-record heap vector or reading a full finalized-hour record into a heap vector for verification.
 
-Do not mix sensor descriptor/catalog records into a wrapping sample ring.
+Do not use Arduino `String`, `std::string`, `std::vector`, `std::function`, printf-family formatting, `malloc`/`new`, libc calendar/timezone conversion, or hidden dynamic allocation in low-level finalized-hour path construction/serialization/verification primitives.
 
-Do not write every mesh packet to SD. SD receives finalized batches from the current-hour stager.
+Do not hold mesh/history locks across SD I/O.
 
-Do not implement production SD finalized-hour writing by building a complete `std::vector<uint8_t>` record before writing, or by reading a complete finalized-hour record into a heap vector for verification. That pattern is deprecated; finalized-hour tests should use fixed-size capture buffers instead of vector-backed full-record helpers. Do not use Arduino `String` concatenation, printf-family formatting, or libc calendar/timezone conversion for finalized-hour directory/file path construction.
+Do not claim hardware validation, compile success, or test success unless actually run and shown in the receipt.
 
-Do not hold mesh/history locks during long storage I/O.
-
-Do not port PT100 code blindly. Use it only as an adapted template after verifying assumptions and fixing known issues.
-
-Do not redesign unrelated GUI screens, root-node behavior, leaf calibration, mesh transport, or LVGL styling unless a scoped task explicitly requires it.
+Do not continue recovery repair/quarantine implementation against v1 layout without first resolving the v2 format plan.
 
 ## 7. Canonical terminology
 
-MeshTemps GUI node: ESP32-S3 touchscreen node that displays current values and charts.
+GUI node: ESP32-S3 touchscreen node that displays live values and charts.
 
-Leaf node: ESP32 node that reads DS18B20 sensors and sends corrected values to the mesh.
+Leaf node: ESP32 node that reads DS18B20 sensors and sends corrected/display values.
 
-Sensor identity: DS18B20 physical ROM/address, represented as `rom64` or a 16-character hex string. This is the durable identity.
+ROM64: DS18B20 64-bit physical sensor identity. This is the canonical durable sensor key in SD history.
 
-Node identity: mesh node ID that last reported a sensor. Useful context, not the primary durable identity.
+addr16: 16-character printable hex representation of ROM64. Derive for display/debug; do not store in finalized SD records by default.
 
-Slot ID: compact current-history handle assigned to a known sensor identity for staging/SD storage.
+Node ID: mesh node ID that reported a sensor. Provenance/context only, not sensor identity.
 
-Slot catalog: metadata mapping slot IDs to sensor identities and last-known reporting context.
+Node label: human-readable node name at time of recording. Historical context.
 
-Current-hour stager: backend-agnostic component that stores the current hour's slot catalog and minute frames before SD finalization.
+Sensor label: human-readable sensor/location name at time of recording. Historical context.
 
-RamHourStager: first implementation of the current-hour stager using bounded RAM.
+Current-hour stager: bounded RAM/optional-FRAM component holding only the current hour before SD finalization.
 
-FramHourStager: later optional implementation of the current-hour stager using I²C FRAM.
+Slot ID: internal current-hour staging handle only. Deprecated as finalized SD terminology.
 
-Finalized hour block: immutable SD record containing descriptor/catalog snapshot plus raw minute-level samples for one hour.
+Finalized hour record: one immutable SD archive record for one completed hour.
 
-Presence bitmap: per-minute bitset indicating which slots have valid samples.
+Sensor block: v2 SD record sub-block for one ROM64 sensor seen during that hour.
 
-Corrected bitmap: per-minute bitset indicating which valid samples were corrected values.
+Sensor index table: v2 SD record table mapping ROM64 to sensor block offset.
 
-Raw minute data: authoritative minute-resolution finalized samples stored to SD.
+Presence bitmap: 60-minute bitset marking which minute samples are valid for a sensor block.
 
-Rollup/index: derived summary data for faster charting. Rebuildable; not authoritative.
+Corrected bitmap: 60-minute bitset marking which valid minute samples were corrected values.
 
-Centi-C: fixed-point temperature encoding where `stored = round(temp_c * 100)`.
+Centi-C: signed fixed-point temperature encoding where `stored = round(temp_c * 100)`.
 
-## 8. Misleading or deprecated patterns to avoid preserving
+Day-file preamble: human-readable ASCII schema/reverse-engineering guide written once at the beginning of each new finalized day file before binary records.
 
-Deprecated:
+## 8. Misleading or deprecated terminology/patterns to avoid preserving
 
-- per-sensor RAM `std::vector<SensorHistorySample>` sized by retention period,
-- full selected-sensor history copy before chart preparation,
-- `hist set 60 30` or similar high-retention RAM examples as safe examples,
-- `float` plus `time_t` per stored durable history sample,
-- “new sensors discovered mid-hour wait until next hour.”
+Deprecated or misleading:
 
-Misleading:
+- finalized-hour SD format described as a slot catalog plus fixed 64-slot minute frames;
+- `slot_id` as durable SD identity;
+- `addr16` stored redundantly beside ROM64;
+- labels/ranks as durable keys;
+- node ID as sensor identity;
+- retention-scaled per-sensor RAM `std::vector<SensorHistorySample>` as durable history;
+- full selected-sensor history copies before chart preparation;
+- vector-backed full-record finalized-hour encoder helpers as production or primary-test APIs;
+- descriptor records mixed into a wrapping sample stream;
+- sentinel scanning as the primary parser boundary;
+- “FRAM history” if it implies long-term FRAM storage;
+- “rollup storage” if it implies rollups replace raw records.
 
-- “FRAM history” if it implies long-term FRAM storage,
-- “RAM history” if it implies retention-scaled RAM vectors,
-- “rollup storage” if it implies rollups replace raw data,
-- descriptor records in the same wrapping stream as sample records.
-
-Canonical direction: **backend-agnostic current-hour staging plus SD finalized-hour archive**.
+Internal slot/minute-major staging may continue if bounded and useful, but future tasks must not preserve the current v1 SD binary layout just because current staging is slot-indexed.
 
 ## 9. Data/state lifecycle assumptions
 
 ### Sensor data
 
-Leaf nodes send corrected/display temperature as `tC` and a `corr` flag. Durable history stores `tC` as centi-C and preserves corrected status with a corrected bitmap.
+Leaf nodes send corrected/display temperature as `tC` and corrected status as `corr`. Durable history stores the received display/corrected value as centi-C and preserves corrected status.
 
 ### Current-hour staging lifecycle
 
-The current-hour stager stores only active current-hour state, not long-term history.
+The current-hour stager stores only active current-hour state. First implementation is RAM. Optional later FRAM backend may recover the current unflushed hour across reset/power loss, but FRAM is not long-term history.
 
-First implementation: `RamHourStager`.
+The stager may use temporary slot IDs internally to collect the hour. The finalized SD archive must serialize by sensor identity, not by durable slot ID.
 
-Later optional implementation: `FramHourStager`.
+RAM-first staging may lose the current unflushed hour on reset/power loss. This is acceptable for the first implementation if documented and surfaced in diagnostics.
 
-Logical staging model:
+### SD archive lifecycle
 
-- hour metadata,
-- slot catalog,
-- 60 current-hour minute frames,
-- export support for SD finalization,
-- backend status and diagnostics.
-
-Current product decision: cap slots at 64.
-
-Expected current-hour frame model:
+Finalized SD day files contain:
 
 ```text
-presence bitmap for 64 slots
-corrected bitmap for 64 slots
-int16 temp_c_x100[64]
-frame checksum/CRC
-padding/alignment if useful
+ASCII day-file preamble / compact schema guide
+%%MESH_TEMPS_BINARY_START%%
+HourRecordV2
+HourRecordV2
+...
 ```
 
-Approximate frame size with 64 slots is around 148 bytes depending on exact CRC/alignment. Sixty frames are roughly 9 KB, so the RAM footprint is bounded and predictable.
+The preamble must be bounded, deterministic for a format version, and useful as a minimal reverse-engineering guide. It must include field names, field types, field byte lengths, global endianness, string encoding, CRC type, temperature encoding, file layout, hour record layout, sensor index layout, sensor block layout, payload layout, and recovery/validity rules.
 
-### RAM lifecycle
+Binary parsing must not depend on the prose. It must use explicit binary lengths, counts, offsets, magic/sentinel values, and CRCs.
 
-RAM-first staging loses the current unflushed hour if the GUI node resets or loses power before SD finalization.
+### Finalized-hour v2 lifecycle
 
-This is acceptable for the first implementation if documented.
+Each hour record should contain:
 
-RAM-first staging validates the SD/archive/query architecture before FRAM hardware is required.
+```text
+HourRecordHeaderV2
+SensorIndexTableV2: repeated { rom64, sensor_block_offset_from_record_start }
+SensorBlockV2 repeated sensor_count times
+```
 
-### FRAM lifecycle
+Each sensor block should contain:
 
-FRAM is a later optional backend.
+```text
+SensorBlockHeaderV2 with block magic/sentinel, lengths, encoding, CRC, flags
+SensorDescriptorV2 with ROM64, node ID/context, labels, counts, first/last seen
+SensorPayloadV2 with 60-minute presence bitmap, corrected bitmap, and 60 int16 centi-C samples
+```
 
-If implemented, FRAM should contain sequence/CRC-protected metadata, slot catalog, current-hour frames, and recovery state sufficient to resume or flush after reboot.
-
-Assumed later FRAM hardware: Adafruit-style I²C FRAM module on the Waveshare exposed I²C header. Exact physical module and address remain hardware-unverified.
-
-### SD lifecycle
-
-SD stores finalized immutable hour blocks.
-
-Every finalized hour block should be self-describing and include the descriptor/catalog snapshot needed to decode samples without current FRAM/NVS/RAM state.
-
-### Registry lifecycle
-
-The sensor registry should be reconstructable from SD finalized hour blocks.
-
-If FRAM is later implemented, FRAM may hold active current-hour catalog/recovery state, but SD hour-block descriptor snapshots remain the durable reconstruction source.
+A sensor block is emitted for every sensor seen at least once during the hour. It still contains 60 fixed-width sample positions; absence is represented by presence bitmap bits, not by omitting minute positions.
 
 ### Label lifecycle
 
-Labels and ranks are UI metadata. History storage should store physical identity and possibly label snapshots for convenience, but must not require labels to decode data.
+ROM64 is identity. Node and sensor labels are historical context snapshots. Store them in each finalized sensor block so old files remain understandable without the current GUI/NVS mapping. Labels should be length-prefixed bounded UTF-8/ASCII bytes, not null-terminated strings and not unbounded heap strings.
 
-## 10. Safety, validation, logging, audit, and reliability expectations
+## 10. Safety, security, permission, validation, logging, audit, and reliability expectations
 
 Storage must be bounded and allocation-safe.
 
-The first implementation must eliminate or bypass the retention-scaled vector allocation failure path for durable history.
+Production finalized-hour SD writer/verifier paths must use streaming/fixed buffers and must avoid large stack buffers, heap allocation, and hidden dynamic allocation. Current finalized-hour write buffer policy remains: file-scope static 4096-byte write coalescer and file-scope static 512-byte verification buffer, single-writer/non-reentrant.
 
-For RAM staging:
+Finalized-hour write order remains:
 
-- fixed-size/bounded allocation must be clear and testable;
-- reset/power-loss loss of current hour must be documented;
-- SD finalized blocks must be verified where practical.
+```text
+complete record write
+  -> coalescer flush
+  -> file.flush()
+  -> file.close()
+  -> reopen/read-back verification
+```
 
-For later FRAM staging:
+Validated records only may be exposed to chart/query code. If a record fails validation, the reader/scanner must stop at the last valid record or otherwise follow an approved recovery policy.
 
-- use A/B metadata, sequence counters, CRCs/checksums, or comparable recovery-safe patterns;
-- partially written minute frames must not be treated as valid without validation;
-- recovery after reset must be tested.
+Power loss during FAT32 append/write/flush/close is expected. `file.flush()` and `file.close()` are required but are not a complete durability strategy.
 
-For SD storage:
+Appender code must not append after a corrupt tail unless approved recovery has made the file safe or the system has explicitly faulted/blocked appending.
 
-- partially written SD hour blocks must be detected and ignored or repaired without corrupting prior data;
-- writes should be append-only where practical;
-- raw finalized hour blocks are authoritative;
-- derived rollups/indexes are optional and rebuildable.
+Repair/quarantine must preserve valid prefixes and must never silently delete the only valid copy of history. If truncate support is unavailable or untrusted, prefer explicit fault behavior or copy/replace/quarantine only after a reviewed policy.
 
-Common rules:
+Serial commands that format, wipe, repair, quarantine, or mutate storage must be explicit and guarded by clear confirmation syntax where practical.
 
-- staging operations must be bounded,
-- SD writes must not occur in LVGL event callbacks,
-- mesh locks must not be held across long storage I/O,
-- serial diagnostics should report storage health and failure counters,
-- no task/PR may claim hardware validation, compile success, or tests passed unless actually run and shown in the receipt.
+Diagnostics must distinguish clean, empty, corrupt tail, invalid-at-zero, unsupported format, dangerous header/size, read error, repair attempted/completed/failed, and append-blocked states.
 
 ## 11. Architecture/model principles
 
 Use service-layer storage interfaces over direct UI/chart access to `MeshNode` history vectors.
 
-Use a `HistoryStore`, `HistoryAggregator`, or equivalent abstraction so chart/query code does not depend on whether data came from RAM, FRAM, or SD.
-
-The central seam is a current-hour staging interface, not a FRAM-specific API.
-
-Illustrative interface shape:
-
-```cpp
-class IHistoryHourStager {
- public:
-  virtual bool BeginHour(uint32_t hour_start_epoch_minute) = 0;
-  virtual bool FindOrCreateSlot(uint64_t rom64, uint32_t node_id, uint16_t* out_slot_id) = 0;
-  virtual bool RecordSample(uint8_t minute_offset, uint16_t slot_id, int16_t temp_c_x100, bool corrected) = 0;
-  virtual bool ExportHour(HistoryHourSnapshotWriter& writer) const = 0;
-  virtual bool ResetAfterFlush(uint32_t next_hour_start_epoch_minute) = 0;
-  virtual HistoryStagerStatus GetStatus() const = 0;
-  virtual ~IHistoryHourStager() = default;
-};
-```
-
-Exact C++ names may differ after code inspection, but dependency direction must remain:
+Dependency direction:
 
 ```text
 MeshNode live state
-  -> HistoryAggregator
-  -> IHistoryHourStager
+  -> HistoryAggregator / snapshot cadence
+  -> IHistoryHourStager or equivalent
        -> RamHourStager first
-       -> FramHourStager later
-  -> SdHistoryWriter
-  -> SdHistoryReader / chart query service
+       -> FramHourStager later if approved
+  -> finalized-hour SD writer
+  -> finalized-hour scanner/reader/query service
+  -> chart reduction/UI
 ```
 
-Do not let `Adafruit_FRAM_I2C`, `Wire`, raw FRAM addresses, or RAM storage details appear in chart code, MeshNode code, or SD writer logic.
+The current-hour stager format is not the SD binary ABI. The SD writer should be free to serialize sensor-major v2 records even if RAM staging remains slot/minute-major internally.
 
-A later FRAM driver should be behind a byte-storage interface similar to:
+Use ROM64 as durable identity. Use labels and node context as historical annotations. Use centi-C fixed-point storage. Use CRCs before FEC unless a later task proves a need for FEC.
 
-```cpp
-ReadBytes(address, buffer, length)
-WriteBytes(address, buffer, length)
-```
+Use explicit lengths, counts, offsets, versions, flags, and CRCs instead of reserved padding or raw C struct serialization. Serialize fields in a defined order and endian form; do not serialize compiler-padded structs directly.
 
-Separate responsibilities:
-
-- live mesh state owns current readings,
-- history aggregator snapshots readings on cadence,
-- current-hour stager stages the current hour,
-- SD store writes finalized immutable hour blocks,
-- chart query layer reads finalized history and reduces/streams for UI,
-- diagnostics expose state and failures.
-
-Use fixed current-hour frame shape with a dynamic slot catalog capped at 64.
-
-Use DS18B20 ROM as durable identity.
-
-Use centi-C fixed-point storage for corrected/display temperatures.
+Block magic/sentinel is allowed as an additional safeguard, preferably at the beginning of each sensor block. Do not use sentinel hunting as the normal parser boundary.
 
 ## 12. Known risks and failure scenarios
 
-RAM-first staging loses the current unflushed hour on reset/power loss. This is accepted for the first implementation only if documented.
+RAM-first staging loses the current unflushed hour on reset/power loss.
 
-FRAM module capacity is limited. Adafruit-style I²C FRAM is assumed around 32 KB. Designs requiring more than current-hour staging are wrong.
+SD may be absent, corrupted, slow, fail to mount, or lose power during append/flush/close.
 
-I²C FRAM, if later used, shares the Waveshare I²C bus with touch and CH422G. Bus conflicts, address conflicts, blocking, or overuse can affect UI behavior.
+Time may be invalid at boot. Durable hour naming/finalization should wait for sane epoch time or use a documented recovery/skipping policy.
 
-SD may be absent, corrupted, slow, or fail to mount. Behavior for SD unavailable at hour rollover must be defined.
+A corrupt day-file preamble may make human recovery harder, but binary records still self-identify after the binary-start marker. The marker itself should be short, fixed, and tested.
 
-Time may be invalid at boot. Durable hour naming and SD finalization should wait for sane epoch time or use a documented recovery path.
+Changing from v1 fixed 64-slot SD layout to v2 sensor-major layout invalidates any assumptions in current scanner/writer tests that treat v1 as final. Existing scanner/policy seams remain useful but must be updated or replaced for v2.
 
-Power can fail during SD flush. If FRAM is later used, power can also fail during catalog/frame update.
+Sensor labels and node labels may change over time. Store label snapshots for audit, but do not key continuity by label.
 
-New sensors can appear mid-hour. Current decision: assign a new slot immediately if fewer than 64 slots are active in the current-hour catalog.
+A physical DS18B20 sensor may move to another node. History should remain continuous by ROM64 while reporting context updates.
 
-More than 64 sensors in an hour is an overflow condition. Behavior remains open, but must be explicit.
-
-If a DS18B20 moves to another leaf, history should remain continuous by ROM identity while node context updates.
-
-If labels change, old history remains keyed by physical identity.
-
-PT100 template risk: it contains a known region-size accounting bug in `FramHourJournal` where required region size undercounts one 256-byte header slot. Do not copy that bug.
-
-PT100 template risk: it writes derived hourly/daily rollups. That is acceptable only if raw minute-hour blocks remain authoritative and retained.
+More than the supported active sensor count in an hour is an overflow condition. Behavior must be explicit.
 
 ## 13. Open product decisions
 
-- Exact SD file layout and naming convention for MeshTemps finalized hour blocks.
-- Whether to store optional label/rank snapshots in SD hour descriptors.
-- Whether to store derived hourly/daily rollups or only raw hour blocks initially.
-- How long to retain raw minute-level SD history.
-- UI behavior when a room label maps to a sensor whose physical ROM changed.
-- Slot overflow behavior beyond 64 sensors in one hour.
-- GUI versus serial-only storage diagnostics.
-- Whether and when to add the FRAM backend after RAM-first SD archive is working.
-- Exact FRAM module capacity and driver choice remain assumed, not hardware-verified.
-- SD flush retry policy when SD is absent or unavailable at hour rollover.
-- Whether old RAM history remains as a short live cache or is removed/capped once durable storage exists.
+Open decisions after this update:
+
+- Exact finalized-hour v2 field order and constants for header magic, block magic, schema ID, flags, sample encoding, and CRC variant.
+- Maximum byte length for node label and sensor label; likely 32 or 48 bytes each, but not yet finalized.
+- Whether sensor blocks should be sorted by ROM64 for deterministic tests even though the index table allows direct lookup.
+- Whether per-sensor block CRC failure invalidates the whole hour record or can later allow partial-sensor salvage. Initial recommendation: whole record invalid unless all required CRCs pass.
+- Whether runtime should support v1 records at all. Current product decision appears to be no v1 compatibility because v1 is not deployed, but implementation tasks must confirm no field data needs migration.
+- Exact day-file preamble wording and how tests prevent schema drift from binary constants.
+- Whether recovery repair uses truncate, copy/replace/quarantine, or explicit fault-only behavior.
+- Whether recovery runs at `SdHistoryStore::Begin()` or lazily before appending/querying a specific day file.
+- Initial diagnostic exposure: serial-only, GUI, or both.
+- Whether and when to add optional FRAM backend after RAM-first SD archive works.
 
 ## 14. References and related anchors
 
-Available context references:
+Use the repository anchor reading order in `anchors/README.md`.
 
-- Uploaded handoff: `meshtemps_handoff_history_chart_storage.md`.
-- MeshTemps workstream branch referenced in handoff: `fix/chart-hardening`.
-- Prior MeshTemps PRs referenced in handoff: PR #50, PR #51, PR #52.
-- PT100_Mesh_Datalogger template repository: `rasusmilch/PT100_Mesh_Datalogger`.
-- PT100 bug filed from this chat: issue #367, `FramHourJournal undercounts required FRAM region by one header slot`.
-- Prior generated but not repo-confirmed roadmap artifact: `meshtemps_history_chart_roadmap_anchor.md`.
+Related anchors:
 
-Repository anchor status:
+- `anchors/meshtemps_current_next_action_anchor.md` — current sequencing authority, but now needs a follow-up update to insert the v2 format planning gate before mutating recovery work.
+- `anchors/meshtemps_roadmap_anchor.md` — task sequence and storage/charts roadmap; parts referring to fixed 64-slot SD blocks are stale for finalized SD format.
+- `anchors/meshtemps_requirements_constraints_anchor.md` — constraints; parts referring to labels as optional UI-only metadata are stale for finalized SD archive context.
+- `anchors/meshtemps_testing_hardening_anchor.md` — test-quality requirements.
+- `anchors/meshtemps_sd_durability_recovery_anchor.md` — recovery contract; v1-specific field validation must be updated for v2 before 10C-F2-B/C.
 
-- This file is now present in the MeshTemps repository under `anchors/` and is current guidance for PR #53 / branch `codex/plan-backend-agnostic-current-hour-staging-architecture` as of local head `381bdcae7a14c21092c22810a3a4041ed8a94f81` inspected for Task 10C-R2.
-- The PR body may lag behind this workstream and should be rewritten before final integrated review/merge.
-- A formal validation ledger anchor and decision log anchor were not found or inspected in this pass.
+Decision log and validation ledger anchors were searched for by name but were not found in this inspection pass.
+
+Recommended next workflow change:
+
+```text
+10C-FMT0 — Plan finalized-hour v2 sensor-major ROM64-indexed day-file/archive format
+  -> 10C-FMT1 — Implement v2 writer/scanner/tests or update existing writer/scanner to v2
+  -> 10C-FMTV — Validate v2 format, preamble, and scanner
+  -> resume 10C-F2-B/C repair/quarantine/fault implementation against v2
+  -> 10D runtime HistoryAggregator snapshot path
+```
 
 ## 15. Last updated context
 
-This anchor used:
+Inspected current source/context for this update:
 
-- Current chat discussion on MeshTemps history freeze, RAM vector allocation failure, FRAM/SD direction, slot/catalog model, and backend-agnostic stager design.
-- Uploaded file: `meshtemps_handoff_history_chart_storage.md`.
-- Current user clarification:
-  - use RAM current-hour staging first;
-  - keep helpers/backend interface decoupled so RAM or FRAM can be dropped into the pipeline later;
-  - preserve the option for Adafruit-style I²C FRAM on the Waveshare exposed I²C header;
-  - cap current-hour history slots at 64 for now.
-- Prior code inspections in this chat:
-  - MeshTemps GUI `mesh_node.h/.cpp` history structures and logging path.
-  - MeshTemps leaf corrected-temperature send path.
-  - MeshTemps GUI receive path for `tC` and `corr`.
-  - Waveshare ESP32-S3-Touch-LCD-7 board config showing shared I²C bus on GPIO8/GPIO9.
-  - PT100_Mesh_Datalogger FRAM/SD storage files.
-  - Task 10C review finding that production `SdHistoryStore` finalized-hour write/read-back paths still allocate full-record `std::vector<uint8_t>` buffers.
-  - Task 10C-R/10C-C/10C-D/10C-E* updates requiring heap-free finalized-hour SD finalization, deterministic epoch-day paths, source/view streaming, fixed-size coalescing, and Task 10C-E2-A static buffer correction before Task 10D runtime aggregation.
-
-Current unresolved assumptions:
-
-- Exact FRAM module is assumed to be the Adafruit I²C FRAM breakout class, likely 256 Kbit / 32 KB, but FRAM is no longer required for first implementation.
-- Physical FRAM wiring and I²C address scan have not been validated.
-- SD card mount/write performance on the target MeshTemps GUI node has not been validated in this workstream.
-
-## 16. Next recommended Codex workflow
-
-Current Task 10C storage-foundation status: Tasks through 10C-E2/10C-E2-A have completed targeted validation for the finalized-hour source/view writer, coalesced SD writes, and file-scope static finalized-hour write/verify buffers. Task 10C-E3 removes the remaining legacy non-finalized `SdHistoryStore` minute/hourly/daily/rollup APIs so Task 10D cannot accidentally copy those old PT100-era storage patterns.
-
-Do **not** start Task 10D until Task 10C-E3 receives targeted validation.
-
-Immediate next checkpoint after Task 10C-E3 implementation:
-
-```text
-Task 10C-E3V — Targeted validation for legacy non-finalized SdHistoryStore debt removal
-```
-
-Task 10C-E3V must confirm:
-
-- old `SdHistoryStore` minute/hourly/daily/rollup public APIs and private direct-struct helpers are absent;
-- `sd_history_store.h/.cpp` no longer explicitly use Arduino `String`, `std::function`, `std::vector`, libc calendar/time conversion, printf-family path formatting, or heap allocation patterns;
-- finalized-hour behavior remains intact: `AppendFinalizedHourSnapshot()`, file-scope static 4096-byte write buffer, file-scope static 512-byte verify buffer, bounded finalized path helpers, and complete-write -> coalescer flush -> `file.flush()` -> `file.close()` -> read-back verification order;
-- no Task 10D runtime aggregator, chart, FRAM, reader/query, retention, serial-command, or broad allocation-audit work was introduced.
-
-After Task 10C-E3V passes, the next execute task may be Task 10D runtime aggregation. Task 10D must be built fresh from the current `RamHourStager` / source-view finalized-hour writer / finalized-hour `SdHistoryStore` path and must not resurrect deleted `history_aggregator.h/.cpp` or the removed non-finalized `SdHistoryStore` APIs.
+- No current local repository snapshot was available in the active environment. GitHub was used as source of truth.
+- GitHub repository: `rasusmilch/MeshTemps`.
+- Branch inspected and updated: `feature/ram-backed-sd-hist`.
+- Current branch head before this anchor update: merge commit `6bafc4e34b2ba2349c1b828261d5b5573c20ebfb` from PR #55.
+- PR #55 inspected: merged, title `Add non-destructive finalized-hour recovery policy and diagnostics with tests`, head `32f70f41739e093fe3df77789d646cb3f8028b37`, base `d455a2e21cc8777c7d355eee0332157e7e2d55f7`, merge commit `6bafc4e34b2ba2349c1b828261d5b5573c20ebfb`.
+- Source files inspected:
+  - `MeshTemps-GUINode/history_hour_stager.h`
+  - `MeshTemps-GUINode/history_hour_stager.cpp`
+  - `MeshTemps-GUINode/sd_finalized_hour_block.h`
+  - `MeshTemps-GUINode/sd_finalized_hour_block.cpp`
+  - `MeshTemps-GUINode/mesh_node.h`
+  - `MeshTemps-GUINode/mesh_node.cpp`
+  - `MeshTemps-RootNode/MeshTemps-RootNode.ino` for room/label context.
+- Anchor files inspected:
+  - `anchors/README.md`
+  - `anchors/meshtemps_current_next_action_anchor.md`
+  - `anchors/meshtemps_project_intent_anchor.md`
+  - `anchors/meshtemps_roadmap_anchor.md`
+  - `anchors/meshtemps_requirements_constraints_anchor.md`
+  - `anchors/meshtemps_sd_durability_recovery_anchor.md`
+- Prior uploaded/context references used in summarized form:
+  - MeshTemps history storage handoff dated 2026-06-07.
+  - PR #54 scanner work and PR #55 recovery-policy work as represented by current GitHub PR metadata and prior receipts.
+  - Current user clarification in this chat: no slot ID in SD records; ROM64-only sensor identity; include node/sensor label snapshots; include sensor index table; include block bytes; include block magic/sentinel only as additional safeguard; include day-file ASCII schema preamble with field names, types, byte lengths, and parser guidance.
+- Expected but missing/unverified:
+  - No current local snapshot was inspected.
+  - No hardware validation was performed.
+  - No compile/tests were run for this anchor-only update.
+  - Decision log and validation ledger anchors were not found by repository search.
