@@ -1,14 +1,12 @@
 # MeshTemps Requirements and Constraints Anchor
 
 Project: MeshTemps  
-Workstream: GUI-node history storage and chart hardening  
+Workstream: GUI-node history storage, SD archive, recovery, and chart hardening  
 Anchor purpose: Reusable requirements/constraints reference for future ChatGPT/Codex planning, execution, validation, and review tasks.  
-Status: Committed repository anchor for PR #53 storage-foundation workstream.
-Last updated: 2026-06-08
+Status: Committed repository anchor after PR #55 merge and finalized-hour v2 intent/roadmap clarification.  
+Last updated: 2026-06-11
 
 ## 1. Product requirements
-
-### Core product behavior
 
 MeshTemps must provide reliable live and historical temperature visibility for a mesh of DS18B20-based sensor nodes.
 
@@ -18,63 +16,41 @@ Durable history must move away from retention-scaled per-sensor RAM vectors and 
 
 ```text
 live mesh state
-  -> backend-agnostic current-hour stager
-  -> SD finalized-hour archive
-  -> storage-backed chart/query path
+  -> bounded current-hour stager
+  -> sensor-major finalized-hour SD archive
+  -> storage-backed reader/query/reduction path
+  -> chart UI
 ```
 
 The first implementation must use RAM-first bounded current-hour staging. FRAM must remain an optional later backend behind the same staging interface.
 
-SD finalized-hour blocks are the authoritative long-term history.
+SD finalized-hour records are the authoritative long-term history. Raw minute-level finalized-hour data is authoritative. Rollups/indexes may exist only as derived, rebuildable acceleration data.
 
-Raw minute-level history is authoritative. Rollups/indexes may exist only as derived, rebuildable acceleration data.
-
-Current-hour staging must be capped at 64 slots for now.
-
-Sensors that appear mid-hour must be assigned a slot immediately and logged from that point forward.
-
-DS18B20 ROM/physical address is the durable sensor identity. Node ID is context. Labels/ranks are UI metadata.
-
-### Corrected temperature behavior
-
-Leaf nodes send corrected/display temperature as `tC` and a `corr` flag. Durable history must store the received display/corrected value, not attempt to reconstruct raw values.
-
-Temperature storage should use fixed-point centi-C:
-
-```text
-stored = round(temp_c * 100)
-```
-
-Corrected status must be preserved through a corrected bitmap or equivalent per-sample/per-slot flag.
-
-### Missing data behavior
-
-Missing/stale/offline readings must be represented explicitly or inferably without fabricating temperatures.
-
-For current-hour fixed frames, absence is represented by a cleared presence bit for the slot/minute.
-
-Chart output should show gaps or otherwise avoid implying a valid reading where none exists.
+Finalized SD archive records must be durable, auditable, self-describing, sensor-major, ROM64-indexed records. They must preserve enough historical context to decode and understand old data even if current labels, node mappings, NVS state, or live configuration are lost.
 
 ## 2. Workflow requirements
 
 ### User/operator workflow
 
-The touchscreen user should be able to view current readings and historical chart windows without knowing whether history came from RAM staging, FRAM staging, or SD archive.
+The touchscreen user should be able to view current readings and historical chart windows without knowing whether current-hour staging uses RAM or future FRAM, and without knowing which SD day files contain the requested range.
 
-Storage failures should degrade gracefully and report diagnostics rather than freezing the UI.
+Storage failures must degrade gracefully and report diagnostics rather than freezing the UI.
+
+Charts must not fabricate readings for missing samples. Missing data should appear as gaps or another explicit missing-data representation.
 
 ### Developer/operator workflow
 
 Serial diagnostics must expose enough state to validate storage behavior:
 
-- active stager backend,
-- slot count and catalog contents,
-- current hour/minute status,
-- SD mount/write/flush status,
-- finalized-hour archive status,
-- overflow/error counters,
-- chart storage source,
-- RAM-first current-hour loss limitation,
+- active current-hour stager backend;
+- current-hour state and active count;
+- SD mount/write/flush/read-back status;
+- finalized archive scan status;
+- append-blocked status;
+- recovery/repair/fault counters;
+- overflow/error counters;
+- chart storage source;
+- RAM-first current-hour loss limitation;
 - later FRAM status if enabled.
 
 Fake-history and diagnostic workflows must remain bounded and must not recreate large retention-scaled RAM allocation.
@@ -87,152 +63,165 @@ Nontrivial work must follow:
 Plan -> Review -> Execute -> Validate
 ```
 
-The next task in this workstream must be read-only planning before implementation.
+The current next required task is read-only planning/spec work: `10C-FMT0` finalized-hour v2 format planning. Do not continue mutating repair/quarantine, runtime append guard, or Task 10D runtime aggregation before the v2 format gate is reviewed and approved.
 
-Execution tasks must be narrow and ordered. Storage model, SD writer, aggregator, legacy history isolation, SD reader, chart migration, and optional FRAM backend should not be collapsed into one unreviewable task.
+Execution tasks must be narrow and ordered. Format, scanner, repair, runtime aggregation, reader/query, chart migration, diagnostics, pruning, and optional FRAM work must not be collapsed into one unreviewable task.
 
 ## 3. Data/state requirements
 
 ### Current-hour staging state
 
-The current-hour stager must contain:
+The current-hour stager stores only active current-hour state. It is not long-term history.
 
-- hour metadata,
-- slot catalog,
-- 60 minute frames,
-- export path for SD finalization,
-- backend status/diagnostics,
-- bounded storage footprint.
+The current source uses a slot/minute-major logical staging model with slot descriptors and 60 minute frames. That is acceptable as an internal staging implementation if bounded, but it is not the finalized SD binary ABI.
 
-Slot cap: 64 current-hour slots.
+Current-hour staging requirements:
 
-Expected minute frame content:
+- bounded RAM-first implementation now;
+- optional FRAM backend later only if approved;
+- current-hour active sensor cap currently 64;
+- sensors appearing mid-hour must be represented immediately;
+- prior minutes for newly seen sensors are missing;
+- corrected status must be preserved;
+- temperatures must convert to signed centi-C before durable storage;
+- overflow beyond the supported active sensor count must be explicit and diagnostic-visible.
+
+### Finalized SD archive state
+
+Finalized SD records must be sensor-major v2 records. Each hour record contains one sensor block for each ROM64 seen at least once during that hour.
+
+Finalized day file layout:
 
 ```text
-presence bitmap for 64 slots
-corrected bitmap for 64 slots
-int16 temp_c_x100[64]
-frame checksum/CRC if useful
-padding/alignment if useful
+ASCII day-file preamble / compact schema guide
+%%MESH_TEMPS_BINARY_START%%
+HourRecordV2
+HourRecordV2
+...
 ```
 
-The logical format must be backend-neutral so RAM and FRAM backends can export the same finalized hour.
+The day-file preamble must be bounded and deterministic for a schema/version. It must describe field names, field types, byte lengths, global endianness, string encoding, CRC type, temperature encoding, file layout, hour record layout, sensor index layout, sensor block layout, payload layout, and validity/recovery rules.
 
-### Slot catalog state
+Binary parsing must not depend on the prose. Parsing must use explicit binary lengths, counts, offsets, versions, flags, magic/sentinel values, and CRCs.
 
-Each slot must map to durable sensor identity and reporting context.
+Required finalized-hour v2 concepts:
 
-Minimum catalog concepts:
+```text
+HourRecordHeaderV2
+SensorIndexTableV2: repeated { rom64, sensor_block_offset_from_record_start }
+SensorBlockV2 repeated sensor_count times
+```
 
-- slot ID,
-- DS18B20 ROM / 16-char address / rom64,
-- last-known node ID,
-- first-seen time/minute if available,
-- last-seen time/minute if available,
-- flags/status.
+Required sensor block concepts:
 
-Slot identity must not depend on label text.
+```text
+SensorBlockHeaderV2 with block magic/sentinel, block bytes, descriptor bytes, bitmap bytes, sample count, sample encoding, CRC, flags
+SensorDescriptorV2 with ROM64, last-known node ID, node label, sensor label, first/last seen minute, counts, flags
+SensorPayloadV2 with 60-minute presence bitmap, 60-minute corrected bitmap, and 60 int16 centi-C samples
+```
 
-### SD finalized-hour state
+Each emitted sensor block stores one fixed-width sample position per minute. Presence bitmap bits determine which minute positions are valid. Corrected bitmap bits determine which valid samples were corrected.
 
-Every SD finalized-hour block must be self-describing. It must contain enough descriptor/catalog information to decode the hour without current RAM, FRAM, NVS, labels, or live mesh state.
+### Identity and label state
 
-Each finalized-hour block should include:
+ROM64 is the canonical durable sensor identity.
 
-- hour start,
-- format version,
-- descriptor/catalog snapshot,
-- raw minute frames,
-- payload/header validation data,
-- enough metadata to detect partial/corrupt writes.
+`addr16` is a printable representation derived from ROM64 and should not be stored in finalized SD records by default.
 
-SD is the reconstruction source for historical data.
+Node ID is reporting provenance/context, not sensor identity.
 
-### Registry state
+Node label and sensor label are historical context snapshots and must be stored in each finalized sensor block, subject to explicit bounded length rules defined by the v2 spec. Labels are not keys and must not determine continuity.
 
-A durable registry may exist, but old SD hour blocks must not require the current registry to decode historical readings.
-
-If FRAM is later added, FRAM may hold active current-hour catalog/recovery state, but SD hour descriptors remain the durable decode source.
+A physical DS18B20 moving to another node should preserve historical continuity by ROM64 while node ID/label context updates.
 
 ### Time state
 
-Durable hour naming/finalization requires sane epoch time.
+Durable hour naming/finalization requires sane epoch time. Behavior before valid time must be explicitly designed. Codex must not silently invent a time policy.
 
-Behavior before valid time must be explicitly designed. Acceptable options include delaying durable history, using a temporary boot-relative staging state, or clearly logging skipped history. Codex must not silently invent an unreviewed time policy.
+Current deterministic day-file naming remains epoch-day based unless a future task changes it:
+
+```text
+<base>/finalized/d<epoch_day>.bin
+where epoch_day = hour_start_epoch_minute / 1440
+```
 
 ## 4. Architecture/model constraints
 
-### Backend decoupling
-
-History logic must depend on a current-hour staging interface, not directly on RAM, FRAM, Wire, Adafruit_FRAM_I2C, SD, or MeshNode internals.
+History logic must depend on a current-hour staging interface and storage/query services, not direct UI/chart access to old `MeshNode` history vectors.
 
 Required dependency direction:
 
 ```text
 MeshNode live state
-  -> HistoryAggregator
+  -> HistoryAggregator / snapshot cadence
   -> IHistoryHourStager or equivalent
        -> RamHourStager first
-       -> FramHourStager later
-  -> SdHistoryWriter
-  -> SdHistoryReader / chart query service
+       -> FramHourStager later if approved
+  -> finalized-hour SD writer
+  -> finalized-hour scanner/recovery policy
+  -> finalized-hour reader/query/reduction service
+  -> chart UI
 ```
 
 Hardware-specific details must not leak into chart code, MeshNode code, or SD writer logic.
 
-### RAM-first constraint
+The current-hour stager format is not the SD binary ABI. The SD writer must be free to serialize sensor-major v2 output even if RAM staging remains slot/minute-major internally.
 
-First implementation must use a bounded RAM stager. It must not be a retention-scaled RAM history replacement.
+Use field-by-field explicit little-endian serialization. Do not serialize raw compiler-padded structs. Avoid generic reserved byte arrays unless a specific format purpose is approved; use version fields, byte counts, flags, and explicit lengths instead.
 
-RAM-first staging may lose the unflushed current hour on reset/power loss. This limitation must be documented and surfaced in diagnostics.
+Block magic/sentinel is allowed as an additional safeguard, preferably at the beginning of each sensor block. Do not rely on sentinel hunting as the normal parser boundary.
 
-### FRAM-later constraint
+CRC is required before considering FEC. FEC is deferred unless a later task proves a specific error model and need.
 
-FRAM must remain optional/later. Do not block the first storage rewrite on FRAM hardware.
+### SD archive implementation constraints
 
-If later added, FRAM must be a drop-in backend behind the same logical stager interface.
-
-FRAM hardware assumption, currently provisional: Adafruit-style I²C FRAM on the Waveshare exposed I²C header.
-
-### SD archive constraint
-
-SD receives finalized current-hour batches. The architecture must not require streaming every mesh packet to SD.
+SD receives finalized hourly batches. The architecture must not require streaming every mesh packet to SD.
 
 SD writes must not run from LVGL event callbacks.
 
-SD file/block format must not depend on whether the hour was staged by RAM or FRAM.
+Production finalized-hour path construction, serialization, append, and verification must not use large dynamic allocations, full-record heap buffers, or large task-stack/callback-stack buffers.
 
-Production finalized-hour SD writer/verifier paths must not use large dynamic allocations or full-record heap buffers. The production writer must use bounded streaming or fixed buffers; finalized-hour tests should use fixed-size capture buffers rather than vector-backed full-record helpers. Finalized-hour SD path construction must not use Arduino `String`, `std::string`, `std::vector`, `snprintf`/`sprintf`/`asprintf`/printf-family formatting, `malloc`/`calloc`/`realloc`, `new`/`delete`, or libc calendar/timezone APIs (`<ctime>`, `<time.h>`, `localtime_r`, `localtime`, `gmtime`, `gmtime_r`, `mktime`, `strftime`, `setenv`, `tzset`); use custom bounded append helpers and caller-owned fixed `char` buffers. Finalized-hour archive filenames are deterministic epoch-day buckets: `<base>/finalized/d<epoch_day>.bin`, where `epoch_day = hour_start_epoch_minute / 1440`.
+Low-level finalized-hour production code must avoid:
 
-SD write endurance/commit rule: write the complete finalized-hour record once, flush/close it, then reopen/read back for verification with a fixed-size buffer. Do not interleave write/read verification chunks during the normal write path.
+- Arduino `String`;
+- `std::string`;
+- `std::vector` ownership/full-record buffers;
+- `std::function`;
+- printf-family path construction: `snprintf`, `sprintf`, `asprintf`, etc.;
+- `malloc`, `calloc`, `realloc`, `new`, `delete`;
+- libc calendar/timezone conversion in finalized path construction: `<ctime>`, `<time.h>`, `localtime_r`, `localtime`, `gmtime`, `gmtime_r`, `mktime`, `strftime`, `setenv`, `tzset`;
+- hidden dynamic allocation.
 
-Finalized-hour SD I/O buffer policy: production finalized-hour write/verify buffers must not be large task-stack or callback-stack locals. The finalized-hour write coalescer buffer must be file-scope static storage sized to 4096 bytes. The finalized-hour read-back verification buffer must be file-scope static storage sized to 512 bytes. These buffers must not use heap, PSRAM, `std::array`, `std::vector`, Arduino `String`, `std::function`, `malloc`/`calloc`/`realloc`, `new`/`delete`, or hidden dynamic allocation. PSRAM is not approved for finalized-hour SD I/O buffers unless a future task verifies the exact SD stack/DMA/backend behavior and explicitly changes this decision. Because file-scope static buffers are shared state, finalized-hour append/verify must be serialized as single-writer and non-reentrant under the owning storage/runtime service. Small fixed caller-owned path buffers may remain unless later audit finds them unsafe.
+Approved finalized-hour I/O buffer policy remains:
 
-`HistoryHourSnapshot` is a logical export shape, not the SD binary ABI. A pure/testable codec is encouraged, but finalized-hour APIs and tests must not depend on a vector-backed full-record encode. Diagnostic counters are metadata only; presence bits are authoritative. Existing PT100-era `SdHistoryStore` methods are not authority for the new finalized-hour format.
+- file-scope static 4096-byte SD write coalescer buffer;
+- file-scope static 512-byte read-back verification buffer;
+- single-writer/non-reentrant ownership under the storage/runtime service;
+- no PSRAM for finalized-hour SD I/O buffers unless a future task verifies the exact SD stack/DMA/backend behavior and explicitly changes the decision.
 
-`HistoryHourSnapshot` is also a large logical export shape. Runtime finalization must not stack-allocate `HistoryHourSnapshot` in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks. Task 10D runtime integration must use the current source/view streaming writer, fixed-size SD write coalescer, and approved file-scope static finalized-hour write/verify buffers. Heap allocation, hidden statics, `malloc`/`new`, vector-backed ownership, or local stack snapshots are not acceptable substitutes for the source/view streaming path.
+Finalized-hour write order remains:
 
-### Chart/query constraint
+```text
+complete record write
+  -> coalescer flush
+  -> file.flush()
+  -> file.close()
+  -> reopen/read-back verification
+```
 
-Chart code must migrate away from full-history RAM copies.
+Do not interleave write/read verification chunks during the normal write path.
 
-Chart range handling must use a storage-backed query/reduction path that streams or bounds memory use.
+### Chart/query constraints
 
-Task 10F reader/query work must stream finalized-hour records, scan append files by record offset and `record_bytes`, validate header/payload CRCs, and reduce ranges without loading whole daily files, large record sets, or full histories into heap vectors.
+Chart code must migrate away from full-history RAM copies. Reader/query work must stream validated finalized-hour records by offsets and reduce ranges without loading whole day files, large record sets, or full histories into heap vectors.
 
 Range-button callbacks must remain responsive.
-
-### Identity constraint
-
-Durable sensor identity is DS18B20 ROM. Node ID is last-known reporting context. Label/rank is UI metadata.
-
-Moving a physical sensor to another node should not split history unless a later explicit product decision says location should override physical continuity.
 
 ## 5. Security/permission constraints
 
 MeshTemps is an embedded local project, but storage and command surfaces still require control.
 
-Serial commands that change persistent configuration, clear history, format SD, wipe storage, or alter labels/ranks must be explicit and guarded by clear confirmation syntax where practical.
+Serial commands that change persistent configuration, clear history, format SD, wipe storage, repair files, quarantine files, prune history, or alter labels/ranks must be explicit and guarded by clear confirmation syntax where practical.
 
 Do not add network-exposed storage mutation APIs without explicit approval.
 
@@ -244,317 +233,233 @@ When adding diagnostics, prefer summarized status over raw memory dumps unless a
 
 ## 6. Validation/testing requirements
 
-### General validation rules
-
 Never claim tests passed unless they were actually run or the user provides output.
 
 Receipts must distinguish:
 
-- verified by code inspection,
-- verified by tests/commands,
-- hardware-unverified,
-- environment-limited,
+- verified by code inspection;
+- verified by tests/commands;
+- hardware-unverified;
+- environment-limited;
 - assumed from prior context.
 
-### Required behavior tests/checks where feasible
+Host-side tests are required for pure binary format, CRC, scanner, recovery-policy, current-hour stager, and serializer behavior where feasible.
 
-For stager behavior:
+Tests added, touched, relied on, or cited by future tasks must not depend on raw `assert()` behavior if the task needs confidence under `-DNDEBUG`. Use explicit check harnesses for new/critical storage/recovery tests.
 
-- creates slots by ROM identity,
-- logs a new sensor mid-hour immediately,
-- preserves corrected bitmap,
-- leaves missing samples absent/presence=0,
-- caps at 64 slots and reports overflow,
-- exports deterministic hour snapshot,
-- keeps RAM footprint bounded.
+### Required v2 format tests
 
-For SD writer/reader:
+Future v2 writer/scanner tests must cover:
 
-- writes self-describing finalized-hour block,
-- stores descriptor snapshot,
-- stores all 60 minute frames,
-- validates header/payload CRC/checksum,
-- detects partial/corrupt block,
-- decodes history without current live registry,
-- checks production finalized-hour writer/verifier paths for `std::vector<uint8_t>` full-record buffering,
-- verifies production SD finalization uses bounded buffers/chunks,
-- verifies no SD write/read interleaving during commit; read-back verification happens after full write and flush/close,
-- verifies Task 10F readers stream records and do not load whole files or full histories,
-- checks finalized-hour SD path construction for Arduino `String`, `std::string`, printf-family formatting, libc calendar/timezone conversion, malloc/new, and hidden/dynamic path building.
+- day-file preamble and binary-start marker;
+- schema text includes field names, types, byte lengths, endian, CRC, string, sample, and recovery rules;
+- clean single and multi-record day files;
+- empty day file after preamble;
+- no durable slot ID stored in finalized SD records;
+- no stored `addr16` unless explicitly approved;
+- ROM64+offset index entries;
+- valid sensor blocks with labels;
+- bounded label length behavior;
+- duplicate ROM64 entries;
+- bad index offset;
+- offset outside record;
+- bad block magic/sentinel;
+- bad block bytes;
+- bad descriptor bytes;
+- bad sample count/sample bytes/sample encoding;
+- bad header CRC;
+- bad payload CRC;
+- bad block CRC;
+- partial header;
+- partial index;
+- partial sensor block;
+- dangerous sizes before reading/seeking;
+- unsupported version;
+- corrupt tail after valid records;
+- invalid at offset zero.
 
-For aggregator:
+### Required recovery tests
 
-- snapshots live MeshNode values without long-held locks,
-- converts float `tC` to centi-C,
-- preserves `corr`,
-- does not perform SD I/O in UI callbacks,
-- handles invalid time policy explicitly.
+Recovery validation must cover:
 
-For chart migration:
+- clean and empty files allow append;
+- corrupt tail blocks append until approved recovery handles it;
+- invalid-at-zero blocks append or faults;
+- repair preserves valid prefix;
+- repair failure blocks append and reports clear fault;
+- interrupted repair is idempotent if mutating repair exists;
+- chart/query only exposes validated records.
 
-- no full-history vector copy for large ranges,
-- range buttons remain responsive,
-- 1d/2d/5d/7d/30d views render without freeze,
-- missing samples do not appear as fabricated readings.
+### Required runtime/chart tests
 
-For legacy RAM history isolation and allocation audit:
+Runtime aggregation and chart migration validation must cover:
 
-- unsafe `std::vector<SensorHistorySample>::resize()` path is removed, capped, bypassed, or proven inactive for durable history,
-- misleading high-retention examples are removed or corrected,
-- production GUI-node hot paths are checked for `std::vector`, `String`, `reserve()`, `resize()`, `malloc()`, `calloc()`, `realloc()`, or `new` allocation risks, including old history vectors, chart copy paths, serial console buffers, and SD/history code.
+- snapshot cadence and rollover;
+- immediate mid-hour sensor discovery;
+- missing/corrected bitmap behavior;
+- labels captured at record time;
+- sensor movement by ROM64 with node context update;
+- SD absent/unavailable behavior;
+- no SD I/O in UI callbacks;
+- no large heap/stack regression;
+- no full-history vector copy for large chart ranges;
+- 1d/2d/5d/7d/30d chart ranges remain responsive.
 
-### Command/build checks
+### Build/environment checks
 
 Codex tasks should run relevant compile/static checks available in the repo/environment.
 
-Task receipts must distinguish host-tested pure codec behavior from Arduino/SD wrapper behavior. Arduino/ESP32 compile and SD hardware behavior remain environment-limited unless they were actually run on the target/toolchain and reported with exact board/settings.
-
-If Arduino/ESP32 build cannot run in the environment, receipt must say so explicitly and identify what was checked instead.
-
-Host-side tests are preferred for pure binary format, CRC, slot catalog, SD block encoding/decoding, and stager behavior. Finalized-hour host tests should use fixed-size capture buffers, and production firmware writer/verifier paths must use bounded streaming or fixed buffers.
-
-### Hardware validation
-
-Hardware validation is separate from compile/test validation.
-
-Unverified until physically tested:
-
-- SD mount/write performance on the Waveshare GUI node,
-- I²C FRAM wiring/address/bus coexistence,
-- touch/CH422G coexistence under future FRAM load,
-- long-run GUI behavior with real sensors.
+Task receipts must distinguish host-tested pure codec behavior from Arduino/SD wrapper behavior. Arduino/ESP32 compile and SD hardware behavior remain environment-limited unless actually run on the target/toolchain and reported with exact board/settings.
 
 ## 7. Documentation requirements
 
-Documentation must be updated when behavior changes.
+Anchor files must be kept current when product intent, roadmap sequence, binary format, recovery behavior, or constraints change.
 
-Required docs/notes as implementation progresses:
+Every new finalized day file must begin with a bounded ASCII preamble that acts as a compact reverse-engineering guide. The preamble must not be vague prose only; it must list binary structures and fields with types and byte lengths.
 
-- project intent anchor,
-- roadmap anchor,
-- requirements/constraints anchor,
-- storage format documentation,
-- serial diagnostic command documentation,
-- RAM-first limitation documentation,
-- SD archive authority/recovery documentation,
-- FRAM-later wiring assumptions if/when FRAM is added,
-- migration notes explaining deprecated RAM history behavior.
+The preamble must be tested against the implemented constants/schema so it does not drift silently from the writer/scanner.
 
-Docs must clearly state:
+Task receipts must summarize decisions and validation, not paste large raw receipts.
 
-- RAM current-hour staging loses current hour on reset/power loss,
-- SD finalized-hour blocks are authoritative,
-- rollups/indexes are derived/rebuildable,
-- labels are not durable storage keys,
-- 64-slot cap and overflow behavior.
-
-Do not paste giant receipts into anchors. Summarize decisions and reference artifacts.
+Documentation must clearly mark hardware-unverified assumptions.
 
 ## 8. Deployment/environment constraints
 
-Target GUI hardware:
+Target GUI node is the Waveshare ESP32-S3-Touch-LCD-7 class board used by MeshTemps.
 
-- Waveshare ESP32-S3-Touch-LCD-7.
-- Existing board config uses I²C on GPIO8/GPIO9 for touch and CH422G.
-- TF/microSD is present on the Waveshare board and is intended for long-term archive.
-- Later optional FRAM would share the exposed I²C header.
+Primary archive medium is TF/microSD on the GUI node.
 
-Target firmware environment:
+FRAM is optional/later and must not block RAM-first SD archive work. If later used, exact module, size, address, wiring, and bus behavior must be verified.
 
-- Arduino/ESP32-style project structure unless the latest snapshot proves otherwise.
-- LVGL UI.
-- ESP32 memory limits require bounded allocations and careful event handling.
+The firmware must tolerate SD absent, SD mount failure, SD read/write failure, and reset/power loss during staging or append.
 
-Current first-stage implementation must not require FRAM hardware.
-
-SD card presence and performance must be treated as fallible.
+SD card endurance is not expected to be the limiting factor at MeshTemps logging rates; durability focus is power-loss recovery, filesystem safety, controller behavior, diagnostics, and conservative append blocking.
 
 ## 9. Code style and maintainability requirements
 
-Prefer small service-layer components with clear responsibilities.
+Keep storage primitives small, explicit, and host-testable.
 
-Avoid hardware details in domain logic.
+Separate pure byte-format logic from Arduino `File`/FS wrappers.
 
-Avoid large dynamic allocations in UI/event paths.
+Use explicit status/result types; avoid ambiguous `bool`-only APIs for storage/recovery decisions when diagnostics matter.
 
-Avoid retaining full historical vectors in RAM.
+Keep destructive/mutating storage operations isolated from read-only scanner/classifier code.
 
-Use fixed-width integer types for storage formats.
+Use deterministic names, deterministic ordering where it helps tests, and deterministic cleanup rules for temporary/quarantine files.
 
-Version all binary storage formats.
+Prefer simple fixed-width sample encoding and explicit bitmaps over clever compression unless a later task proves the need.
 
-Use explicit endian/layout decisions for SD files and document them.
-
-Avoid undefined behavior from unaligned `reinterpret_cast` on packed binary data. Use `memcpy` for unaligned fixed-width fields.
-
-Use CRC/checksum helpers consistently.
-
-Keep fake-history/test helpers isolated from production history state.
-
-Keep old compatibility paths clearly marked and bounded during migration.
-
-Do not harden wrong names, comments, labels, or tests just because they already exist.
+Avoid hidden global state except approved file-scope static I/O buffers with documented single-writer ownership.
 
 ## 10. Prompting and Codex receipt formatting requirements
 
-All Codex-facing tasks, plans, validations, receipts, and handoffs must be in fenced copy/paste text blocks.
+Codex-facing prompts must be self-contained and include:
 
-Codex task titles should use a clear bordered title block.
+- exact repo/branch/PR/head SHA to inspect when known;
+- required current-source inspection;
+- scope and explicit exclusions;
+- tests/checks to run;
+- receipt format;
+- requirement to distinguish code inspection, tests run, and unverified assumptions.
 
-Codex tasks must include:
+Codex receipts must report:
 
-- Goal,
-- Background,
-- Changes,
-- Tests,
-- Commands,
-- Acceptance criteria.
+- repository path or remote branch/PR actually inspected;
+- actual head SHA;
+- changed files;
+- tests/commands run and exact results;
+- tests not run and why;
+- assumptions;
+- deviations from task;
+- whether PR/branch is draft/ready/merged if relevant.
 
-Codex execution receipts must include:
-
-- files changed,
-- behavior implemented,
-- tests/commands run,
-- command results,
-- unverified/environment-limited items,
-- deviations from task,
-- remaining risks.
-
-Codex validation receipts must include:
-
-- files inspected,
-- changed and adjacent behavior verified,
-- claims checked against code/tests/docs,
-- scope creep check,
-- wrong-pattern hardening check,
-- GO/NO-GO decision,
-- unverified items.
-
-For nontrivial work, require Plan -> Review -> Execute -> Validate.
-
-For snapshot validation, Codex/reviewer must state the snapshot/branch/commit/file set used.
-
-Do not let Codex treat its own plan or receipt as authoritative.
+A local checkout named `work` is not a product branch name. Receipts must report the actual remote branch/PR/head SHA.
 
 ## 11. Scope-control rules
 
-Keep the active workstream focused on GUI-node history storage and chart stability.
+Do not start Task 10D runtime aggregation until 10C-FMT0/FMT1/FMTV and v2 recovery/append guard gates pass, unless the user explicitly chooses to defer recovery and keep runtime SD finalization disabled/guarded.
 
-Do not combine unrelated GUI redesign, mesh protocol redesign, leaf calibration changes, SD retention policy, FRAM driver work, and chart migration into a single task.
+Do not combine v2 format, mutating recovery, runtime aggregator, reader/query, chart migration, FRAM, pruning, and GUI diagnostics into one task.
 
-RAM-first storage work and later FRAM backend work should be separate phases.
+Do not broaden a storage-format task into unrelated GUI styling, map layout, buzzer behavior, mesh transport, leaf calibration, Wi-Fi, or root-node behavior.
 
-Chart migration should not start until SD writer/current-hour staging are validated.
-
-FRAM implementation should not start until RAM-first SD archive passes shared stager behavior tests.
-
-Derived rollups/indexes require separate planning before implementation.
-
-Removing legacy history code requires proof that replacement storage/query behavior works or a rollback path exists.
-
-Explicitly mark scope exclusions in every Codex task.
+Do not preserve stale comments/docs/tests just because they existed. Treat them as claims to verify.
 
 ## 12. Known project-specific hazards
 
-Known hazards:
+- Legacy `std::vector<SensorHistorySample>` RAM history rings and full-history copy paths can trigger heap pressure and UI freezes.
+- Current v1 finalized-hour binary layout is slot/minute-major and does not match final v2 intent.
+- Current scanner/recovery tests may encode v1 assumptions and must be updated before being cited as final confidence.
+- Large `HistoryHourSnapshot` objects must not be stack-allocated in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks.
+- Power loss during FAT32 append/write/flush/close is expected.
+- `file.flush()`/`file.close()` alone are not a durability strategy.
+- Arduino/ESP32 FS truncate/rename behavior must not be assumed safe without direct verification.
+- Labels can change; store them as historical context but never key identity by label.
+- Node assignments can change; preserve continuity by ROM64, not node ID.
+- Existing anchors outside project intent/roadmap may be stale until updated.
 
-- ESP32 panic from retention-scaled per-sensor history vector resize.
-- LVGL/UI freeze from range-button history processing with large data.
-- Full-history RAM copy paths.
-- Misleading history commands/examples that imply large RAM retention is safe.
-- Mesh sensors appearing/disappearing mid-hour.
-- Sensor physical ROM moving to a different node ID.
-- Labels changing over time.
-- SD absent, slow, corrupt, or partially written.
-- Invalid time at boot.
-- Current-hour RAM staging lost on reset/power loss.
-- Future FRAM sharing I²C bus with touch/CH422G.
-- PT100 template contains known `FramHourJournal` required-region undercount bug.
-- PT100 template has rollups; these must remain derived-only if adapted.
+## 13. Requirements that are settled
 
-## 13. Settled requirements
+Settled requirements:
 
-Settled as of this anchor:
+- RAM-first current-hour staging is first.
+- FRAM is optional later.
+- SD is authoritative long-term archive.
+- Finalized SD archive must be sensor-major v2, not durable-slot/minute-major v1.
+- No durable `slot_id` in finalized SD records.
+- ROM64 is the finalized SD identity.
+- Node ID is context only.
+- Node label and sensor label should be stored as historical context in finalized sensor blocks.
+- `addr16` should be derived, not stored by default.
+- Sensor blocks store 60 fixed-width minute samples with presence/corrected bitmaps.
+- Day files need a bounded ASCII schema/preamble before binary records.
+- Block magic/sentinel is an additional validation aid only.
+- CRCs are required; FEC is deferred.
+- Use explicit lengths/counts/offsets/versions/flags, not raw C struct ABI.
+- Production finalized-hour writer/verifier must remain bounded/heap-free and single-writer/non-reentrant.
+- Runtime SD finalization must not be enabled normally before recovery/append guard is validated.
 
-- First implementation is RAM-first current-hour staging.
-- FRAM is optional/later and must be backend-swappable.
-- Current-hour slot cap is 64.
-- SD finalized-hour archive is authoritative long-term storage.
-- Raw minute-level SD history is authoritative.
-- Rollups/indexes are derived and rebuildable only.
-- New sensors discovered mid-hour are logged immediately.
-- DS18B20 ROM is durable sensor identity.
-- Labels/ranks are not durable storage keys.
-- Temperatures are stored as fixed-point centi-C.
-- Corrected status must be preserved.
-- Chart migration must avoid full-history RAM copies.
-- Codex must do read-only planning before nontrivial or new architecture implementation; approved focused execute tasks and anchor-consistency updates may proceed within their explicit scope.
+## 14. Requirements that are provisional or need user decision
 
-## 14. Provisional requirements / user decisions still needed
+Provisional/open requirements:
 
-Still provisional or needing future decision:
-
-- Exact SD file layout and naming convention.
-- Whether SD hour descriptors include label/rank snapshots.
-- Whether to add rollups/indexes initially or defer until chart performance requires them.
-- Raw minute-level SD retention duration.
-- Exact behavior when more than 64 sensors appear in one hour.
-- SD unavailable policy at hour rollover.
-- Invalid-time policy before epoch sync.
-- Whether old RAM history remains as a short live cache during/after migration.
-- Whether and when to implement FRAM backend.
-- Exact FRAM module capacity/address/library if FRAM is added.
-- GUI versus serial-only storage diagnostics.
-- Whether chart should display corrected status visually or only preserve it in data.
+- Exact v2 field order, constants, magic values, flag definitions, sample encoding enum, and CRC variant.
+- Maximum node label and sensor label byte lengths.
+- Whether sensor blocks must be sorted by ROM64 for deterministic output despite the index table.
+- Whether one bad sensor block invalidates the whole hour record. Initial recommendation: yes, whole record invalid unless all required CRCs pass.
+- Whether v1 records need any compatibility path. Current assumption: no, because v1 is not deployed.
+- Exact day-file preamble wording and test method for schema drift.
+- Truncate vs copy/replace/quarantine vs fault-only recovery policy.
+- Recovery timing: at `SdHistoryStore::Begin()`, lazily before append/query, or both.
+- Serial-only vs GUI-visible diagnostics for first recovery/runtime pass.
+- Behavior when time is invalid at boot or hour rollover.
+- Retention/pruning policy.
+- Whether and when to add FRAM.
 
 ## 15. Last updated context
 
-Used context:
+Inspected current source/context for this requirements update:
 
-- Current chat through the RAM-first, backend-agnostic staging decision.
-- User clarification that helpers must be decoupled so RAM or FRAM can be dropped into the pipeline.
-- User clarification that the current-hour slot cap is 64.
-- Generated project intent anchor: `meshtemps_project_intent_anchor_v2.md`.
-- Generated roadmap anchor: `meshtemps_roadmap_anchor.md`.
-- Uploaded handoff: `meshtemps_handoff_history_chart_storage.md`.
-- Prior inspected MeshTemps code:
-  - GUI `mesh_node.h/.cpp` current history structures and allocation path.
-  - Leaf corrected-temperature send path.
-  - GUI receive path for `tC` and `corr`.
-  - Waveshare I²C pin configuration.
-- Prior inspected PT100_Mesh_Datalogger files:
-  - `fram_storage_interface.h`,
-  - `fram_hour_journal.h/.cpp`,
-  - `sd_history_store.h/.cpp`,
-  - `history_aggregator.h/.cpp`.
-- PT100 issue #367 filed from this chat: `FramHourJournal undercounts required FRAM region by one header slot`.
-- Task 10C review finding that production finalized-hour write/read-back paths still use full-record `std::vector<uint8_t>` buffers.
-- Task 10C-R/10C-C anchor updates requiring bounded/heap-free production SD finalization, fixed-buffer finalized-hour path construction, and an allocation audit before runtime integration.
-
-Current context and unverified items:
-
-- Anchors are now present in this repository branch and should be treated as current guidance after Task 10C-R2.
-- Local Task 10C-R2 inspection used branch `work` at head `381bdcae7a14c21092c22810a3a4041ed8a94f81`; the expected PR context is PR #53 / branch `codex/plan-backend-agnostic-current-hour-staging-architecture`.
-- The PR body is stale relative to these anchors and should be rewritten before final integrated review/merge.
-- SD card mount/write behavior on target GUI node remains hardware-unverified.
-- FRAM hardware is deferred and remains physically unverified.
-
-## 16. Non-negotiable allocation/endurance constraints
-
-These constraints gate runtime SD finalization and chart integration:
-
-- No large dynamic allocations in production finalized-hour SD writer/verifier paths.
-- Production finalized-hour write coalescer buffer must be file-scope static storage sized to 4096 bytes.
-- Production finalized-hour read-back verify buffer must be file-scope static storage sized to 512 bytes.
-- No large finalized-hour write/verify buffers may live on task stack or callback stack; the static buffers are shared and require single-writer/non-reentrant ownership.
-- PSRAM is not approved for finalized-hour SD I/O buffers unless a future task explicitly verifies and changes that decision.
-- No full-record heap buffers in production SD finalization.
-- No unbounded allocations in storage, chart, or history event paths.
-- SD finalized-hour production writes must write the complete record once, flush/close, then verify by read-back with a fixed-size buffer.
-- Verification must not be interleaved with the normal write path.
-- Vector-backed finalized-hour encoders/sinks must not remain in finalized-hour APIs, implementation, or tests; use streaming/fixed-size capture buffers instead.
-- Finalized-hour directory/file paths must be built with custom bounded append helpers and fixed caller-owned `char` buffers; no Arduino `String`, `std::string`, printf-family formatting, libc calendar/timezone conversion, malloc/new, or hidden dynamic path construction.
-- Future runtime finalization must not stack-allocate large `HistoryHourSnapshot` objects in callbacks, loops, small FreeRTOS tasks, LVGL handlers, or mesh callbacks; Task 10C-E1 source/view streaming, Task 10C-E2 fixed-size SD write coalescing, and Task 10C-E2-A static finalized-hour SD buffer correction must precede Task 10D runtime integration.
-- Stale pre-roadmap MeshTemps `history_aggregator.h/.cpp` must not be copied forward; Task 10D must be built fresh from the current bounded stager/source-view/finalized-hour SD writer model and must preserve immediate mid-hour sensor discovery.
-- Allocation audit must be completed before enabling runtime SD finalization from the aggregator path.
-- The allocation audit must include legacy `std::vector<SensorHistorySample>` history, chart/history copy paths, `SerialConsole` `String`/`std::vector` buffers, remaining `SdHistoryStore` Arduino `File` usage, verification that old `SdHistoryStore` direct-struct write paths remain absent after Task 10C-E3, and production `std::vector`/`String`/`reserve()`/`resize()`/`malloc()`/`calloc()`/`realloc()`/`new` patterns in MeshTemps-GUINode application code.
+- No current local repository snapshot was available in the active environment. GitHub was used as source of truth.
+- GitHub repository: `rasusmilch/MeshTemps`.
+- Branch inspected and updated: `feature/ram-backed-sd-hist`.
+- Current branch head before this requirements update: `d69392d1a38bc1ae2cdc58b4d939d587498048cb`.
+- Source files inspected:
+  - `MeshTemps-GUINode/history_hour_stager.h`
+  - `MeshTemps-GUINode/sd_finalized_hour_block.h`
+  - `MeshTemps-GUINode/sd_finalized_hour_recovery_policy.h`
+  - `MeshTemps-GUINode/mesh_node.h`
+- Anchor files inspected:
+  - `anchors/meshtemps_project_intent_anchor.md`
+  - `anchors/meshtemps_roadmap_anchor.md`
+  - `anchors/meshtemps_requirements_constraints_anchor.md`
+  - previous inspection context from `anchors/README.md`, `anchors/meshtemps_current_next_action_anchor.md`, and `anchors/meshtemps_sd_durability_recovery_anchor.md` during the immediately preceding anchor updates.
+- Prior uploaded/context references used in summarized form:
+  - MeshTemps history storage handoff dated 2026-06-07.
+  - PR #54 scanner work and PR #55 recovery-policy work as represented by current GitHub PR metadata and prior receipts.
+  - Current user clarification in this chat: no slot ID in finalized SD records; ROM64-only sensor identity; include node/sensor label snapshots; include ROM64+offset sensor index table; include block bytes; include block magic/sentinel only as additional safeguard; include day-file ASCII schema preamble with field names, field types, byte lengths, and parser guidance.
+- Expected but missing/unverified:
+  - No current local snapshot was inspected.
+  - No compile/tests were run for this anchor-only update.
+  - No hardware validation was performed.
+  - Decision log and validation ledger anchors were not found during the prior anchor search.
