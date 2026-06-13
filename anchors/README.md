@@ -3,8 +3,8 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Purpose: Quick entry point for future ChatGPT/Codex planning, execution, validation, and review tasks.
-Status: Committed repository anchor index refreshed for the finalized-hour v2 ABI approval gate before implementation.
-Last updated: 2026-06-12
+Status: Committed repository anchor index refreshed after the pure finalized-hour v2 format/schema/preamble skeleton; current next work is 10C-FMT1-A-V checkpoint validation.
+Last updated: 2026-06-13
 
 ## Required anchor reading order
 
@@ -26,7 +26,7 @@ Before generating or reviewing MeshTemps storage/history tasks, read these ancho
    - Non-negotiable data, allocation, identity, SD-write, chart/query, testing, and Codex workflow constraints.
 
 6. `anchors/meshtemps_decision_log_anchor.md`
-   - Settled/proposed/open decisions, including the finalized-hour v2 ABI approval table that must be resolved before implementation.
+   - Settled decisions, including the finalized-hour v2 ABI approval table and no-v1-compatibility policy.
 
 7. `anchors/meshtemps_testing_hardening_anchor.md`
    - Testing policy for future tests and existing/past tests that future work touches, relies on, or cites as validation evidence.
@@ -53,9 +53,9 @@ Current intended sequence after the v2 format clarification:
   -> 10D runtime aggregator
 ```
 
-The old PR #54/#55 v1-recovery sequence is no longer the immediate next workflow. PR #54 scanner and PR #55 recovery-policy work remain useful infrastructure, but future recovery and runtime work must be updated/revalidated for finalized-hour v2 before 10C-F2-B/C or 10D proceeds.
+The old PR #54/#55 v1-recovery sequence is no longer the immediate next workflow. PR #54 scanner and PR #55 recovery-policy work remain useful infrastructure only; their v1 on-disk assumptions are not compatibility requirements and must be removed/replaced as v2 scanner/recovery work lands before 10C-F2-B/C or 10D proceeds.
 
-Implementation must not begin until the compact v2 ABI decision table in `anchors/meshtemps_decision_log_anchor.md` is reviewed and the choices needed for 10C-FMT1-A are approved. The first implementation task after that approval is the narrow 10C-FMT1-A pure format/schema/preamble skeleton.
+The compact v2 ABI decision table in `anchors/meshtemps_decision_log_anchor.md` is approved for 10C-FMT1-A. The pure v2 format/schema/preamble skeleton has landed; run 10C-FMT1-A-V checkpoint validation before writer integration.
 
 If any older anchor text still says Task 10D may follow directly after Task 10C-E3V, or routes immediately to 10C-F2-B/C v1 repair/quarantine work, treat that text as stale and reconcile it with this index, the current-next-action anchor, the roadmap, the requirements anchor, and the decision log before executing work.
 

@@ -3,8 +3,8 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed after finalized-hour v2 intent, roadmap, requirements, and decision-log updates; current work is the v2 ABI approval gate before implementation.
-Last updated: 2026-06-12
+Status: Refreshed after Task 10C-FMT1-A implemented the pure finalized-hour v2 format/schema/preamble skeleton; current work is checkpoint validation.
+Last updated: 2026-06-13
 
 ## Authority
 
@@ -24,22 +24,20 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT0-A — update v2 ABI decision table and anchor sequencing before implementation
+Task 10C-FMT1-A-V — checkpoint validation for the pure finalized-hour v2 format/schema/preamble skeleton
 ```
 
-This is an anchor/documentation-only task. It must not implement finalized-hour v2 code, scanner changes, recovery repair/quarantine, runtime aggregation, chart/query, FRAM, retention/pruning, or hardware validation.
+Task 10C-FMT1-A has implemented the pure v2 byte-format constants, field tables, preamble generator, CRC-32/ISO-HDLC helper, and host-testable fixed-structure encode/decode skeleton. Checkpoint validation must confirm the approved ABI, no-v1 policy, generated schema coverage, and scope boundaries before 10C-FMT1-B writer integration begins.
 
-## Next action after 10C-FMT0-A
+## Next action after 10C-FMT1-A-V
 
-The first implementation task after ABI decision approval is:
+The first implementation task after checkpoint approval is:
 
 ```text
-Task 10C-FMT1-A — pure v2 format/schema/preamble skeleton
+Task 10C-FMT1-B — finalized-hour v2 writer integration
 ```
 
-10C-FMT1-A must stay narrow: v2 byte-format constants, schema/preamble generator, and host-testable format skeleton. It must not broaden into writer integration, scanner/recovery repair, runtime aggregation, chart/query, or hardware validation.
-
-Implementation must not begin until the finalized-hour v2 ABI decision table in `anchors/meshtemps_decision_log_anchor.md` is reviewed and the choices needed for 10C-FMT1-A are approved.
+10C-FMT1-B must stay focused on writer/day-file integration and must not broaden into scanner recovery repair, runtime aggregation, chart/query, FRAM, retention/pruning, or hardware validation.
 
 ## Required v2 sequence
 
@@ -69,7 +67,7 @@ Current intended sequence:
 - No stored `addr16` by default; derive printable addr16 from ROM64 for display/debug.
 - Node ID is provenance/context only.
 - Node label and sensor label snapshots are historical context and require bounded encoding rules.
-- Day files require a bounded ASCII schema/preamble and a fixed binary-start marker before binary HourRecordV2 records.
+- Day files require a bounded ASCII schema/preamble and the fixed `%%MESH_TEMPS_BINARY_START%%\n` marker before binary HourRecordV2 records.
 - Block magic/sentinel is a validation aid only; normal parsing must use explicit lengths, counts, offsets, versions, flags, and CRCs.
 - Production finalized-hour write/verify/scanner paths must remain bounded and heap-free.
 
@@ -81,4 +79,4 @@ Normal runtime SD finalization must not be enabled before recovery/append guard 
 
 ## Testing hardening caveat
 
-Storage/recovery tests added, touched, relied on, or cited as validation evidence must use explicit behavior checks and cover negative/failure paths. Existing v1 tests that encode active slot count, descriptor bytes, frame bytes, or fixed 64-slot frame assumptions must be updated or clearly excluded before being cited as v2 confidence.
+Storage/recovery tests added, touched, relied on, or cited as validation evidence must use explicit behavior checks and cover negative/failure paths. Existing v1 tests that encode active slot count, descriptor bytes, frame bytes, or fixed 64-slot frame assumptions are obsolete as final-format confidence and must be removed or replaced as v2 writer/scanner/runtime replacements land.

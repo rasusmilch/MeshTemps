@@ -44,4 +44,28 @@ inline uint32_t Crc32(const uint8_t* data, size_t len) {
   return Crc32Update(0xFFFFFFFFu, data, len);
 }
 
+
+// CRC-32/ISO-HDLC (aliases: CRC-32, CRC-32/ADCCP, PKZIP/zlib/gzip).
+// width=32, poly=0x04C11DB7, reflected poly=0xEDB88320, init=0xFFFFFFFF,
+// refin=true, refout=true, xorout=0xFFFFFFFF, check("123456789")=0xCBF43926.
+inline uint32_t Crc32IsoHdlcBegin() { return 0xFFFFFFFFu; }
+
+inline uint32_t Crc32IsoHdlcUpdate(uint32_t state, const uint8_t* data, size_t len) {
+  if (data == nullptr && len != 0U) return state;
+  while (len--) {
+    state ^= *data++;
+    for (int bit = 0; bit < 8; ++bit) {
+      const uint32_t mask = static_cast<uint32_t>(-(static_cast<int32_t>(state & 1U)));
+      state = (state >> 1U) ^ (0xEDB88320u & mask);
+    }
+  }
+  return state;
+}
+
+inline uint32_t Crc32IsoHdlcFinalize(uint32_t state) { return state ^ 0xFFFFFFFFu; }
+
+inline uint32_t Crc32IsoHdlc(const uint8_t* data, size_t len) {
+  return Crc32IsoHdlcFinalize(Crc32IsoHdlcUpdate(Crc32IsoHdlcBegin(), data, len));
+}
+
 #endif  // HISTORY_CRC_H_
