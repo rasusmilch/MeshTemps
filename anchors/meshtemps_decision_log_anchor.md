@@ -3,8 +3,8 @@
 Project: MeshTemps  
 Workstream: GUI-node history storage, SD archive, recovery, and chart hardening  
 Anchor purpose: Record settled, provisional, deprecated, and rejected project decisions for future ChatGPT/Codex planning, execution, validation, and review tasks.  
-Status: Created after PR #55 merge and finalized-hour v2 intent/roadmap/requirements clarification.  
-Last updated: 2026-06-11
+Status: Updated with finalized-hour v2 ABI approval table before 10C-FMT1-A implementation.  
+Last updated: 2026-06-12
 
 ## Decision 1 — RAM-first current-hour staging, SD as long-term archive
 
@@ -350,3 +350,44 @@ Inspected current source/context for this decision log update:
   - No compile/tests were run for this anchor-only update.
   - No hardware validation was performed.
   - Exact v2 binary constants/field order remain unapproved pending 10C-FMT0.
+
+## Finalized-hour v2 ABI decision table for approval
+
+Date/reference: Task 10C-FMT0-A anchor cleanup after Task 10C-FMT0 planning receipt.  
+Status: approval checklist before 10C-FMT1-A implementation.
+
+This table is a compact approval checklist, not a complete byte-level specification. Items marked `settled` are already established by the anchors above. Items marked `proposed` are conservative implementation proposals that need review/approval before code treats them as final. Items marked `open` must be decided by the user/product owner or a dedicated spec checkpoint before implementation depends on them.
+
+| Decision item | Status | Settled/proposed value | Rationale | Follow-up owner/task |
+|---|---|---|---|---|
+| Day-file preamble required | settled | Each finalized day file starts with a bounded ASCII schema/preamble before binary records. | Human-readable reverse-engineering guide is required for future parser authors. | 10C-FMT1-A implements after approval of exact text. |
+| Binary-start marker exact text/bytes | proposed | `%%MESH_TEMPS_BINARY_START%%\n` immediately after the preamble. | Simple fixed marker separates ASCII schema from binary records; exact bytes still need approval. | User approval before 10C-FMT1-A. |
+| Endianness | settled | Explicit little-endian field-by-field serialization. | Matches current explicit writer style and avoids raw ABI/padding ambiguity. | 10C-FMT1-A. |
+| Raw struct serialization prohibited | settled | Do not serialize compiler-padded structs directly. | Prevents compiler/ABI drift and undocumented padding. | 10C-FMT1-A and tests. |
+| Record magic value | proposed | Use a new v2 magic distinct from v1 `MTHR`; exact bytes open. | Avoids confusing v1 slot/minute-major records with v2 sensor-major records. | User approval / 10C-FMT1-A spec checkpoint. |
+| Record version | proposed | `2`. | Distinguishes HourRecordV2 from existing v1 format. | User approval / 10C-FMT1-A. |
+| HourRecordHeaderV2 field list/order | open | Include record magic, version, header bytes, record bytes, hour start epoch minute, sensor count, index entry bytes, index offset/bytes, sensor block offset/bytes, payload CRC, header CRC, flags; exact order/widths open. | Header must bound parsing before reads/seeks and document record structure. | User approval before 10C-FMT1-A finalizes constants. |
+| SensorIndexEntryV2 fields and byte length | proposed | `{ rom64: u64, sensor_block_offset_from_record_start: u32 }`, 12 bytes. | Anchors settle ROM64+offset index; avoiding duplicate block bytes keeps index compact. | User approval / 10C-FMT1-A. |
+| ROM64 byte order and display formatting | proposed | Store ROM64 as little-endian u64; display as 16 uppercase hex characters derived from ROM64. | Keeps binary format consistent while preserving current human-readable addr16 style without storing addr16. | User approval / 10C-FMT1-A tests. |
+| Sensor block magic value | proposed | Use a new v2 block magic/sentinel distinct from record magic; exact bytes open. | Block magic is a validation aid at known offsets only. | User approval / 10C-FMT1-A. |
+| SensorBlockHeaderV2 field list/order | open | Include block magic, block version/header bytes, block bytes, descriptor bytes, payload bytes, bitmap bytes, sample count, sample bytes, sample encoding, block CRC, flags; exact order/widths open. | Parser needs explicit per-block bounds and sample metadata. | User approval before 10C-FMT1-A finalizes constants. |
+| SensorDescriptorV2 field list/order | open | Include ROM64, last-known node ID, first/last seen minute, valid sample count, missing/invalid count, node label length/bytes, sensor label length/bytes, flags; exact order/widths open. | Stores identity plus historical context without durable slot_id or addr16. | User approval before 10C-FMT1-A finalizes constants. |
+| Node label max bytes | open | Not yet approved. | Bounds affect descriptor size, truncation behavior, and parser compatibility. | User/product decision before 10C-FMT1-A. |
+| Sensor label max bytes | open | Not yet approved. | Bounds affect descriptor size, truncation behavior, and parser compatibility. | User/product decision before 10C-FMT1-A. |
+| Label encoding | proposed | UTF-8-compatible raw bytes with explicit byte length; no NUL terminator required for parsing. | Preserves labels while keeping parser boundaries length-based. | User approval / 10C-FMT1-A. |
+| Overlong label policy | open | Choose reject vs truncate-with-flag. | Policy affects data preservation and deterministic writer behavior. | User/product decision before writer integration; preferably before 10C-FMT1-A if descriptor flags are needed. |
+| SensorPayloadV2 bitmap bytes/sample count/sample encoding | proposed | 8-byte presence bitmap, 8-byte corrected bitmap, 60 samples, int16 centi-C little-endian sample encoding. | 60 minutes need 60 bits; fixed int16 centi-C is settled. | User approval / 10C-FMT1-A tests. |
+| Missing sample byte policy | proposed | Writer fills missing sample positions with `kHistoryInvalidTempCentiC`; readers rely only on presence bits for validity. | Deterministic bytes aid testing while preserving bitmap as validity source. | User approval / 10C-FMT1-A/B tests. |
+| Corrected bit without presence behavior | proposed | Treat corrected bits set where presence is clear as invalid/corrupt. | Corrected has meaning only for valid samples and catches bitmap corruption. | User approval / 10C-FMT1-C tests. |
+| CRC32 variant | open | Not yet approved; current `history_crc` helper is a candidate but exact variant must be documented. | Future parsers need polynomial/init/final/xor/reflection details. | User approval / 10C-FMT1-A. |
+| Header CRC coverage | proposed | CRC over HourRecordHeaderV2 with the header CRC field zeroed. | Protects header metadata while allowing deterministic verification. | User approval / 10C-FMT1-A/C tests. |
+| Payload CRC coverage | proposed | CRC over index table plus all sensor blocks, excluding the header. | Validates the record body as a whole and supports longest-valid-prefix recovery. | User approval / 10C-FMT1-A/C tests. |
+| Block CRC coverage | proposed | CRC over SensorBlockHeaderV2 with block CRC field zeroed plus descriptor and payload. | Protects per-block metadata and data before accepting a sensor block. | User approval / 10C-FMT1-A/C tests. |
+| Whole-record invalidation on bad block | proposed | Any required bad block structural check or block CRC invalidates the whole hour record. | Conservative recovery/query behavior; per-block salvage is deferred. | User approval / 10C-FMT1-C. |
+| Sensor block sort order | open | Choose ROM64-sorted vs staging/source order. | Sorting improves deterministic output; source order may be simpler. | User/product decision before 10C-FMT1-B. |
+| Duplicate ROM64 policy | proposed | Reject duplicate ROM64 index/block entries as corrupt. | ROM64 is canonical identity; duplicates make lookup ambiguous. | User approval / 10C-FMT1-C tests. |
+| Zero-sensor hour record policy | open | Choose skip record vs emit zero-sensor HourRecordV2. | Affects archive completeness, scanner cases, and chart semantics. | User/product decision before 10C-FMT1-B. |
+| v1 compatibility policy | open | Current assumption is no v1 compatibility because v1 was not deployed, but this needs explicit approval. | Avoids building migration/reader complexity unless real v1 files must be preserved. | User approval before disabling/removing v1 paths. |
+| Preamble schema drift test strategy | proposed | Generate preamble from the same v2 field table/constants used by tests; tests assert required field names/types/byte lengths and marker. | Prevents human-readable schema from drifting away from binary writer/scanner. | 10C-FMT1-A tests. |
+
+Implementation checkpoint: do not start 10C-FMT1-A until the proposed/open items needed for the pure format/schema/preamble skeleton are approved or deliberately scoped as provisional test-only constants.
