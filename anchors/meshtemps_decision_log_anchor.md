@@ -3,7 +3,7 @@
 Project: MeshTemps
 Workstream: GUI-node history storage, SD archive, recovery, and chart hardening
 Anchor purpose: Record settled, provisional, deprecated, and rejected project decisions for future ChatGPT/Codex planning, execution, validation, and review tasks.
-Status: Updated after Task 10C-FMT1-A implemented the pure finalized-hour v2 format/schema/preamble skeleton and locked the no-v1-compatibility policy.
+Status: Updated after PR #57 review to lock the no-padding v2 ABI correction and ownership/file-boundary discipline before checkpoint validation.
 Last updated: 2026-06-13
 
 ## Decision 1 — RAM-first current-hour staging, SD as long-term archive
@@ -283,13 +283,13 @@ Follow-up tasks/validation: 10C-FMT0 source/context check.
 Date/reference: 2026-06-11 v2 format discussion; 2026-06-13 ABI approval.
 Status: settled.
 
-Decision: Exact field order, magic values, descriptor flags, sample encoding value, CRC-32/ISO-HDLC variant, node label max 32 bytes, sensor label max 48 bytes, truncate-with-flag policy, ROM64 sort order, duplicate-ROM corruption policy, zero-sensor skip policy, and no-v1-compatibility policy are settled for finalized-hour v2.
+Decision: Exact semantic field order, magic values, descriptor flags, sample encoding value, CRC-32/ISO-HDLC variant, node label max 32 bytes, sensor label max 48 bytes, truncate-with-flag policy, ROM64 sort order, duplicate-ROM corruption policy, zero-sensor skip policy, no-padding policy, and no-v1-compatibility policy are settled for finalized-hour v2.
 
 Rationale: These are binary ABI details and are now approved for the dedicated v2 implementation sequence rather than being chosen ad hoc during writer/scanner work.
 
 Evidence/context references: user-approved ABI decisions before 10C-FMT1-A; pure v2 format tests and generated preamble now lock these values.
 
-Consequences: Writer/scanner/runtime tasks must consume these v2 constants and field tables rather than preserving v1 slot/minute-major assumptions.
+Consequences: Writer/scanner/runtime tasks must consume these v2 constants and field tables rather than preserving v1 slot/minute-major assumptions, mistaken byte counts, or fake reserved-byte alignment.
 
 Rejected alternatives: Codex picking arbitrary field constants during implementation; retaining v1 compatibility for nonexistent production data.
 
@@ -370,27 +370,27 @@ This table is a compact approval checklist, not a complete byte-level specificat
 | SensorIndexEntryV2 fields and byte length | settled | `{ rom64: u64, sensor_block_offset_from_record_start: u32 }`, 12 bytes. | Anchors settle ROM64+offset index; avoiding duplicate block bytes keeps index compact. | Settled / 10C-FMT1-A. |
 | ROM64 byte order and display formatting | settled | Store ROM64 as little-endian u64; display as 16 uppercase hex characters derived from ROM64. | Keeps binary format consistent while preserving current human-readable addr16 style without storing addr16. | Settled / 10C-FMT1-A tests. |
 | Sensor block magic value | settled | `MSB2`; block magic is checked at known offsets only and is not a sentinel-hunting parser boundary. | Block magic is a validation aid at known offsets only. | Settled / 10C-FMT1-A. |
-| SensorBlockHeaderV2 field list/order | settled | `u32 block_magic`, `u16 block_version`, `u16 block_header_bytes`, `u32 block_bytes`, `u16 descriptor_bytes`, `u16 payload_bytes`, `u16 bitmap_bytes`, `u16 sample_count`, `u16 sample_bytes`, `u16 sample_encoding`, `u32 block_crc32`, `u32 flags`; 36 bytes in the implemented field table with explicit reserved zero bytes for alignment. | Parser needs explicit per-block bounds and sample metadata. | Settled before 10C-FMT1-A finalizes constants. |
-| SensorDescriptorV2 field list/order | settled | ROM64, last-known node ID, first/last seen minute, valid/missing/corrected counts, node/sensor label lengths, descriptor flags, 32 node-label bytes, 48 sensor-label bytes; 108 bytes in the implemented field table with explicit reserved zero bytes for alignment. | Stores identity plus historical context without durable slot_id or addr16. | Settled before 10C-FMT1-A finalizes constants. |
+| SensorBlockHeaderV2 field list/order | settled | `u32 block_magic`, `u16 block_version`, `u16 block_header_bytes`, `u32 block_bytes`, `u16 descriptor_bytes`, `u16 payload_bytes`, `u16 bitmap_bytes`, `u16 sample_count`, `u16 sample_bytes`, `u16 sample_encoding`, `u32 block_crc32`, `u32 flags`; 32 bytes. No reserved/padding fields. Block CRC offset is 24. | Parser needs explicit per-block bounds and sample metadata. | PR #57 R2 must correct code before 10C-FMT1-A-V. |
+| SensorDescriptorV2 field list/order | settled | ROM64, last-known node ID, first/last seen minute, valid/missing/corrected counts, node/sensor label lengths, descriptor flags, 32 node-label bytes, 48 sensor-label bytes; 106 bytes. No reserved/padding fields. descriptor_flags offset is 22. | Stores identity plus historical context without durable slot_id or addr16. | PR #57 R2 must correct code before 10C-FMT1-A-V. |
 | Node label max bytes | settled | 32 bytes. | Bounds affect descriptor size, truncation behavior, and parser compatibility. | Settled before 10C-FMT1-A. |
 | Sensor label max bytes | settled | 48 bytes. | Bounds affect descriptor size, truncation behavior, and parser compatibility. | Settled before 10C-FMT1-A. |
 | Label encoding | settled | UTF-8-compatible raw bytes with explicit byte length; no NUL terminator required for parsing. | Preserves labels while keeping parser boundaries length-based. | Settled / 10C-FMT1-A. |
 | Overlong label policy | settled | Truncate overlong labels and set node-label/sensor-label truncation descriptor flags. | Policy affects data preservation and deterministic writer behavior. | Settled before 10C-FMT1-A. |
 | SensorPayloadV2 bitmap bytes/sample count/sample encoding | settled | 8-byte presence bitmap, 8-byte corrected bitmap, 60 samples, int16 centi-C little-endian sample encoding. | 60 minutes need 60 bits; fixed int16 centi-C is settled. | Settled / 10C-FMT1-A tests. |
-| Missing sample byte policy | settled | Writer fills missing sample positions with `kHistoryInvalidTempCentiC`; readers rely only on presence bits for validity. | Deterministic bytes aid testing while preserving bitmap as validity source. | Settled / 10C-FMT1-A/B tests. |
+| Missing sample byte policy | settled | Writer fills missing sample positions with a v2-owned on-disk sentinel, e.g. `kSdFinalizedHourV2InvalidTempCentiC`; readers rely only on presence bits for validity. Do not create a shared header solely for this sentinel. | Deterministic bytes aid testing while preserving bitmap as validity source; the v2 ABI must not depend on transitional stager headers. | PR #57 R2 must correct code before 10C-FMT1-A-V. |
 | Corrected bit without presence behavior | settled | Treat corrected bits set where presence is clear as invalid/corrupt. | Corrected has meaning only for valid samples and catches bitmap corruption. | User approval / 10C-FMT1-C tests. |
 | CRC32 variant | settled | CRC-32/ISO-HDLC: poly `0x04C11DB7`, reflected poly `0xEDB88320`, init `0xFFFFFFFF`, refin/refout true, xorout `0xFFFFFFFF`, check `123456789` -> `0xCBF43926`, stored little-endian u32. | Future parsers need polynomial/init/final/xor/reflection details. | Settled / 10C-FMT1-A. |
 | Header CRC coverage | settled | CRC over HourRecordHeaderV2 with the header CRC field zeroed. | Protects header metadata while allowing deterministic verification. | Settled / 10C-FMT1-A/C tests. |
 | Payload CRC coverage | settled | CRC over index table plus all sensor blocks, excluding the header. | Validates the record body as a whole and supports longest-valid-prefix recovery. | Settled / 10C-FMT1-A/C tests. |
-| Block CRC coverage | settled | CRC over SensorBlockHeaderV2 with block CRC field zeroed plus descriptor and payload. | Protects per-block metadata and data before accepting a sensor block. | Settled / 10C-FMT1-A/C tests. |
+| Block CRC coverage | settled | CRC over SensorBlockHeaderV2 with block CRC field zeroed at offset 24 plus descriptor and payload. | Protects per-block metadata and data before accepting a sensor block. | PR #57 R2 must correct code before 10C-FMT1-A-V. |
 | Whole-record invalidation on bad block | settled | Any required bad block structural check or block CRC invalidates the whole hour record. | Conservative recovery/query behavior; per-block salvage is deferred. | User approval / 10C-FMT1-C. |
 | Sensor block sort order | settled | ROM64-sorted for deterministic output. | Sorting improves deterministic output; source order may be simpler. | Settled before 10C-FMT1-B. |
 | Duplicate ROM64 policy | settled | Reject duplicate ROM64 index/block entries as corrupt. | ROM64 is canonical identity; duplicates make lookup ambiguous. | User approval / 10C-FMT1-C tests. |
 | Zero-sensor hour record policy | settled | Skip zero-sensor hour records. | Affects archive completeness, scanner cases, and chart semantics. | Settled before 10C-FMT1-B. |
 | v1 compatibility policy | settled | No v1 compatibility, no dual-format support, no migration; remove/replace v1 finalized-hour code as v2 replacements land. | Avoids building migration/reader complexity unless real v1 files must be preserved. | Settled before disabling/removing v1 paths. |
-| Preamble schema drift test strategy | settled | Generate preamble from the same v2 field table/constants used by tests; tests assert required field names/types/byte lengths and marker. | Prevents human-readable schema from drifting away from binary writer/scanner. | 10C-FMT1-A tests. |
+| Preamble schema drift test strategy | settled | Generate preamble from the same v2 field table/constants used by tests; tests assert required field names/types/byte lengths, no reserved/padding fields, corrected sizes/offsets, marker, and v2-owned invalid sentinel. | Prevents human-readable schema from drifting away from binary writer/scanner. | PR #57 R2 and 10C-FMT1-A-V tests. |
 
-Implementation checkpoint: 10C-FMT1-A has landed the pure v2 format/schema/preamble skeleton. Run 10C-FMT1-A-V checkpoint validation before 10C-FMT1-B writer integration.
+Implementation checkpoint: PR #57 currently needs R2 code revision before 10C-FMT1-A-V. Do not run checkpoint validation until code removes reserved/fake padding, corrects v2 sizes/offsets, removes the `history_hour_stager.h` dependency, and uses a v2-owned invalid-sample sentinel.
 
 
 ## Decision 18 — Task 10C-FMT1-A pure v2 format skeleton is authoritative for future finalized-hour format work
@@ -402,3 +402,38 @@ Decision: `MeshTemps-GUINode/sd_finalized_hour_v2_format.h` and `.cpp` are the a
 Rationale: The project has no production v1 finalized-hour data. Carrying v1 as a compatibility layer would preserve the wrong slot/minute-major model and complicate recovery/runtime work.
 
 Consequences: Existing v1 writer/scanner/recovery code remains only until each v2 replacement lands in 10C-FMT1-B/C/D. It must not be described as a supported production archive format or cited as final-format confidence.
+
+
+## Decision 19 — Finalized-hour v2 has no reserved0, fake padding, or generic reserved bytes
+
+Date/reference: 2026-06-13 PR #57 review follow-up.
+Status: settled.
+
+Decision: Finalized-hour v2 must not include `reserved0` fields, fake padding, generic reserved bytes, or alignment filler merely to preserve mistaken byte counts. Because v2 has no production compatibility constraint, byte counts must be derived from the approved semantic field list. If future expansion fields are needed, they must be named semantic fields with explicit purpose and tests.
+
+Corrected v2 byte facts: SensorBlockHeaderV2 semantic fields total 32 bytes. SensorDescriptorV2 semantic fields total 106 bytes. SensorPayloadV2 remains 136 bytes. Fixed SensorBlockV2 is therefore 274 bytes. Block CRC offset is 24. descriptor_flags offset is 22.
+
+Consequences: PR #57 R2 must remove `reserved0` from v2 field tables, encode/decode paths, generated preamble, and tests before 10C-FMT1-A-V checkpoint validation.
+
+## Decision 20 — Ownership and file-boundary discipline
+
+Date/reference: 2026-06-13 PR #57 review follow-up.
+Status: settled.
+
+Decision: Do not create new files, shared headers, utility modules, or common constant containers merely for local convenience or cosmetic organization. Every new file must have a clear owner, a clear reason to exist, and a defined dependency direction.
+
+Ownership rules:
+- Ownership first, file second.
+- Shared files require burden of proof.
+- Avoid junk-drawer files such as `common.h`, `utils.h`, `shared_constants.h`, or miscellaneous helper modules unless their ownership and allowed contents are narrowly defined.
+- Classify constants by owner before moving them.
+- Duplicate locally when concepts are separate but currently share a value.
+- Share only when the concept is the same, drift would be a correctness bug, and a neutral owner exists.
+- For intentional local duplication, test the mapping seam where data crosses subsystem boundaries.
+- New authoritative modules must not depend on legacy or transitional modules to reuse constants or helpers.
+- Promote local constants/functions/classes to shared ownership only when all are true: at least two stable non-legacy modules need the same concept; the concept is semantically the same; drift would be a correctness bug; there is a clear neutral owner; the shared file does not depend on either consumer; tests can enforce the shared contract.
+- Demote or remove shared files/helpers that have only one real consumer, mix unrelated constants/functions, depend on a higher-level module, exist only to reduce include typing, contain transitional/legacy concepts, or lack an explainable owner.
+
+V2 sentinel rule: The v2 finalized-hour format module must not include `history_hour_stager.h` to reuse `kHistoryInvalidTempCentiC`. The v2 ABI should own its on-disk missing-sample sentinel with a v2-specific name, such as `kSdFinalizedHourV2InvalidTempCentiC`, unless a future task proves a neutral shared-domain owner is warranted. Do not create a shared header solely for this sentinel.
+
+Consequences: PR #57 R2 must remove the v2 format dependency on `history_hour_stager.h` without creating a new shared header solely for one duplicated numeric sentinel.

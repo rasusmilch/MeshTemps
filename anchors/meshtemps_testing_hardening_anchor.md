@@ -128,3 +128,16 @@ For PR #54 readiness, harden `tests/sd_finalized_hour_recovery_test.cpp` so beha
 Before moving from scanner work into repair/quarantine or runtime SD finalization, the tests for the scanner and the tests being relied on for storage behavior must be strong enough to trust.
 
 Do not proceed to Task 10C-F2 or Task 10D on the basis of weak or overstated tests.
+
+
+## File-boundary and ownership validation
+
+Future validation must not only check behavior. It must also catch architectural debt introduced by unjustified files or dependencies. Reviews/tests/static checks should flag:
+
+- unjustified new files or convenience-only shared modules;
+- junk-drawer `common`, `utils`, or `shared_constants` style files;
+- dependency-direction violations;
+- new authoritative modules depending on legacy/transitional headers;
+- constants with unclear ownership;
+- shared helpers with one real consumer or mixed unrelated concepts;
+- finalized-hour v2 schema/tests that accept `reserved0`, fake padding, generic reserved bytes, old 36/108/280 byte counts, block CRC offset 28, or stager-owned invalid sentinels.

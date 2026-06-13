@@ -3,7 +3,7 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed after Task 10C-FMT1-A implemented the pure finalized-hour v2 format/schema/preamble skeleton; current work is checkpoint validation.
+Status: Refreshed after PR #57 review; current work is a focused PR #57 code revision before checkpoint validation.
 Last updated: 2026-06-13
 
 ## Authority
@@ -24,20 +24,20 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
+Task 10C-FMT1-A-R2 — revise PR #57 v2 format code before checkpoint validation
+```
+
+PR #57 needs a focused code revision before 10C-FMT1-A-V checkpoint validation. The revision must remove `reserved0`/fake padding from the finalized-hour v2 ABI, correct SensorBlockHeaderV2 to 32 bytes, correct SensorDescriptorV2 to 106 bytes, correct fixed SensorBlockV2 to 274 bytes, use block CRC offset 24 and descriptor_flags offset 22, remove the `history_hour_stager.h` dependency from the v2 format module, and use a v2-owned invalid-sample sentinel instead of borrowing a transitional stager constant.
+
+## Next action after 10C-FMT1-A-R2
+
+After the PR #57 R2 code revision lands, the next action is checkpoint validation:
+
+```text
 Task 10C-FMT1-A-V — checkpoint validation for the pure finalized-hour v2 format/schema/preamble skeleton
 ```
 
-Task 10C-FMT1-A has implemented the pure v2 byte-format constants, field tables, preamble generator, CRC-32/ISO-HDLC helper, and host-testable fixed-structure encode/decode skeleton. Checkpoint validation must confirm the approved ABI, no-v1 policy, generated schema coverage, and scope boundaries before 10C-FMT1-B writer integration begins.
-
-## Next action after 10C-FMT1-A-V
-
-The first implementation task after checkpoint approval is:
-
-```text
-Task 10C-FMT1-B — finalized-hour v2 writer integration
-```
-
-10C-FMT1-B must stay focused on writer/day-file integration and must not broaden into scanner recovery repair, runtime aggregation, chart/query, FRAM, retention/pruning, or hardware validation.
+10C-FMT1-A-V must confirm the no-padding ABI, corrected sizes/offsets, v2-owned invalid sentinel, no dependency on legacy/transitional stager headers, no-v1 policy, generated schema coverage, and scope boundaries before 10C-FMT1-B writer integration begins.
 
 ## Required v2 sequence
 
@@ -70,6 +70,10 @@ Current intended sequence:
 - Day files require a bounded ASCII schema/preamble and the fixed `%%MESH_TEMPS_BINARY_START%%\n` marker before binary HourRecordV2 records.
 - Block magic/sentinel is a validation aid only; normal parsing must use explicit lengths, counts, offsets, versions, flags, and CRCs.
 - Production finalized-hour write/verify/scanner paths must remain bounded and heap-free.
+
+- Finalized-hour v2 must not include `reserved0`, fake padding, generic reserved bytes, or alignment filler merely to preserve mistaken byte counts; v2 has no production compatibility constraint, so byte counts come from semantic fields.
+- Correct finalized-hour v2 sizes are: HourRecordHeaderV2 48 bytes, SensorIndexEntryV2 12 bytes, SensorBlockHeaderV2 32 bytes, SensorDescriptorV2 106 bytes, SensorPayloadV2 136 bytes, fixed SensorBlockV2 274 bytes; block CRC offset is 24 and descriptor_flags offset is 22.
+- The authoritative v2 format module must not include or depend on `history_hour_stager.h`; it owns its v2 on-disk invalid-sample sentinel unless a future task proves a neutral shared-domain owner is warranted.
 
 ## Durability rule
 
