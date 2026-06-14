@@ -3,7 +3,7 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed after PR #57 R2 and 10C-FMT1-A-V validation; current work is the user/manual PR #57 ready-and-merge step.
+Status: Refreshed after PR #57 merge; current work is terminology cleanup before 10C-FMT1-B planning.
 Last updated: 2026-06-14
 
 ## Authority
@@ -24,22 +24,18 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT1-A-M — user/manual PR #57 ready-and-merge step
+Task 10C-FMT1-A-TERM — anchor terminology cleanup: use on-disk format, not ABI
 ```
 
-PR #57 has completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
+PR #57 has merged into `feature/ram-backed-sd-hist` and completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
 
-Before merge, the user should manually update the PR title/body if desired because Codex cannot update PR metadata in this workflow. Then the user may mark PR #57 ready and merge it into `feature/ram-backed-sd-hist`.
-
-## Next implementation task after PR #57 is merged
-
-After PR #57 is merged into `feature/ram-backed-sd-hist`, the next implementation task is:
+After this terminology cleanup lands, resume:
 
 ```text
-Task 10C-FMT1-B — writer integration for finalized-hour v2 records
+Task 10C-FMT1-B-P — plan writer integration for finalized-hour v2 records
 ```
 
-Do not start 10C-FMT1-B until PR #57 is merged and a fresh branch is started from the updated `feature/ram-backed-sd-hist` base.
+Do not start 10C-FMT1-B execution until 10C-FMT1-B-P planning is reviewed and accepted from a fresh branch based on the updated `feature/ram-backed-sd-hist` base.
 
 ## Required v2 sequence
 
@@ -47,7 +43,7 @@ Current intended sequence:
 
 ```text
 10C-FMT0 read-only v2 format plan/spec
-  -> 10C-FMT0-A v2 ABI decision/anchor cleanup
+  -> 10C-FMT0-A v2 on-disk format decision/anchor cleanup
   -> 10C-FMT1-A pure v2 format/schema/preamble skeleton
   -> 10C-FMT1-A-V checkpoint validation
   -> 10C-FMT1-B writer integration

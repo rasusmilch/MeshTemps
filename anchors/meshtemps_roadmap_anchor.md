@@ -384,7 +384,7 @@ Read-only planning/spec required before execution:
 
 Focused execute tasks after their prerequisites:
 
-- 10C-FMT1-A after 10C-FMT0-A resolves/approves the v2 ABI decision table.
+- 10C-FMT1-A after 10C-FMT0-A resolves/approves the v2 on-disk format decision table.
 - 10C-F2-B after v2 validation and repair policy approval.
 - 10C-F2-C after 10C-F2-B validation or within gated same draft PR.
 - 10D after 10C-F2V.
@@ -396,7 +396,7 @@ Focused execute tasks after their prerequisites:
 
 High-risk checkpoint validations are required for:
 
-- 10C-FMT0 review approval plus 10C-FMT0-A ABI decision-table approval before implementation.
+- 10C-FMT0 review approval plus 10C-FMT0-A on-disk format decision-table approval before implementation.
 - 10C-FMT1-A-V / 10C-FMT1-B-V / 10C-FMT1-C-V checkpoint validations as the v2 format work is split.
 - 10C-FMTV v2 writer/scanner/preamble validation.
 - 10C-F2V recovery validation.
@@ -423,10 +423,10 @@ Completed/merged work still needs integrated validation after the v2 format chan
 Current next required action:
 
 ```text
-Task 10C-FMT0-A — update v2 ABI decision table and anchor sequencing before implementation
+Task 10C-FMT0-A — update v2 on-disk format decision table and anchor sequencing before implementation
 ```
 
-After 10C-FMT0-A, the first implementation task is 10C-FMT1-A pure v2 format/schema/preamble skeleton, but only after the v2 ABI decision table is reviewed and the choices needed for 10C-FMT1-A are approved.
+After 10C-FMT0-A, the first implementation task is 10C-FMT1-A pure v2 format/schema/preamble skeleton, but only after the v2 on-disk format decision table is reviewed and the choices needed for 10C-FMT1-A are approved.
 
 10C-FMTV must validate the v2 format/writer/scanner/preamble path before 10C-F2-B repair/quarantine/fault implementation, 10C-F2-C runtime append guard, or 10D runtime aggregator.
 
