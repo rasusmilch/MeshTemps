@@ -3,7 +3,7 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed after PR #57 merge; current work is terminology cleanup before 10C-FMT1-B planning.
+Status: Refreshed during PR #58 stacked writer work; current work is the B1-R1 writer workspace/label-snapshot correction before B1 validation.
 Last updated: 2026-06-14
 
 ## Authority
@@ -24,18 +24,20 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT1-A-TERM — anchor terminology cleanup: use on-disk format, not ABI
+Task 10C-FMT1-B1-R1 — move finalized-hour v2 writer scratch and labels into explicit workspace
 ```
 
 PR #57 has merged into `feature/ram-backed-sd-hist` and completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
 
-After this terminology cleanup lands, resume:
+PR #58 is the current draft PR stack. It contains the anchor terminology cleanup plus the pure 10C-FMT1-B1 writer core work. The current correction is B1-R1: require caller-provided writer workspace, move large writer scratch out of automatic stack locals, and snapshot labels once before CRC/write passes.
+
+After B1-R1 lands, run:
 
 ```text
-Task 10C-FMT1-B-P — plan writer integration for finalized-hour v2 records
+Task 10C-FMT1-B1-V — validate pure finalized-hour v2 writer core and host tests
 ```
 
-Do not start 10C-FMT1-B execution until 10C-FMT1-B-P planning is reviewed and accepted from a fresh branch based on the updated `feature/ram-backed-sd-hist` base.
+Do not start 10C-FMT1-B2 SdHistoryStore/day-file append integration until B1-R1 is complete and B1-V is reviewed and accepted.
 
 ## Required v2 sequence
 

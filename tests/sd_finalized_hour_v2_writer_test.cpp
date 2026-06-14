@@ -12,6 +12,7 @@ struct TestHarness {
 };
 
 TestHarness g_test;
+static SdFinalizedHourV2WriterWorkspace g_writer_workspace;
 
 bool CheckTrue(bool condition, const char* expr, const char* file, int line) {
   if (condition) return true;
@@ -101,6 +102,76 @@ class TestLabels final : public ISdFinalizedHourV2LabelSource {
   }
 };
 
+class ChangingLabels final : public ISdFinalizedHourV2LabelSource {
+ public:
+  mutable uint32_t node_calls = 0;
+  mutable uint32_t sensor_calls = 0;
+
+  bool CopyNodeLabel(uint32_t node_id,
+                     uint8_t* out,
+                     size_t out_size,
+                     size_t* out_len,
+                     bool* out_truncated) const override {
+    (void)node_id;
+    if (out_len == nullptr || out_truncated == nullptr) return false;
+    ++node_calls;
+    *out_len = CopyLiteral((node_calls == 1U) ? "Node First" : "Node Later",
+                           out, out_size, out_truncated);
+    return true;
+  }
+
+  bool CopySensorLabel(uint64_t rom64,
+                       uint32_t node_id,
+                       uint8_t* out,
+                       size_t out_size,
+                       size_t* out_len,
+                       bool* out_truncated) const override {
+    (void)rom64;
+    (void)node_id;
+    if (out_len == nullptr || out_truncated == nullptr) return false;
+    ++sensor_calls;
+    *out_len = CopyLiteral((sensor_calls == 1U) ? "Sensor First" : "Sensor Later",
+                           out, out_size, out_truncated);
+    return true;
+  }
+};
+
+class FailingLabels final : public ISdFinalizedHourV2LabelSource {
+ public:
+  bool fail_node = true;
+  mutable uint32_t node_calls = 0;
+  mutable uint32_t sensor_calls = 0;
+
+  bool CopyNodeLabel(uint32_t node_id,
+                     uint8_t* out,
+                     size_t out_size,
+                     size_t* out_len,
+                     bool* out_truncated) const override {
+    (void)node_id;
+    (void)out;
+    (void)out_size;
+    if (out_len == nullptr || out_truncated == nullptr) return false;
+    ++node_calls;
+    *out_len = 0;
+    *out_truncated = false;
+    return !fail_node;
+  }
+
+  bool CopySensorLabel(uint64_t rom64,
+                       uint32_t node_id,
+                       uint8_t* out,
+                       size_t out_size,
+                       size_t* out_len,
+                       bool* out_truncated) const override {
+    (void)rom64;
+    (void)node_id;
+    if (out_len == nullptr || out_truncated == nullptr) return false;
+    ++sensor_calls;
+    *out_len = CopyLiteral("Sensor OK", out, out_size, out_truncated);
+    return fail_node;
+  }
+};
+
 bool BuildSnapshot(HistoryHourSnapshot* out) {
   if (out == nullptr) return false;
   RamHourStager stager;
@@ -128,7 +199,9 @@ bool WriteSnapshot(const HistoryHourSnapshot& snapshot,
                    const ISdFinalizedHourV2LabelSource* labels,
                    CaptureSink* sink,
                    SdFinalizedHourV2WriteStatus* status) {
-  return WriteSdFinalizedHourV2Record(snapshot, labels, CaptureWrite, sink, status);
+  g_writer_workspace = SdFinalizedHourV2WriterWorkspace{};
+  return WriteSdFinalizedHourV2Record(snapshot, labels, g_writer_workspace,
+                                      CaptureWrite, sink, status);
 }
 
 const uint8_t* BlockAt(const CaptureSink& sink, uint16_t index, uint16_t sensor_count) {
@@ -168,6 +241,34 @@ bool DecodeFirstRecord(const CaptureSink& sink,
              block + kSdFinalizedHourV2BlockHeaderBytes +
                  kSdFinalizedHourV2DescriptorBytes,
              kSdFinalizedHourV2PayloadBytes, payload);
+}
+
+bool RecordCrcsValidate(const CaptureSink& sink) {
+  SdFinalizedHourV2Header header;
+  if (!DecodeSdFinalizedHourV2Header(sink.bytes, sink.used, &header)) return false;
+  if (ComputeSdFinalizedHourV2HeaderCrc32(
+          sink.bytes, kSdFinalizedHourV2HeaderBytes) != header.header_crc32) {
+    return false;
+  }
+  if (ComputeSdFinalizedHourV2PayloadCrc32(
+          sink.bytes + kSdFinalizedHourV2HeaderBytes,
+          sink.used - kSdFinalizedHourV2HeaderBytes) != header.payload_crc32) {
+    return false;
+  }
+  for (uint16_t i = 0; i < header.sensor_count; ++i) {
+    const uint8_t* block = BlockAt(sink, i, header.sensor_count);
+    if (block == nullptr) return false;
+    SdFinalizedHourV2BlockHeader block_header;
+    if (!DecodeSdFinalizedHourV2BlockHeader(
+            block, kSdFinalizedHourV2FixedBlockBytes, &block_header)) {
+      return false;
+    }
+    if (ComputeSdFinalizedHourV2BlockCrc32(
+            block, kSdFinalizedHourV2FixedBlockBytes) != block_header.block_crc32) {
+      return false;
+    }
+  }
+  return true;
 }
 
 void TestOneSensorBasicStructure() {
@@ -432,8 +533,9 @@ void TestSinkFailures() {
   HistoryHourSnapshot snapshot;
   CHECK_TRUE(BuildSnapshot(&snapshot));
   SdFinalizedHourV2WriteStatus status;
-  CHECK_TRUE(!WriteSdFinalizedHourV2Record(snapshot, nullptr, nullptr, nullptr,
-                                           &status));
+  g_writer_workspace = SdFinalizedHourV2WriterWorkspace{};
+  CHECK_TRUE(!WriteSdFinalizedHourV2Record(snapshot, nullptr, g_writer_workspace,
+                                           nullptr, nullptr, &status));
   CHECK_EQ(status.failure_reason,
            SdFinalizedHourV2WriteFailureReason::kSinkFailure);
   CaptureSink sink;
@@ -475,6 +577,52 @@ void TestSchemaHasNoDurableSlotIdOrAddr16() {
   }
 }
 
+
+void TestChangingLabelsAreSnapshottedOnceAndCrcsValidate() {
+  HistoryHourSnapshot snapshot;
+  CHECK_TRUE(BuildSnapshot(&snapshot));
+  ChangingLabels labels;
+  CaptureSink sink;
+  SdFinalizedHourV2WriteStatus status;
+  CHECK_TRUE(WriteSnapshot(snapshot, &labels, &sink, &status));
+  CHECK_EQ(labels.node_calls, static_cast<uint32_t>(1));
+  CHECK_EQ(labels.sensor_calls, static_cast<uint32_t>(1));
+
+  SdFinalizedHourV2Header header;
+  SdFinalizedHourV2IndexEntry index;
+  SdFinalizedHourV2BlockHeader block_header;
+  SdFinalizedHourV2Descriptor descriptor;
+  SdFinalizedHourV2Payload payload;
+  CHECK_TRUE(DecodeFirstRecord(sink, &header, &index, &block_header,
+                               &descriptor, &payload));
+  (void)header;
+  (void)index;
+  (void)block_header;
+  (void)payload;
+  CHECK_EQ(descriptor.node_label_len, static_cast<uint8_t>(10));
+  CHECK_EQ(descriptor.sensor_label_len, static_cast<uint8_t>(12));
+  CHECK_TRUE(std::memcmp(descriptor.node_label, "Node First", 10) == 0);
+  CHECK_TRUE(std::memcmp(descriptor.sensor_label, "Sensor First", 12) == 0);
+  CHECK_TRUE(RecordCrcsValidate(sink));
+}
+
+void TestLabelSourceFailureWritesNoBytes() {
+  HistoryHourSnapshot snapshot;
+  CHECK_TRUE(BuildSnapshot(&snapshot));
+  FailingLabels labels;
+  labels.fail_node = true;
+  CaptureSink sink;
+  SdFinalizedHourV2WriteStatus status;
+  CHECK_TRUE(!WriteSnapshot(snapshot, &labels, &sink, &status));
+  CHECK_EQ(status.failure_reason,
+           SdFinalizedHourV2WriteFailureReason::kLabelSourceFailure);
+  CHECK_EQ(sink.used, static_cast<size_t>(0));
+  CHECK_EQ(sink.calls, static_cast<uint32_t>(0));
+  CHECK_EQ(status.bytes_written, static_cast<uint32_t>(0));
+  CHECK_EQ(labels.node_calls, static_cast<uint32_t>(1));
+  CHECK_EQ(labels.sensor_calls, static_cast<uint32_t>(0));
+}
+
 void Run(const char* name, void (*fn)()) {
   g_test.current_test = name;
   fn();
@@ -492,6 +640,8 @@ int main() {
   Run("TestCrcsValidateAndMutationsChangeCrcs", TestCrcsValidateAndMutationsChangeCrcs);
   Run("TestSinkFailures", TestSinkFailures);
   Run("TestSchemaHasNoDurableSlotIdOrAddr16", TestSchemaHasNoDurableSlotIdOrAddr16);
+  Run("TestChangingLabelsAreSnapshottedOnceAndCrcsValidate", TestChangingLabelsAreSnapshottedOnceAndCrcsValidate);
+  Run("TestLabelSourceFailureWritesNoBytes", TestLabelSourceFailureWritesNoBytes);
   if (g_test.failures != 0U) {
     std::cerr << g_test.failures << " failure(s)" << std::endl;
     return 1;

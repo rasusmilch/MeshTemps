@@ -6,15 +6,6 @@
 
 namespace {
 
-struct SensorWorkEntry {
-  uint8_t slot_index = 0;
-  uint64_t rom64 = 0;
-  uint16_t valid_sample_count = 0;
-  uint16_t missing_or_invalid_count = 0;
-  uint16_t corrected_sample_count = 0;
-  uint16_t sanitized_corrected_count = 0;
-};
-
 uint8_t MinuteMask(uint8_t minute) {
   return static_cast<uint8_t>(1U << (minute % 8U));
 }
@@ -79,10 +70,13 @@ uint16_t CountSnapshotCorrected(const HistoryHourSnapshot& snapshot,
 }
 
 bool PrepareSensorWork(const HistoryHourSnapshot& snapshot,
-                       SensorWorkEntry* entries,
+                       SdFinalizedHourV2WriterWorkspace& workspace,
                        uint16_t* entry_count,
                        SdFinalizedHourV2WriteStatus* status) {
-  if (entries == nullptr || entry_count == nullptr) return false;
+  if (entry_count == nullptr) {
+    SetFailure(status, SdFinalizedHourV2WriteFailureReason::kInvalidArgument);
+    return false;
+  }
   *entry_count = 0;
   if (snapshot.format_version != kHistoryHourSnapshotFormatVersion ||
       !snapshot.status.hour_active ||
@@ -95,12 +89,12 @@ bool PrepareSensorWork(const HistoryHourSnapshot& snapshot,
     const HistorySlotDescriptor& slot = snapshot.slots[slot_index];
     if (!SlotCanBeEmitted(slot)) continue;
     for (uint16_t i = 0; i < *entry_count; ++i) {
-      if (entries[i].rom64 == slot.rom64) {
+      if (workspace.entries[i].rom64 == slot.rom64) {
         SetFailure(status, SdFinalizedHourV2WriteFailureReason::kDuplicateRom64);
         return false;
       }
     }
-    SensorWorkEntry entry;
+    SdFinalizedHourV2WriterSensorWorkEntry entry;
     entry.slot_index = slot_index;
     entry.rom64 = slot.rom64;
     entry.valid_sample_count = CountSnapshotPresence(snapshot, slot_index);
@@ -111,29 +105,29 @@ bool PrepareSensorWork(const HistoryHourSnapshot& snapshot,
     const uint32_t missing = slot.missing_or_invalid_count;
     entry.missing_or_invalid_count =
         (missing > 0xFFFFU) ? 0xFFFFU : static_cast<uint16_t>(missing);
-    entries[*entry_count] = entry;
+    workspace.entries[*entry_count] = entry;
     ++(*entry_count);
   }
 
   for (uint16_t i = 1; i < *entry_count; ++i) {
-    const SensorWorkEntry key = entries[i];
+    const SdFinalizedHourV2WriterSensorWorkEntry key = workspace.entries[i];
     uint16_t j = i;
-    while (j > 0U && entries[j - 1U].rom64 > key.rom64) {
-      entries[j] = entries[j - 1U];
+    while (j > 0U && workspace.entries[j - 1U].rom64 > key.rom64) {
+      workspace.entries[j] = workspace.entries[j - 1U];
       --j;
     }
-    entries[j] = key;
+    workspace.entries[j] = key;
   }
   return true;
 }
 
-bool CopyLabelToDescriptor(const ISdFinalizedHourV2LabelSource* labels,
-                           const SensorWorkEntry& entry,
-                           const HistorySlotDescriptor& slot,
-                           bool node_label,
-                           SdFinalizedHourV2Descriptor* descriptor) {
-  if (descriptor == nullptr) return false;
-  uint8_t* out = node_label ? descriptor->node_label : descriptor->sensor_label;
+bool CopyOneLabelSnapshot(const ISdFinalizedHourV2LabelSource* labels,
+                          const SdFinalizedHourV2WriterSensorWorkEntry& entry,
+                          const HistorySlotDescriptor& slot,
+                          bool node_label,
+                          SdFinalizedHourV2WriterLabelSnapshot* snapshot) {
+  if (snapshot == nullptr) return false;
+  uint8_t* out = node_label ? snapshot->node_label : snapshot->sensor_label;
   const size_t out_size = node_label ? kSdFinalizedHourV2NodeLabelMaxBytes
                                      : kSdFinalizedHourV2SensorLabelMaxBytes;
   std::memset(out, 0, out_size);
@@ -148,24 +142,40 @@ bool CopyLabelToDescriptor(const ISdFinalizedHourV2LabelSource* labels,
                                 out_size, &out_len, &truncated);
   if (!ok || out_len > out_size) return false;
   if (node_label) {
-    descriptor->node_label_len = static_cast<uint8_t>(out_len);
-    if (truncated) {
-      descriptor->descriptor_flags |=
-          kSdFinalizedHourV2DescriptorFlagNodeLabelTruncated;
-    }
+    snapshot->node_label_len = static_cast<uint8_t>(out_len);
+    snapshot->node_label_truncated = truncated;
   } else {
-    descriptor->sensor_label_len = static_cast<uint8_t>(out_len);
-    if (truncated) {
-      descriptor->descriptor_flags |=
-          kSdFinalizedHourV2DescriptorFlagSensorLabelTruncated;
+    snapshot->sensor_label_len = static_cast<uint8_t>(out_len);
+    snapshot->sensor_label_truncated = truncated;
+  }
+  return true;
+}
+
+bool SnapshotLabels(const HistoryHourSnapshot& snapshot,
+                    const ISdFinalizedHourV2LabelSource* labels,
+                    SdFinalizedHourV2WriterWorkspace& workspace,
+                    uint16_t sensor_count,
+                    SdFinalizedHourV2WriteStatus* status) {
+  for (uint16_t i = 0; i < sensor_count; ++i) {
+    workspace.labels[i] = SdFinalizedHourV2WriterLabelSnapshot{};
+    const SdFinalizedHourV2WriterSensorWorkEntry& entry = workspace.entries[i];
+    if (entry.slot_index >= kHistorySlotCapacity) {
+      SetFailure(status, SdFinalizedHourV2WriteFailureReason::kInvalidSnapshot);
+      return false;
+    }
+    const HistorySlotDescriptor& slot = snapshot.slots[entry.slot_index];
+    if (!CopyOneLabelSnapshot(labels, entry, slot, true, &workspace.labels[i]) ||
+        !CopyOneLabelSnapshot(labels, entry, slot, false, &workspace.labels[i])) {
+      SetFailure(status, SdFinalizedHourV2WriteFailureReason::kLabelSourceFailure);
+      return false;
     }
   }
   return true;
 }
 
 bool BuildDescriptor(const HistoryHourSnapshot& snapshot,
-                     const SensorWorkEntry& entry,
-                     const ISdFinalizedHourV2LabelSource* labels,
+                     const SdFinalizedHourV2WriterSensorWorkEntry& entry,
+                     const SdFinalizedHourV2WriterLabelSnapshot& labels,
                      SdFinalizedHourV2Descriptor* descriptor) {
   if (descriptor == nullptr || entry.slot_index >= kHistorySlotCapacity) return false;
   const HistorySlotDescriptor& slot = snapshot.slots[entry.slot_index];
@@ -177,12 +187,25 @@ bool BuildDescriptor(const HistoryHourSnapshot& snapshot,
   descriptor->valid_sample_count = entry.valid_sample_count;
   descriptor->missing_or_invalid_count = entry.missing_or_invalid_count;
   descriptor->corrected_sample_count = entry.corrected_sample_count;
-  return CopyLabelToDescriptor(labels, entry, slot, true, descriptor) &&
-         CopyLabelToDescriptor(labels, entry, slot, false, descriptor);
+  descriptor->node_label_len = labels.node_label_len;
+  descriptor->sensor_label_len = labels.sensor_label_len;
+  if (labels.node_label_truncated) {
+    descriptor->descriptor_flags |=
+        kSdFinalizedHourV2DescriptorFlagNodeLabelTruncated;
+  }
+  if (labels.sensor_label_truncated) {
+    descriptor->descriptor_flags |=
+        kSdFinalizedHourV2DescriptorFlagSensorLabelTruncated;
+  }
+  std::memcpy(descriptor->node_label, labels.node_label,
+              kSdFinalizedHourV2NodeLabelMaxBytes);
+  std::memcpy(descriptor->sensor_label, labels.sensor_label,
+              kSdFinalizedHourV2SensorLabelMaxBytes);
+  return true;
 }
 
 bool BuildPayload(const HistoryHourSnapshot& snapshot,
-                  const SensorWorkEntry& entry,
+                  const SdFinalizedHourV2WriterSensorWorkEntry& entry,
                   SdFinalizedHourV2Payload* payload) {
   if (payload == nullptr) return false;
   *payload = SdFinalizedHourV2Payload{};
@@ -201,44 +224,38 @@ bool BuildPayload(const HistoryHourSnapshot& snapshot,
 }
 
 bool BuildFinalBlock(const HistoryHourSnapshot& snapshot,
-                     const SensorWorkEntry& entry,
-                     const ISdFinalizedHourV2LabelSource* labels,
-                     uint8_t* block,
-                     size_t block_size) {
-  if (block == nullptr || block_size < kSdFinalizedHourV2FixedBlockBytes) {
+                     const SdFinalizedHourV2WriterSensorWorkEntry& entry,
+                     const SdFinalizedHourV2WriterLabelSnapshot& labels,
+                     SdFinalizedHourV2WriterWorkspace& workspace) {
+  if (!BuildDescriptor(snapshot, entry, labels, &workspace.descriptor) ||
+      !BuildPayload(snapshot, entry, &workspace.payload)) {
     return false;
   }
 
-  SdFinalizedHourV2Descriptor descriptor;
-  SdFinalizedHourV2Payload payload;
-  if (!BuildDescriptor(snapshot, entry, labels, &descriptor) ||
-      !BuildPayload(snapshot, entry, &payload)) {
-    return false;
-  }
-
-  SdFinalizedHourV2BlockHeader block_header;
-  block_header.block_crc32 = 0;
-  if (!EncodeSdFinalizedHourV2BlockHeader(block_header, block,
-                                          kSdFinalizedHourV2BlockHeaderBytes) ||
+  workspace.block_header = SdFinalizedHourV2BlockHeader{};
+  workspace.block_header.block_crc32 = 0;
+  if (!EncodeSdFinalizedHourV2BlockHeader(
+          workspace.block_header, workspace.block,
+          kSdFinalizedHourV2BlockHeaderBytes) ||
       !EncodeSdFinalizedHourV2Descriptor(
-          descriptor, block + kSdFinalizedHourV2BlockHeaderBytes,
+          workspace.descriptor,
+          workspace.block + kSdFinalizedHourV2BlockHeaderBytes,
           kSdFinalizedHourV2DescriptorBytes) ||
       !EncodeSdFinalizedHourV2Payload(
-          payload,
-          block + kSdFinalizedHourV2BlockHeaderBytes +
+          workspace.payload,
+          workspace.block + kSdFinalizedHourV2BlockHeaderBytes +
               kSdFinalizedHourV2DescriptorBytes,
           kSdFinalizedHourV2PayloadBytes)) {
     return false;
   }
 
-  block_header.block_crc32 =
-      ComputeSdFinalizedHourV2BlockCrc32(block,
-                                         kSdFinalizedHourV2FixedBlockBytes);
+  workspace.block_header.block_crc32 = ComputeSdFinalizedHourV2BlockCrc32(
+      workspace.block, kSdFinalizedHourV2FixedBlockBytes);
   return EncodeSdFinalizedHourV2BlockHeader(
-      block_header, block, kSdFinalizedHourV2BlockHeaderBytes);
+      workspace.block_header, workspace.block, kSdFinalizedHourV2BlockHeaderBytes);
 }
 
-bool EncodeIndexEntry(const SensorWorkEntry& entry,
+bool EncodeIndexEntry(const SdFinalizedHourV2WriterSensorWorkEntry& entry,
                       uint16_t sorted_index,
                       uint16_t sensor_count,
                       uint8_t* out,
@@ -254,26 +271,27 @@ bool EncodeIndexEntry(const SensorWorkEntry& entry,
 }
 
 bool ComputePayloadCrc(const HistoryHourSnapshot& snapshot,
-                       const SensorWorkEntry* entries,
+                       SdFinalizedHourV2WriterWorkspace& workspace,
                        uint16_t sensor_count,
-                       const ISdFinalizedHourV2LabelSource* labels,
                        uint32_t* out_crc) {
-  if (entries == nullptr || out_crc == nullptr) return false;
-  uint8_t index_bytes[kSdFinalizedHourV2IndexEntryBytes] = {};
-  uint8_t block[kSdFinalizedHourV2FixedBlockBytes] = {};
+  if (out_crc == nullptr) return false;
   uint32_t crc = Crc32IsoHdlcBegin();
   for (uint16_t i = 0; i < sensor_count; ++i) {
-    if (!EncodeIndexEntry(entries[i], i, sensor_count, index_bytes,
-                          sizeof(index_bytes))) {
+    if (!EncodeIndexEntry(workspace.entries[i], i, sensor_count,
+                          workspace.index_bytes,
+                          sizeof(workspace.index_bytes))) {
       return false;
     }
-    crc = Crc32IsoHdlcUpdate(crc, index_bytes, sizeof(index_bytes));
+    crc = Crc32IsoHdlcUpdate(crc, workspace.index_bytes,
+                             sizeof(workspace.index_bytes));
   }
   for (uint16_t i = 0; i < sensor_count; ++i) {
-    if (!BuildFinalBlock(snapshot, entries[i], labels, block, sizeof(block))) {
+    if (!BuildFinalBlock(snapshot, workspace.entries[i], workspace.labels[i],
+                         workspace)) {
       return false;
     }
-    crc = Crc32IsoHdlcUpdate(crc, block, kSdFinalizedHourV2FixedBlockBytes);
+    crc = Crc32IsoHdlcUpdate(crc, workspace.block,
+                             kSdFinalizedHourV2FixedBlockBytes);
   }
   *out_crc = Crc32IsoHdlcFinalize(crc);
   return true;
@@ -282,35 +300,38 @@ bool ComputePayloadCrc(const HistoryHourSnapshot& snapshot,
 bool BuildHeader(uint32_t hour_start_epoch_minute,
                  uint16_t sensor_count,
                  uint32_t payload_crc,
-                 uint8_t* header_bytes,
-                 size_t header_size,
+                 SdFinalizedHourV2WriterWorkspace& workspace,
                  SdFinalizedHourV2WriteStatus* status) {
-  if (header_bytes == nullptr || header_size < kSdFinalizedHourV2HeaderBytes) {
+  workspace.header = SdFinalizedHourV2Header{};
+  workspace.header.hour_start_epoch_minute = hour_start_epoch_minute;
+  workspace.header.sensor_count = sensor_count;
+  workspace.header.index_offset = kSdFinalizedHourV2HeaderBytes;
+  workspace.header.index_bytes = static_cast<uint32_t>(sensor_count) *
+                                 kSdFinalizedHourV2IndexEntryBytes;
+  workspace.header.sensor_blocks_offset =
+      kSdFinalizedHourV2HeaderBytes + workspace.header.index_bytes;
+  workspace.header.sensor_blocks_bytes = static_cast<uint32_t>(sensor_count) *
+                                         kSdFinalizedHourV2FixedBlockBytes;
+  workspace.header.record_bytes = kSdFinalizedHourV2HeaderBytes +
+                                  workspace.header.index_bytes +
+                                  workspace.header.sensor_blocks_bytes;
+  workspace.header.payload_crc32 = payload_crc;
+  workspace.header.header_crc32 = 0;
+  if (!EncodeSdFinalizedHourV2Header(workspace.header, workspace.header_bytes,
+                                     sizeof(workspace.header_bytes))) {
     return false;
   }
-  SdFinalizedHourV2Header header;
-  header.hour_start_epoch_minute = hour_start_epoch_minute;
-  header.sensor_count = sensor_count;
-  header.index_offset = kSdFinalizedHourV2HeaderBytes;
-  header.index_bytes = static_cast<uint32_t>(sensor_count) *
-                       kSdFinalizedHourV2IndexEntryBytes;
-  header.sensor_blocks_offset = kSdFinalizedHourV2HeaderBytes + header.index_bytes;
-  header.sensor_blocks_bytes = static_cast<uint32_t>(sensor_count) *
-                               kSdFinalizedHourV2FixedBlockBytes;
-  header.record_bytes = kSdFinalizedHourV2HeaderBytes + header.index_bytes +
-                        header.sensor_blocks_bytes;
-  header.payload_crc32 = payload_crc;
-  header.header_crc32 = 0;
-  if (!EncodeSdFinalizedHourV2Header(header, header_bytes, header_size)) return false;
-  header.header_crc32 =
-      ComputeSdFinalizedHourV2HeaderCrc32(header_bytes,
-                                          kSdFinalizedHourV2HeaderBytes);
-  if (!EncodeSdFinalizedHourV2Header(header, header_bytes, header_size)) return false;
+  workspace.header.header_crc32 = ComputeSdFinalizedHourV2HeaderCrc32(
+      workspace.header_bytes, kSdFinalizedHourV2HeaderBytes);
+  if (!EncodeSdFinalizedHourV2Header(workspace.header, workspace.header_bytes,
+                                     sizeof(workspace.header_bytes))) {
+    return false;
+  }
   if (status != nullptr) {
     status->sensor_count = sensor_count;
-    status->record_bytes = header.record_bytes;
+    status->record_bytes = workspace.header.record_bytes;
     status->payload_crc32 = payload_crc;
-    status->header_crc32 = header.header_crc32;
+    status->header_crc32 = workspace.header.header_crc32;
   }
   return true;
 }
@@ -320,6 +341,7 @@ bool BuildHeader(uint32_t hour_start_epoch_minute,
 bool WriteSdFinalizedHourV2Record(
     const HistoryHourSnapshot& snapshot,
     const ISdFinalizedHourV2LabelSource* labels,
+    SdFinalizedHourV2WriterWorkspace& workspace,
     SdFinalizedHourV2WriteFn write_fn,
     void* ctx,
     SdFinalizedHourV2WriteStatus* out_status) {
@@ -328,15 +350,14 @@ bool WriteSdFinalizedHourV2Record(
       (out_status != nullptr) ? out_status : &local_status;
   *status = SdFinalizedHourV2WriteStatus{};
 
-  SensorWorkEntry entries[kHistorySlotCapacity] = {};
   uint16_t sensor_count = 0;
-  if (!PrepareSensorWork(snapshot, entries, &sensor_count, status)) {
+  if (!PrepareSensorWork(snapshot, workspace, &sensor_count, status)) {
     return false;
   }
 
   for (uint16_t i = 0; i < sensor_count; ++i) {
     status->corrected_without_presence_sanitized +=
-        entries[i].sanitized_corrected_count;
+        workspace.entries[i].sanitized_corrected_count;
   }
 
   if (sensor_count == 0U) {
@@ -345,41 +366,46 @@ bool WriteSdFinalizedHourV2Record(
     return true;
   }
 
+  if (!SnapshotLabels(snapshot, labels, workspace, sensor_count, status)) {
+    return false;
+  }
+
   uint32_t payload_crc = 0;
-  if (!ComputePayloadCrc(snapshot, entries, sensor_count, labels, &payload_crc)) {
+  if (!ComputePayloadCrc(snapshot, workspace, sensor_count, &payload_crc)) {
     SetFailure(status, SdFinalizedHourV2WriteFailureReason::kSerializationFailure);
     return false;
   }
 
-  uint8_t header_bytes[kSdFinalizedHourV2HeaderBytes] = {};
   if (!BuildHeader(snapshot.hour_start_epoch_minute, sensor_count, payload_crc,
-                   header_bytes, sizeof(header_bytes), status)) {
+                   workspace, status)) {
     SetFailure(status, SdFinalizedHourV2WriteFailureReason::kSerializationFailure);
     return false;
   }
 
-  uint8_t index_bytes[kSdFinalizedHourV2IndexEntryBytes] = {};
-  uint8_t block[kSdFinalizedHourV2FixedBlockBytes] = {};
-  if (!WriteAll(write_fn, ctx, header_bytes, sizeof(header_bytes), status)) {
+  if (!WriteAll(write_fn, ctx, workspace.header_bytes,
+                sizeof(workspace.header_bytes), status)) {
     return false;
   }
   for (uint16_t i = 0; i < sensor_count; ++i) {
-    if (!EncodeIndexEntry(entries[i], i, sensor_count, index_bytes,
-                          sizeof(index_bytes))) {
+    if (!EncodeIndexEntry(workspace.entries[i], i, sensor_count,
+                          workspace.index_bytes,
+                          sizeof(workspace.index_bytes))) {
       SetFailure(status, SdFinalizedHourV2WriteFailureReason::kSerializationFailure);
       return false;
     }
-    if (!WriteAll(write_fn, ctx, index_bytes, sizeof(index_bytes), status)) {
+    if (!WriteAll(write_fn, ctx, workspace.index_bytes,
+                  sizeof(workspace.index_bytes), status)) {
       return false;
     }
   }
   for (uint16_t i = 0; i < sensor_count; ++i) {
-    if (!BuildFinalBlock(snapshot, entries[i], labels, block, sizeof(block))) {
+    if (!BuildFinalBlock(snapshot, workspace.entries[i], workspace.labels[i],
+                         workspace)) {
       SetFailure(status, SdFinalizedHourV2WriteFailureReason::kSerializationFailure);
       return false;
     }
-    if (!WriteAll(write_fn, ctx, block, kSdFinalizedHourV2FixedBlockBytes,
-                  status)) {
+    if (!WriteAll(write_fn, ctx, workspace.block,
+                  kSdFinalizedHourV2FixedBlockBytes, status)) {
       return false;
     }
   }
