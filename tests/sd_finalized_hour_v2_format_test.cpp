@@ -113,10 +113,10 @@ void TestBinaryStartMarker() {
 void TestV2FieldSizes() {
   CHECK_EQ(kSdFinalizedHourV2HeaderBytes, static_cast<uint16_t>(48));
   CHECK_EQ(kSdFinalizedHourV2IndexEntryBytes, static_cast<uint16_t>(12));
-  CHECK_EQ(kSdFinalizedHourV2BlockHeaderBytes, static_cast<uint16_t>(36));
-  CHECK_EQ(kSdFinalizedHourV2DescriptorBytes, static_cast<uint16_t>(108));
+  CHECK_EQ(kSdFinalizedHourV2BlockHeaderBytes, static_cast<uint16_t>(32));
+  CHECK_EQ(kSdFinalizedHourV2DescriptorBytes, static_cast<uint16_t>(106));
   CHECK_EQ(kSdFinalizedHourV2PayloadBytes, static_cast<uint16_t>(136));
-  CHECK_EQ(kSdFinalizedHourV2FixedBlockBytes, static_cast<uint16_t>(280));
+  CHECK_EQ(kSdFinalizedHourV2FixedBlockBytes, static_cast<uint16_t>(274));
 }
 
 void TestV2FieldOffsets() {
@@ -131,6 +131,18 @@ void TestV2FieldOffsets() {
   ExpectTable(fields, count, kSdFinalizedHourV2DescriptorBytes);
   fields = SdFinalizedHourV2PayloadFields(&count);
   ExpectTable(fields, count, kSdFinalizedHourV2PayloadBytes);
+  fields = SdFinalizedHourV2BlockHeaderFields(&count);
+  CHECK_EQ(fields[10].offset, static_cast<uint16_t>(24));
+  CHECK_TRUE(std::strcmp(fields[10].name, "block_crc32") == 0);
+  CHECK_EQ(fields[11].offset, static_cast<uint16_t>(28));
+  CHECK_TRUE(std::strcmp(fields[11].name, "flags") == 0);
+  fields = SdFinalizedHourV2DescriptorFields(&count);
+  CHECK_EQ(fields[9].offset, static_cast<uint16_t>(22));
+  CHECK_TRUE(std::strcmp(fields[9].name, "descriptor_flags") == 0);
+  CHECK_EQ(fields[10].offset, static_cast<uint16_t>(26));
+  CHECK_TRUE(std::strcmp(fields[10].name, "node_label") == 0);
+  CHECK_EQ(fields[11].offset, static_cast<uint16_t>(58));
+  CHECK_TRUE(std::strcmp(fields[11].name, "sensor_label") == 0);
 }
 
 void TestV2SchemaFieldTablesContainEveryApprovedField() {
@@ -155,6 +167,7 @@ void TestV2SchemaFieldTablesContainEveryApprovedField() {
 
 void TestV2SchemaDoesNotContainDurableSlotId() { CHECK_TRUE(!TablesHaveForbiddenField("slot_id")); }
 void TestV2SchemaDoesNotContainStoredAddr16() { CHECK_TRUE(!TablesHaveForbiddenField("addr16")); }
+void TestV2SchemaDoesNotContainReserved0() { CHECK_TRUE(!TablesHaveForbiddenField("reserved0")); }
 
 void TestPreambleIncludesFormatAndMarker() {
   const std::string p = Preamble();
@@ -215,7 +228,17 @@ void TestPreambleIncludesSampleEncodingAndBitmapRules() {
   CHECK_CONTAINS(p, "presence bitmap");
   CHECK_CONTAINS(p, "corrected bitmap");
   CHECK_CONTAINS(p, "int16 centi-C");
-  CHECK_CONTAINS(p, "kHistoryInvalidTempCentiC");
+  CHECK_CONTAINS(p, "kSdFinalizedHourV2InvalidTempCentiC");
+  const std::string legacy_stager_sentinel =
+      std::string("kHistory") + "InvalidTempCentiC";
+  CHECK_TRUE(!Contains(p, legacy_stager_sentinel));
+  CHECK_CONTAINS(p, "SensorBlockHeaderV2=32 bytes");
+  CHECK_CONTAINS(p, "SensorDescriptorV2=106 bytes");
+  CHECK_CONTAINS(p, "fixed SensorBlockV2=274 bytes");
+  CHECK_CONTAINS(p, "block_crc32 offset=24");
+  CHECK_CONTAINS(p, "descriptor_flags offset=22");
+  CHECK_CONTAINS(p, "no reserved fields");
+  CHECK_TRUE(!Contains(p, "reserved0"));
 }
 void TestPreambleIncludesValidityRecoveryPrinciples() {
   const std::string p = Preamble();
@@ -270,15 +293,15 @@ void TestEncodeDecodeSensorDescriptorV2RoundTrip() {
 void TestEncodeDecodeSensorPayloadV2RoundTrip() {
   SdFinalizedHourV2Payload in; in.presence_bitmap[0] = 3; in.corrected_bitmap[0] = 2; in.samples[0] = 123; in.samples[1] = -456; FillMissingSdFinalizedHourV2Samples(&in);
   uint8_t b[kSdFinalizedHourV2PayloadBytes] = {}; SdFinalizedHourV2Payload out;
-  CHECK_TRUE(EncodeSdFinalizedHourV2Payload(in, b, sizeof(b))); CHECK_TRUE(DecodeSdFinalizedHourV2Payload(b, sizeof(b), &out)); CHECK_EQ(out.presence_bitmap[0], in.presence_bitmap[0]); CHECK_EQ(out.samples[2], kHistoryInvalidTempCentiC);
+  CHECK_TRUE(EncodeSdFinalizedHourV2Payload(in, b, sizeof(b))); CHECK_TRUE(DecodeSdFinalizedHourV2Payload(b, sizeof(b), &out)); CHECK_EQ(out.presence_bitmap[0], in.presence_bitmap[0]); CHECK_EQ(out.samples[2], kSdFinalizedHourV2InvalidTempCentiC);
 }
 void TestDescriptorLabelTruncationFlagsExist() {
   CHECK_TRUE(kSdFinalizedHourV2DescriptorFlagNodeLabelTruncated != 0U);
   CHECK_TRUE(kSdFinalizedHourV2DescriptorFlagSensorLabelTruncated != 0U);
   CHECK_TRUE(kSdFinalizedHourV2DescriptorFlagNodeLabelTruncated != kSdFinalizedHourV2DescriptorFlagSensorLabelTruncated);
 }
-void TestMissingSamplesUseHistoryInvalidTempCentiC() {
-  SdFinalizedHourV2Payload p; p.presence_bitmap[0] = 1; p.samples[0] = 2500; FillMissingSdFinalizedHourV2Samples(&p); CHECK_EQ(p.samples[0], static_cast<int16_t>(2500)); CHECK_EQ(p.samples[1], kHistoryInvalidTempCentiC);
+void TestMissingSamplesUseV2InvalidTempCentiC() {
+  SdFinalizedHourV2Payload p; p.presence_bitmap[0] = 1; p.samples[0] = 2500; FillMissingSdFinalizedHourV2Samples(&p); CHECK_EQ(p.samples[0], static_cast<int16_t>(2500)); CHECK_EQ(p.samples[1], kSdFinalizedHourV2InvalidTempCentiC);
 }
 void TestCorrectedWithoutPresenceIsInvalid() {
   SdFinalizedHourV2Payload p; p.corrected_bitmap[0] = 1; CHECK_TRUE(!SdFinalizedHourV2PayloadBitmapsAreValid(p)); p.presence_bitmap[0] = 1; CHECK_TRUE(SdFinalizedHourV2PayloadBitmapsAreValid(p));
@@ -287,7 +310,7 @@ void TestHeaderCrcZerosHeaderCrcField() {
   SdFinalizedHourV2Header h; h.record_bytes = 99; h.header_crc32 = 0x11111111; uint8_t a[kSdFinalizedHourV2HeaderBytes] = {}; uint8_t b[kSdFinalizedHourV2HeaderBytes] = {}; CHECK_TRUE(EncodeSdFinalizedHourV2Header(h, a, sizeof(a))); h.header_crc32 = 0x22222222; CHECK_TRUE(EncodeSdFinalizedHourV2Header(h, b, sizeof(b))); CHECK_EQ(ComputeSdFinalizedHourV2HeaderCrc32(a, sizeof(a)), ComputeSdFinalizedHourV2HeaderCrc32(b, sizeof(b)));
 }
 void TestBlockCrcZerosBlockCrcField() {
-  SdFinalizedHourV2BlockHeader h; uint8_t a[kSdFinalizedHourV2FixedBlockBytes] = {}; uint8_t b[kSdFinalizedHourV2FixedBlockBytes] = {}; h.block_crc32 = 1; CHECK_TRUE(EncodeSdFinalizedHourV2BlockHeader(h, a, kSdFinalizedHourV2BlockHeaderBytes)); h.block_crc32 = 2; CHECK_TRUE(EncodeSdFinalizedHourV2BlockHeader(h, b, kSdFinalizedHourV2BlockHeaderBytes)); CHECK_EQ(ComputeSdFinalizedHourV2BlockCrc32(a, sizeof(a)), ComputeSdFinalizedHourV2BlockCrc32(b, sizeof(b)));
+  SdFinalizedHourV2BlockHeader h; uint8_t a[kSdFinalizedHourV2FixedBlockBytes] = {}; uint8_t b[kSdFinalizedHourV2FixedBlockBytes] = {}; h.block_crc32 = 1; CHECK_TRUE(EncodeSdFinalizedHourV2BlockHeader(h, a, kSdFinalizedHourV2BlockHeaderBytes)); h.block_crc32 = 2; CHECK_TRUE(EncodeSdFinalizedHourV2BlockHeader(h, b, kSdFinalizedHourV2BlockHeaderBytes)); CHECK_EQ(ComputeSdFinalizedHourV2BlockCrc32(a, sizeof(a)), ComputeSdFinalizedHourV2BlockCrc32(b, sizeof(b))); b[28] ^= 0x01U; CHECK_TRUE(ComputeSdFinalizedHourV2BlockCrc32(a, sizeof(a)) != ComputeSdFinalizedHourV2BlockCrc32(b, sizeof(b)));
 }
 void TestPayloadCrcCoversIndexAndBlocksOnly() {
   uint8_t bytes[5] = {1,2,3,4,5}; CHECK_EQ(ComputeSdFinalizedHourV2PayloadCrc32(bytes, sizeof(bytes)), Crc32IsoHdlc(bytes, sizeof(bytes))); bytes[4] = 6; CHECK_TRUE(ComputeSdFinalizedHourV2PayloadCrc32(bytes, sizeof(bytes)) != Crc32IsoHdlc(reinterpret_cast<const uint8_t*>("\x01\x02\x03\x04\x05"), 5));
@@ -306,6 +329,7 @@ int main() {
   Run("TestV2SchemaFieldTablesContainEveryApprovedField", TestV2SchemaFieldTablesContainEveryApprovedField);
   Run("TestV2SchemaDoesNotContainDurableSlotId", TestV2SchemaDoesNotContainDurableSlotId);
   Run("TestV2SchemaDoesNotContainStoredAddr16", TestV2SchemaDoesNotContainStoredAddr16);
+  Run("TestV2SchemaDoesNotContainReserved0", TestV2SchemaDoesNotContainReserved0);
   Run("TestPreambleIncludesFormatAndMarker", TestPreambleIncludesFormatAndMarker);
   Run("TestPreambleIncludesEndian", TestPreambleIncludesEndian);
   Run("TestPreambleIncludesEveryFieldNameTypeAndByteLength", TestPreambleIncludesEveryFieldNameTypeAndByteLength);
@@ -322,7 +346,7 @@ int main() {
   Run("TestEncodeDecodeSensorDescriptorV2RoundTrip", TestEncodeDecodeSensorDescriptorV2RoundTrip);
   Run("TestEncodeDecodeSensorPayloadV2RoundTrip", TestEncodeDecodeSensorPayloadV2RoundTrip);
   Run("TestDescriptorLabelTruncationFlagsExist", TestDescriptorLabelTruncationFlagsExist);
-  Run("TestMissingSamplesUseHistoryInvalidTempCentiC", TestMissingSamplesUseHistoryInvalidTempCentiC);
+  Run("TestMissingSamplesUseV2InvalidTempCentiC", TestMissingSamplesUseV2InvalidTempCentiC);
   Run("TestCorrectedWithoutPresenceIsInvalid", TestCorrectedWithoutPresenceIsInvalid);
   Run("TestHeaderCrcZerosHeaderCrcField", TestHeaderCrcZerosHeaderCrcField);
   Run("TestBlockCrcZerosBlockCrcField", TestBlockCrcZerosBlockCrcField);

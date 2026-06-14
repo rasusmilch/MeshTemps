@@ -7,7 +7,7 @@
 namespace {
 
 constexpr uint16_t kHeaderCrcOffset = 40;
-constexpr uint16_t kBlockCrcOffset = 28;
+constexpr uint16_t kBlockCrcOffset = 24;
 
 const SdFinalizedHourV2FieldSpec kHeaderFields[] = {
     {"record_magic", "u32", 0, 4, "MTH2 record magic"},
@@ -42,9 +42,8 @@ const SdFinalizedHourV2FieldSpec kBlockHeaderFields[] = {
     {"sample_count", "u16", 18, 2, "minute sample count"},
     {"sample_bytes", "u16", 20, 2, "bytes per sample"},
     {"sample_encoding", "u16", 22, 2, "int16 centi-C little-endian encoding"},
-    {"reserved0", "u32", 24, 4, "reserved zero for v2 block header alignment"},
-    {"block_crc32", "u32", 28, 4, "CRC over block with this field zeroed"},
-    {"flags", "u32", 32, 4, "block flags"},
+    {"block_crc32", "u32", 24, 4, "CRC over block with this field zeroed"},
+    {"flags", "u32", 28, 4, "block flags"},
 };
 
 const SdFinalizedHourV2FieldSpec kDescriptorFields[] = {
@@ -57,10 +56,9 @@ const SdFinalizedHourV2FieldSpec kDescriptorFields[] = {
     {"corrected_sample_count", "u16", 18, 2, "corrected valid sample count"},
     {"node_label_len", "u8", 20, 1, "node label byte length"},
     {"sensor_label_len", "u8", 21, 1, "sensor label byte length"},
-    {"reserved0", "u16", 22, 2, "reserved zero for v2 descriptor alignment"},
-    {"descriptor_flags", "u32", 24, 4, "descriptor flags including truncation"},
-    {"node_label", "u8[32]", 28, 32, "UTF-8-compatible node label bytes"},
-    {"sensor_label", "u8[48]", 60, 48, "UTF-8-compatible sensor label bytes"},
+    {"descriptor_flags", "u32", 22, 4, "descriptor flags including truncation"},
+    {"node_label", "u8[32]", 26, 32, "UTF-8-compatible node label bytes"},
+    {"sensor_label", "u8[48]", 58, 48, "UTF-8-compatible sensor label bytes"},
 };
 
 const SdFinalizedHourV2FieldSpec kPayloadFields[] = {
@@ -335,7 +333,6 @@ bool EncodeSdFinalizedHourV2BlockHeader(const SdFinalizedHourV2BlockHeader& in, 
          SdFinalizedHourV2PutU16Le(out, len, &o, in.sample_count) &&
          SdFinalizedHourV2PutU16Le(out, len, &o, in.sample_bytes) &&
          SdFinalizedHourV2PutU16Le(out, len, &o, in.sample_encoding) &&
-         SdFinalizedHourV2PutU32Le(out, len, &o, 0U) &&
          SdFinalizedHourV2PutU32Le(out, len, &o, in.block_crc32) &&
          SdFinalizedHourV2PutU32Le(out, len, &o, in.flags) &&
          o == kSdFinalizedHourV2BlockHeaderBytes;
@@ -354,7 +351,6 @@ bool DecodeSdFinalizedHourV2BlockHeader(const uint8_t* data, size_t len, SdFinal
          SdFinalizedHourV2ReadU16Le(data, len, &o, &out->sample_count) &&
          SdFinalizedHourV2ReadU16Le(data, len, &o, &out->sample_bytes) &&
          SdFinalizedHourV2ReadU16Le(data, len, &o, &out->sample_encoding) &&
-         [&]() { uint32_t reserved = 0; return SdFinalizedHourV2ReadU32Le(data, len, &o, &reserved) && reserved == 0U; }() &&
          SdFinalizedHourV2ReadU32Le(data, len, &o, &out->block_crc32) &&
          SdFinalizedHourV2ReadU32Le(data, len, &o, &out->flags) &&
          o == kSdFinalizedHourV2BlockHeaderBytes;
@@ -374,7 +370,6 @@ bool EncodeSdFinalizedHourV2Descriptor(const SdFinalizedHourV2Descriptor& in, ui
         SdFinalizedHourV2PutU16Le(out, len, &o, in.corrected_sample_count) &&
         SdFinalizedHourV2PutU8(out, len, &o, in.node_label_len) &&
         SdFinalizedHourV2PutU8(out, len, &o, in.sensor_label_len) &&
-        SdFinalizedHourV2PutU16Le(out, len, &o, 0U) &&
         SdFinalizedHourV2PutU32Le(out, len, &o, in.descriptor_flags))) return false;
   for (uint8_t value : in.node_label) if (!SdFinalizedHourV2PutU8(out, len, &o, value)) return false;
   for (uint8_t value : in.sensor_label) if (!SdFinalizedHourV2PutU8(out, len, &o, value)) return false;
@@ -393,7 +388,6 @@ bool DecodeSdFinalizedHourV2Descriptor(const uint8_t* data, size_t len, SdFinali
         SdFinalizedHourV2ReadU16Le(data, len, &o, &out->corrected_sample_count) &&
         SdFinalizedHourV2ReadU8(data, len, &o, &out->node_label_len) &&
         SdFinalizedHourV2ReadU8(data, len, &o, &out->sensor_label_len) &&
-        [&]() { uint16_t reserved = 0; return SdFinalizedHourV2ReadU16Le(data, len, &o, &reserved) && reserved == 0U; }() &&
         SdFinalizedHourV2ReadU32Le(data, len, &o, &out->descriptor_flags))) return false;
   if (out->node_label_len > kSdFinalizedHourV2NodeLabelMaxBytes ||
       out->sensor_label_len > kSdFinalizedHourV2SensorLabelMaxBytes) return false;
@@ -425,7 +419,7 @@ void FillMissingSdFinalizedHourV2Samples(SdFinalizedHourV2Payload* payload) {
   for (uint16_t i = 0; i < kSdFinalizedHourV2SampleCount; ++i) {
     const uint8_t mask = static_cast<uint8_t>(1U << (i % 8U));
     if ((payload->presence_bitmap[i / 8U] & mask) == 0U) {
-      payload->samples[i] = kHistoryInvalidTempCentiC;
+      payload->samples[i] = kSdFinalizedHourV2InvalidTempCentiC;
     }
   }
 }
@@ -475,7 +469,8 @@ size_t BuildSdFinalizedHourV2Preamble(char* out, size_t len) {
   AppendLiteral(out, len, &o, " stored=little-endian-u32\n");
   AppendLiteral(out, len, &o, "CRC coverage: header_crc32 covers HourRecordHeaderV2 with header_crc32 zeroed; payload_crc32 covers SensorIndexTableV2 plus all SensorBlockV2 bytes excluding header; block_crc32 covers SensorBlockHeaderV2 with block_crc32 zeroed plus descriptor plus payload\n");
   AppendLiteral(out, len, &o, "label rules: UTF-8-compatible raw bytes with explicit lengths; node max 32; sensor max 48; not NUL-terminated for parsing; overlong labels truncated and descriptor flags set; labels are context not identity\n");
-  AppendLiteral(out, len, &o, "sample rules: 8-byte presence bitmap; 8-byte corrected bitmap; 60 int16 centi-C little-endian samples; missing positions filled with kHistoryInvalidTempCentiC; validity comes only from presence; corrected without presence is corrupt\n");
+  AppendLiteral(out, len, &o, "size rules: HourRecordHeaderV2=48 bytes; SensorIndexEntryV2=12 bytes; SensorBlockHeaderV2=32 bytes; SensorDescriptorV2=106 bytes; SensorPayloadV2=136 bytes; fixed SensorBlockV2=274 bytes; block_crc32 offset=24; descriptor_flags offset=22; no reserved fields, no fake padding, no generic reserved bytes\n");
+  AppendLiteral(out, len, &o, "sample rules: 8-byte presence bitmap; 8-byte corrected bitmap; 60 int16 centi-C little-endian samples; missing positions filled with kSdFinalizedHourV2InvalidTempCentiC; validity comes only from presence; corrected without presence is corrupt; v2 format owns ABI constants and does not depend on staging internals\n");
   AppendLiteral(out, len, &o, "validity rules: duplicate ROM64 index/block entries are corrupt; sensor blocks sorted by ROM64; zero-sensor hour records skipped; any bad required block structural check or bad block CRC invalidates the whole hour record\n");
   AppendFieldTable(out, len, &o, "HourRecordHeaderV2 fields:", kHeaderFields,
                    sizeof(kHeaderFields) / sizeof(kHeaderFields[0]));

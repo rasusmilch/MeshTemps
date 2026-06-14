@@ -3,9 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 
 #include "history_crc.h"
-#include "history_hour_stager.h"
 
 constexpr uint32_t kSdFinalizedHourV2RecordMagic = 0x3248544Du;  // MTH2
 constexpr uint16_t kSdFinalizedHourV2RecordVersion = 2;
@@ -16,9 +16,11 @@ constexpr char kSdFinalizedHourV2BinaryStartMarker[] =
 
 constexpr uint16_t kSdFinalizedHourV2HeaderBytes = 48;
 constexpr uint16_t kSdFinalizedHourV2IndexEntryBytes = 12;
-constexpr uint16_t kSdFinalizedHourV2BlockHeaderBytes = 36;
-constexpr uint16_t kSdFinalizedHourV2DescriptorBytes = 108;
+constexpr uint16_t kSdFinalizedHourV2BlockHeaderBytes = 32;
+constexpr uint16_t kSdFinalizedHourV2DescriptorBytes = 106;
 constexpr uint16_t kSdFinalizedHourV2PayloadBytes = 136;
+constexpr int16_t kSdFinalizedHourV2InvalidTempCentiC =
+    std::numeric_limits<int16_t>::min();
 constexpr uint16_t kSdFinalizedHourV2FixedBlockBytes =
     kSdFinalizedHourV2BlockHeaderBytes + kSdFinalizedHourV2DescriptorBytes +
     kSdFinalizedHourV2PayloadBytes;
