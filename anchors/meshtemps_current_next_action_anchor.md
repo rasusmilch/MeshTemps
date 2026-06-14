@@ -3,8 +3,8 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed after PR #57 review; current work is a focused PR #57 code revision before checkpoint validation.
-Last updated: 2026-06-13
+Status: Refreshed after PR #57 R2 and 10C-FMT1-A-V validation; current work is the user/manual PR #57 ready-and-merge step.
+Last updated: 2026-06-14
 
 ## Authority
 
@@ -24,20 +24,22 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT1-A-R2 — revise PR #57 v2 format code before checkpoint validation
+Task 10C-FMT1-A-M — user/manual PR #57 ready-and-merge step
 ```
 
-PR #57 needs a focused code revision before 10C-FMT1-A-V checkpoint validation. The revision must remove `reserved0`/fake padding from the finalized-hour v2 ABI, correct SensorBlockHeaderV2 to 32 bytes, correct SensorDescriptorV2 to 106 bytes, correct fixed SensorBlockV2 to 274 bytes, use block CRC offset 24 and descriptor_flags offset 22, remove the `history_hour_stager.h` dependency from the v2 format module, and use a v2-owned invalid-sample sentinel instead of borrowing a transitional stager constant.
+PR #57 has completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
 
-## Next action after 10C-FMT1-A-R2
+Before merge, the user should manually update the PR title/body if desired because Codex cannot update PR metadata in this workflow. Then the user may mark PR #57 ready and merge it into `feature/ram-backed-sd-hist`.
 
-After the PR #57 R2 code revision lands, the next action is checkpoint validation:
+## Next implementation task after PR #57 is merged
+
+After PR #57 is merged into `feature/ram-backed-sd-hist`, the next implementation task is:
 
 ```text
-Task 10C-FMT1-A-V — checkpoint validation for the pure finalized-hour v2 format/schema/preamble skeleton
+Task 10C-FMT1-B — writer integration for finalized-hour v2 records
 ```
 
-10C-FMT1-A-V must confirm the no-padding ABI, corrected sizes/offsets, v2-owned invalid sentinel, no dependency on legacy/transitional stager headers, no-v1 policy, generated schema coverage, and scope boundaries before 10C-FMT1-B writer integration begins.
+Do not start 10C-FMT1-B until PR #57 is merged and a fresh branch is started from the updated `feature/ram-backed-sd-hist` base.
 
 ## Required v2 sequence
 
