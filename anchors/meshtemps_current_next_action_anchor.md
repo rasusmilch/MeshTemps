@@ -3,8 +3,8 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed after finalized-hour v2 intent, roadmap, requirements, and decision-log updates; current work is the v2 ABI approval gate before implementation.
-Last updated: 2026-06-12
+Status: Refreshed after PR #57 R2 and 10C-FMT1-A-V validation; current work is the user/manual PR #57 ready-and-merge step.
+Last updated: 2026-06-14
 
 ## Authority
 
@@ -24,22 +24,22 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT0-A — update v2 ABI decision table and anchor sequencing before implementation
+Task 10C-FMT1-A-M — user/manual PR #57 ready-and-merge step
 ```
 
-This is an anchor/documentation-only task. It must not implement finalized-hour v2 code, scanner changes, recovery repair/quarantine, runtime aggregation, chart/query, FRAM, retention/pruning, or hardware validation.
+PR #57 has completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
 
-## Next action after 10C-FMT0-A
+Before merge, the user should manually update the PR title/body if desired because Codex cannot update PR metadata in this workflow. Then the user may mark PR #57 ready and merge it into `feature/ram-backed-sd-hist`.
 
-The first implementation task after ABI decision approval is:
+## Next implementation task after PR #57 is merged
+
+After PR #57 is merged into `feature/ram-backed-sd-hist`, the next implementation task is:
 
 ```text
-Task 10C-FMT1-A — pure v2 format/schema/preamble skeleton
+Task 10C-FMT1-B — writer integration for finalized-hour v2 records
 ```
 
-10C-FMT1-A must stay narrow: v2 byte-format constants, schema/preamble generator, and host-testable format skeleton. It must not broaden into writer integration, scanner/recovery repair, runtime aggregation, chart/query, or hardware validation.
-
-Implementation must not begin until the finalized-hour v2 ABI decision table in `anchors/meshtemps_decision_log_anchor.md` is reviewed and the choices needed for 10C-FMT1-A are approved.
+Do not start 10C-FMT1-B until PR #57 is merged and a fresh branch is started from the updated `feature/ram-backed-sd-hist` base.
 
 ## Required v2 sequence
 
@@ -69,9 +69,13 @@ Current intended sequence:
 - No stored `addr16` by default; derive printable addr16 from ROM64 for display/debug.
 - Node ID is provenance/context only.
 - Node label and sensor label snapshots are historical context and require bounded encoding rules.
-- Day files require a bounded ASCII schema/preamble and a fixed binary-start marker before binary HourRecordV2 records.
+- Day files require a bounded ASCII schema/preamble and the fixed `%%MESH_TEMPS_BINARY_START%%\n` marker before binary HourRecordV2 records.
 - Block magic/sentinel is a validation aid only; normal parsing must use explicit lengths, counts, offsets, versions, flags, and CRCs.
 - Production finalized-hour write/verify/scanner paths must remain bounded and heap-free.
+
+- Finalized-hour v2 must not include `reserved0`, fake padding, generic reserved bytes, or alignment filler merely to preserve mistaken byte counts; v2 has no production compatibility constraint, so byte counts come from semantic fields.
+- Correct finalized-hour v2 sizes are: HourRecordHeaderV2 48 bytes, SensorIndexEntryV2 12 bytes, SensorBlockHeaderV2 32 bytes, SensorDescriptorV2 106 bytes, SensorPayloadV2 136 bytes, fixed SensorBlockV2 274 bytes; block CRC offset is 24 and descriptor_flags offset is 22.
+- The authoritative v2 format module must not include or depend on `history_hour_stager.h`; it owns its v2 on-disk invalid-sample sentinel unless a future task proves a neutral shared-domain owner is warranted.
 
 ## Durability rule
 
@@ -81,4 +85,4 @@ Normal runtime SD finalization must not be enabled before recovery/append guard 
 
 ## Testing hardening caveat
 
-Storage/recovery tests added, touched, relied on, or cited as validation evidence must use explicit behavior checks and cover negative/failure paths. Existing v1 tests that encode active slot count, descriptor bytes, frame bytes, or fixed 64-slot frame assumptions must be updated or clearly excluded before being cited as v2 confidence.
+Storage/recovery tests added, touched, relied on, or cited as validation evidence must use explicit behavior checks and cover negative/failure paths. Existing v1 tests that encode active slot count, descriptor bytes, frame bytes, or fixed 64-slot frame assumptions are obsolete as final-format confidence and must be removed or replaced as v2 writer/scanner/runtime replacements land.

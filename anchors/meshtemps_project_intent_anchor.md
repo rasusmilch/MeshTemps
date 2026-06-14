@@ -97,6 +97,17 @@ PR #54 added a read-only finalized-hour append-file scanner for the existing fin
 
 Known legacy hazard: the GUI history path has used per-sensor RAM `std::vector<MeshNode::SensorHistorySample>` rings. The observed failure class included UI freezes/panics during larger history/chart use and unsafe vector resizing under retention-scaled settings.
 
+
+### Finalized-hour v2 ABI ownership and no-padding intent
+
+The finalized-hour v2 byte format is a new authoritative archive ABI, not a compatibility wrapper around v1. It must derive byte sizes from the semantic field list rather than preserving mistaken byte counts.
+
+Correct semantic sizes are: HourRecordHeaderV2 48 bytes, SensorIndexEntryV2 12 bytes, SensorBlockHeaderV2 32 bytes, SensorDescriptorV2 106 bytes, SensorPayloadV2 136 bytes, and fixed SensorBlockV2 274 bytes. Block CRC offset is 24. descriptor_flags offset is 22.
+
+Do not add `reserved0`, fake padding, generic reserved bytes, or alignment filler to finalized-hour v2 unless a future product decision approves a named semantic expansion field with explicit purpose and tests.
+
+The v2 format module owns v2 ABI constants and must not depend on current-hour staging internals or legacy/transitional stager headers such as `history_hour_stager.h`. The v2 on-disk invalid-sample sentinel should have a v2-specific name and local ownership unless a future task proves a neutral shared-domain owner is warranted. Do not create a shared header solely for this sentinel.
+
 ## 6. Explicit non-goals and exclusions
 
 Do not treat fixed 64-slot minute-frame SD records as the intended final archive format.
@@ -303,13 +314,13 @@ More than the supported active sensor count in an hour is an overflow condition.
 
 ## 13. Open product decisions
 
-Open decisions after this update:
+Open / deferred decisions after this update:
 
 - Exact finalized-hour v2 field order and constants for header magic, block magic, schema ID, flags, sample encoding, and CRC variant.
 - Maximum byte length for node label and sensor label; likely 32 or 48 bytes each, but not yet finalized.
 - Whether sensor blocks should be sorted by ROM64 for deterministic tests even though the index table allows direct lookup.
 - Whether per-sensor block CRC failure invalidates the whole hour record or can later allow partial-sensor salvage. Initial recommendation: whole record invalid unless all required CRCs pass.
-- Whether runtime should support v1 records at all. Current product decision appears to be no v1 compatibility because v1 is not deployed, but implementation tasks must confirm no field data needs migration.
+- Runtime v1 support is no longer open for finalized-hour archives: product decision is no v1 compatibility because v1 is not deployed; no production v1 data, no v1 migration, and no v1 dual-format support.
 - Exact day-file preamble wording and how tests prevent schema drift from binary constants.
 - Whether recovery repair uses truncate, copy/replace/quarantine, or explicit fault-only behavior.
 - Whether recovery runs at `SdHistoryStore::Begin()` or lazily before appending/querying a specific day file.

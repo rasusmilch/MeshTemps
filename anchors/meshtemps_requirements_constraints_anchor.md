@@ -55,7 +55,34 @@ Serial diagnostics must expose enough state to validate storage behavior:
 
 Fake-history and diagnostic workflows must remain bounded and must not recreate large retention-scaled RAM allocation.
 
-### Codex workflow
+## File ownership, dependency direction, and debt avoidance
+
+Do not create new files, shared headers, utility modules, or common constant containers merely for local convenience or cosmetic organization. Every new file must have a clear owner, a clear reason to exist, and a defined dependency direction.
+
+Before moving a constant, function, class, or helper into a shared location, decide whether the item represents one stable concept or merely two separate concepts that currently have the same value. Share only when drift would be a correctness bug and a neutral owner exists. Otherwise keep the value local and test the mapping seam.
+
+New authoritative modules must not depend on legacy or transitional modules to reuse constants or helpers. If a legacy module and a new module both need a concept, either the new module owns its ABI-specific value or a deliberately owned neutral module is created with explicit justification.
+
+Avoid generic shared files such as `common.h`, `utils.h`, `shared_constants.h`, or miscellaneous helper modules unless their ownership and allowed contents are narrowly defined. Shared files are architectural commitments, not cleanup tools.
+
+Promotion rule: promote a local constant/function/class to shared ownership only when all are true:
+1. At least two stable non-legacy modules need the same concept.
+2. The concept is semantically the same, not merely numerically/textually identical.
+3. Drift between copies would be a correctness bug.
+4. There is a clear neutral owner for the shared concept.
+5. The shared file does not depend on either consumer.
+6. Tests can enforce the shared contract.
+
+Demotion/removal rule: a shared file or helper is suspicious and should be reviewed if it has only one real consumer, mixes unrelated constants/functions, depends on a higher-level module, exists only to reduce include typing, contains transitional/legacy concepts, or nobody can explain who owns it.
+
+Finalized-hour v2 ABI constraints:
+- No `reserved0`, fake padding, generic reserved bytes, or alignment filler merely to preserve mistaken byte counts.
+- SensorBlockHeaderV2 is 32 bytes, SensorDescriptorV2 is 106 bytes, SensorPayloadV2 is 136 bytes, fixed SensorBlockV2 is 274 bytes, block CRC offset is 24, and descriptor_flags offset is 22.
+- The v2 format module must not include or depend on `history_hour_stager.h`.
+- The v2 format module owns its on-disk invalid-sample sentinel with a v2-specific name unless a future task proves a neutral shared-domain owner is warranted.
+- Do not create a shared header solely for the v2 invalid-sample sentinel.
+
+## Codex workflow
 
 Nontrivial work must follow:
 

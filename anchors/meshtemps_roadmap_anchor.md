@@ -91,7 +91,7 @@ Explicit exclusions:
 Acceptance:
 
 - Produces an approved concise spec and task breakdown.
-- Confirms v1 compatibility is not required unless source inspection finds existing data/migration risk.
+- Confirms no v1 compatibility is required: no production v1 data, no migration, no dual-format support.
 - Identifies all stale v1-slot terminology that later tasks must update.
 
 ### Task 10C-FMT1 — Implement finalized-hour v2 writer/scanner/tests
@@ -459,3 +459,8 @@ Inspected current source/context for this roadmap update:
   - No compile/tests were run for this anchor-only update.
   - No hardware validation was performed.
   - Decision log and validation ledger anchors were not found during the prior project-intent anchor search.
+
+
+### PR #57 R2 gate before 10C-FMT1-A-V
+
+Before 10C-FMT1-A-V checkpoint validation, PR #57 needs a focused R2 code revision to remove `reserved0`/fake padding from finalized-hour v2, correct SensorBlockHeaderV2 to 32 bytes, SensorDescriptorV2 to 106 bytes, fixed SensorBlockV2 to 274 bytes, block CRC offset to 24, descriptor_flags offset to 22, remove the `history_hour_stager.h` dependency from the v2 format module, and use a v2-owned invalid-sample sentinel without creating a shared header solely for that value.
