@@ -91,22 +91,27 @@ The archive should remain understandable years later even if current labels, nod
 
 Current source still contains a slot/minute-major staging model. `HistoryHourSnapshot` contains 64-slot descriptors and 60 minute frames. `HistoryMinuteFrame` stores presence bitmap, corrected bitmap, and `temp_c_x100[64]`. The current finalized-hour writer serializes each minute frame by writing all presence bytes, corrected bytes, and all 64 temperature slots.
 
-That current v1 binary behavior does not match the clarified SD archive intent. Slot IDs and fixed 64-slot minute frames may remain internal current-hour staging details, but they must not be treated as the desired finalized SD binary ABI.
+That current v1 binary behavior does not match the clarified SD archive intent. Slot IDs and fixed 64-slot minute frames may remain internal current-hour staging details, but they must not be treated as the desired finalized SD on-disk format.
 
 PR #54 added a read-only finalized-hour append-file scanner for the existing finalized-hour format. PR #55 added a non-destructive recovery policy seam/classifier. Both are useful recovery architecture work, but future work must account for the clarified v2 sensor-major SD format before building more repair/quarantine behavior around the v1 layout.
 
 Known legacy hazard: the GUI history path has used per-sensor RAM `std::vector<MeshNode::SensorHistorySample>` rings. The observed failure class included UI freezes/panics during larger history/chart use and unsafe vector resizing under retention-scaled settings.
 
 
-### Finalized-hour v2 ABI ownership and no-padding intent
 
-The finalized-hour v2 byte format is a new authoritative archive ABI, not a compatibility wrapper around v1. It must derive byte sizes from the semantic field list rather than preserving mistaken byte counts.
+### Terminology precision rule
+
+MeshTemps finalized-hour v2 is an on-disk binary file format and serialized record layout, not an ABI. Do not loosely call day-file layout, SD archive layout, serialized offsets, or persistent file compatibility an “ABI.” Use terms such as “on-disk format,” “binary record layout,” “serialized field layout,” “file format contract,” or “generated schema/preamble.” Use “ABI” only when explicitly discussing compiler ABI, padding, and alignment as things that must not define the file format.
+
+### Finalized-hour v2 on-disk format ownership and no-padding intent
+
+The finalized-hour v2 byte format is a new authoritative archive on-disk format, not a compatibility wrapper around v1. It must derive byte sizes from the semantic field list rather than preserving mistaken byte counts.
 
 Correct semantic sizes are: HourRecordHeaderV2 48 bytes, SensorIndexEntryV2 12 bytes, SensorBlockHeaderV2 32 bytes, SensorDescriptorV2 106 bytes, SensorPayloadV2 136 bytes, and fixed SensorBlockV2 274 bytes. Block CRC offset is 24. descriptor_flags offset is 22.
 
 Do not add `reserved0`, fake padding, generic reserved bytes, or alignment filler to finalized-hour v2 unless a future product decision approves a named semantic expansion field with explicit purpose and tests.
 
-The v2 format module owns v2 ABI constants and must not depend on current-hour staging internals or legacy/transitional stager headers such as `history_hour_stager.h`. The v2 on-disk invalid-sample sentinel should have a v2-specific name and local ownership unless a future task proves a neutral shared-domain owner is warranted. Do not create a shared header solely for this sentinel.
+The v2 format module owns v2 format constants and must not depend on current-hour staging internals or legacy/transitional stager headers such as `history_hour_stager.h`. The v2 on-disk invalid-sample sentinel should have a v2-specific name and local ownership unless a future task proves a neutral shared-domain owner is warranted. Do not create a shared header solely for this sentinel.
 
 ## 6. Explicit non-goals and exclusions
 
@@ -286,7 +291,7 @@ MeshNode live state
   -> chart reduction/UI
 ```
 
-The current-hour stager format is not the SD binary ABI. The SD writer should be free to serialize sensor-major v2 records even if RAM staging remains slot/minute-major internally.
+The current-hour stager format is not the SD on-disk format. The SD writer should be free to serialize sensor-major v2 records even if RAM staging remains slot/minute-major internally.
 
 Use ROM64 as durable identity. Use labels and node context as historical annotations. Use centi-C fixed-point storage. Use CRCs before FEC unless a later task proves a need for FEC.
 

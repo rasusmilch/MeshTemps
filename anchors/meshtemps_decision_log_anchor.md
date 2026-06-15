@@ -3,7 +3,7 @@
 Project: MeshTemps
 Workstream: GUI-node history storage, SD archive, recovery, and chart hardening
 Anchor purpose: Record settled, provisional, deprecated, and rejected project decisions for future ChatGPT/Codex planning, execution, validation, and review tasks.
-Status: Updated after PR #57 review to lock the no-padding v2 ABI correction and ownership/file-boundary discipline before checkpoint validation.
+Status: Updated after PR #57 review to lock the no-padding v2 on-disk format correction and ownership/file-boundary discipline before checkpoint validation.
 Last updated: 2026-06-13
 
 ## Decision 1 — RAM-first current-hour staging, SD as long-term archive
@@ -36,7 +36,7 @@ Evidence/context references: current source still has v1 `HistoryMinuteFrame` wi
 
 Consequences: Existing v1 writer/scanner/tests are not final. Future repair/quarantine/runtime work must be gated behind v2 format planning and validation.
 
-Rejected alternatives: Treating the current v1 fixed 64-slot SD record as final; optimizing v1 instead of replacing the finalized SD binary ABI.
+Rejected alternatives: Treating the current v1 fixed 64-slot SD record as final; optimizing v1 instead of replacing the finalized SD on-disk format.
 
 Follow-up tasks/validation: 10C-FMT0 read-only v2 plan/spec; 10C-FMT1 implementation; 10C-FMTV validation.
 
@@ -234,7 +234,7 @@ Status: settled.
 
 Decision: Do not continue mutating recovery/quarantine/fault implementation against v1 layout. Insert 10C-FMT0/FMT1/FMTV before 10C-F2-B/C.
 
-Rationale: Repair/quarantine logic depends on record structure. Building repair behavior around a deprecated v1 layout would create rework and possibly codify the wrong ABI.
+Rationale: Repair/quarantine logic depends on record structure. Building repair behavior around a deprecated v1 layout would create rework and possibly codify the wrong on-disk format.
 
 Evidence/context references: roadmap now makes 10C-FMT0 the current next required action.
 
@@ -278,16 +278,16 @@ Rejected alternatives: Multi-format v1+v2 support by default; migration code for
 
 Follow-up tasks/validation: 10C-FMT0 source/context check.
 
-## Decision 17 — Finalized-hour v2 ABI constants are approved for implementation
+## Decision 17 — Finalized-hour v2 on-disk format constants are approved for implementation
 
-Date/reference: 2026-06-11 v2 format discussion; 2026-06-13 ABI approval.
+Date/reference: 2026-06-11 v2 format discussion; 2026-06-13 on-disk format approval.
 Status: settled.
 
 Decision: Exact semantic field order, magic values, descriptor flags, sample encoding value, CRC-32/ISO-HDLC variant, node label max 32 bytes, sensor label max 48 bytes, truncate-with-flag policy, ROM64 sort order, duplicate-ROM corruption policy, zero-sensor skip policy, no-padding policy, and no-v1-compatibility policy are settled for finalized-hour v2.
 
-Rationale: These are binary ABI details and are now approved for the dedicated v2 implementation sequence rather than being chosen ad hoc during writer/scanner work.
+Rationale: These are binary record layout details and are now approved for the dedicated v2 implementation sequence rather than being chosen ad hoc during writer/scanner work.
 
-Evidence/context references: user-approved ABI decisions before 10C-FMT1-A; pure v2 format tests and generated preamble now lock these values.
+Evidence/context references: user-approved on-disk format decisions before 10C-FMT1-A; pure v2 format tests and generated preamble now lock these values.
 
 Consequences: Writer/scanner/runtime tasks must consume these v2 constants and field tables rather than preserving v1 slot/minute-major assumptions, mistaken byte counts, or fake reserved-byte alignment.
 
@@ -310,7 +310,7 @@ Follow-up tasks/validation: 10C-FMT1-A-V checkpoint validation.
 ## Misleading implementation artifacts discovered
 
 - `HistorySlotDescriptor::slot_id` and `addr16[17]` exist in current staging source, but are not desired finalized SD fields.
-- `HistoryMinuteFrame::temp_c_x100[64]` exists in current staging source, but the finalized SD archive should not write 64 slot values per minute as final ABI.
+- `HistoryMinuteFrame::temp_c_x100[64]` exists in current staging source, but the finalized SD archive should not write 64 slot values per minute as final on-disk format.
 - `SdFinalizedHourBlockHeader` v1 fields such as `active_slot_count`, `descriptor_entry_bytes`, `frame_count`, `frame_bytes`, and `reserved0` describe the current implementation, not the clarified final v2 archive.
 - PR #54 scanner and PR #55 policy classify v1 records today; their seams are useful, but their v1 field assumptions are not final authority.
 - Some older anchors still contain stale direct-to-10D or v1-slot wording; the updated project intent, roadmap, requirements, and this decision log supersede those stale assumptions.
@@ -351,7 +351,7 @@ Inspected current source/context for this decision log update:
   - No hardware validation was performed.
   - Exact v2 binary constants/field order remain unapproved pending 10C-FMT0.
 
-## Finalized-hour v2 ABI decision table for approval
+## Finalized-hour v2 on-disk format decision table for approval
 
 Date/reference: Task 10C-FMT0-A anchor cleanup after Task 10C-FMT0 planning receipt.
 Status: approval checklist before 10C-FMT1-A implementation.
@@ -377,7 +377,7 @@ This table is a compact approval checklist, not a complete byte-level specificat
 | Label encoding | settled | UTF-8-compatible raw bytes with explicit byte length; no NUL terminator required for parsing. | Preserves labels while keeping parser boundaries length-based. | Settled / 10C-FMT1-A. |
 | Overlong label policy | settled | Truncate overlong labels and set node-label/sensor-label truncation descriptor flags. | Policy affects data preservation and deterministic writer behavior. | Settled before 10C-FMT1-A. |
 | SensorPayloadV2 bitmap bytes/sample count/sample encoding | settled | 8-byte presence bitmap, 8-byte corrected bitmap, 60 samples, int16 centi-C little-endian sample encoding. | 60 minutes need 60 bits; fixed int16 centi-C is settled. | Settled / 10C-FMT1-A tests. |
-| Missing sample byte policy | settled | Writer fills missing sample positions with a v2-owned on-disk sentinel, e.g. `kSdFinalizedHourV2InvalidTempCentiC`; readers rely only on presence bits for validity. Do not create a shared header solely for this sentinel. | Deterministic bytes aid testing while preserving bitmap as validity source; the v2 ABI must not depend on transitional stager headers. | PR #57 R2 must correct code before 10C-FMT1-A-V. |
+| Missing sample byte policy | settled | Writer fills missing sample positions with a v2-owned on-disk sentinel, e.g. `kSdFinalizedHourV2InvalidTempCentiC`; readers rely only on presence bits for validity. Do not create a shared header solely for this sentinel. | Deterministic bytes aid testing while preserving bitmap as validity source; the v2 on-disk format must not depend on transitional stager headers. | PR #57 R2 must correct code before 10C-FMT1-A-V. |
 | Corrected bit without presence behavior | settled | Treat corrected bits set where presence is clear as invalid/corrupt. | Corrected has meaning only for valid samples and catches bitmap corruption. | User approval / 10C-FMT1-C tests. |
 | CRC32 variant | settled | CRC-32/ISO-HDLC: poly `0x04C11DB7`, reflected poly `0xEDB88320`, init `0xFFFFFFFF`, refin/refout true, xorout `0xFFFFFFFF`, check `123456789` -> `0xCBF43926`, stored little-endian u32. | Future parsers need polynomial/init/final/xor/reflection details. | Settled / 10C-FMT1-A. |
 | Header CRC coverage | settled | CRC over HourRecordHeaderV2 with the header CRC field zeroed. | Protects header metadata while allowing deterministic verification. | Settled / 10C-FMT1-A/C tests. |
@@ -434,6 +434,6 @@ Ownership rules:
 - Promote local constants/functions/classes to shared ownership only when all are true: at least two stable non-legacy modules need the same concept; the concept is semantically the same; drift would be a correctness bug; there is a clear neutral owner; the shared file does not depend on either consumer; tests can enforce the shared contract.
 - Demote or remove shared files/helpers that have only one real consumer, mix unrelated constants/functions, depend on a higher-level module, exist only to reduce include typing, contain transitional/legacy concepts, or lack an explainable owner.
 
-V2 sentinel rule: The v2 finalized-hour format module must not include `history_hour_stager.h` to reuse `kHistoryInvalidTempCentiC`. The v2 ABI should own its on-disk missing-sample sentinel with a v2-specific name, such as `kSdFinalizedHourV2InvalidTempCentiC`, unless a future task proves a neutral shared-domain owner is warranted. Do not create a shared header solely for this sentinel.
+V2 sentinel rule: The v2 finalized-hour format module must not include `history_hour_stager.h` to reuse `kHistoryInvalidTempCentiC`. The v2 on-disk format should own its on-disk missing-sample sentinel with a v2-specific name, such as `kSdFinalizedHourV2InvalidTempCentiC`, unless a future task proves a neutral shared-domain owner is warranted. Do not create a shared header solely for this sentinel.
 
 Consequences: PR #57 R2 must remove the v2 format dependency on `history_hour_stager.h` without creating a new shared header solely for one duplicated numeric sentinel.

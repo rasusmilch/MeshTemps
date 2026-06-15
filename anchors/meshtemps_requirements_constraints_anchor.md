@@ -55,13 +55,18 @@ Serial diagnostics must expose enough state to validate storage behavior:
 
 Fake-history and diagnostic workflows must remain bounded and must not recreate large retention-scaled RAM allocation.
 
+
+## Terminology precision rule
+
+MeshTemps finalized-hour v2 is an on-disk binary file format and serialized record layout, not an ABI. Do not loosely call day-file layout, SD archive layout, serialized offsets, or persistent file compatibility an “ABI.” Use terms such as “on-disk format,” “binary record layout,” “serialized field layout,” “file format contract,” or “generated schema/preamble.” Use “ABI” only when explicitly discussing compiler ABI, padding, and alignment as things that must not define the file format.
+
 ## File ownership, dependency direction, and debt avoidance
 
 Do not create new files, shared headers, utility modules, or common constant containers merely for local convenience or cosmetic organization. Every new file must have a clear owner, a clear reason to exist, and a defined dependency direction.
 
 Before moving a constant, function, class, or helper into a shared location, decide whether the item represents one stable concept or merely two separate concepts that currently have the same value. Share only when drift would be a correctness bug and a neutral owner exists. Otherwise keep the value local and test the mapping seam.
 
-New authoritative modules must not depend on legacy or transitional modules to reuse constants or helpers. If a legacy module and a new module both need a concept, either the new module owns its ABI-specific value or a deliberately owned neutral module is created with explicit justification.
+New authoritative modules must not depend on legacy or transitional modules to reuse constants or helpers. If a legacy module and a new module both need a concept, either the new module owns its format-specific value or a deliberately owned neutral module is created with explicit justification.
 
 Avoid generic shared files such as `common.h`, `utils.h`, `shared_constants.h`, or miscellaneous helper modules unless their ownership and allowed contents are narrowly defined. Shared files are architectural commitments, not cleanup tools.
 
@@ -75,7 +80,7 @@ Promotion rule: promote a local constant/function/class to shared ownership only
 
 Demotion/removal rule: a shared file or helper is suspicious and should be reviewed if it has only one real consumer, mixes unrelated constants/functions, depends on a higher-level module, exists only to reduce include typing, contains transitional/legacy concepts, or nobody can explain who owns it.
 
-Finalized-hour v2 ABI constraints:
+Finalized-hour v2 on-disk format constraints:
 - No `reserved0`, fake padding, generic reserved bytes, or alignment filler merely to preserve mistaken byte counts.
 - SensorBlockHeaderV2 is 32 bytes, SensorDescriptorV2 is 106 bytes, SensorPayloadV2 is 136 bytes, fixed SensorBlockV2 is 274 bytes, block CRC offset is 24, and descriptor_flags offset is 22.
 - The v2 format module must not include or depend on `history_hour_stager.h`.
@@ -100,7 +105,7 @@ Execution tasks must be narrow and ordered. Format, scanner, repair, runtime agg
 
 The current-hour stager stores only active current-hour state. It is not long-term history.
 
-The current source uses a slot/minute-major logical staging model with slot descriptors and 60 minute frames. That is acceptable as an internal staging implementation if bounded, but it is not the finalized SD binary ABI.
+The current source uses a slot/minute-major logical staging model with slot descriptors and 60 minute frames. That is acceptable as an internal staging implementation if bounded, but it is not the finalized SD on-disk format.
 
 Current-hour staging requirements:
 
@@ -192,7 +197,7 @@ MeshNode live state
 
 Hardware-specific details must not leak into chart code, MeshNode code, or SD writer logic.
 
-The current-hour stager format is not the SD binary ABI. The SD writer must be free to serialize sensor-major v2 output even if RAM staging remains slot/minute-major internally.
+The current-hour stager format is not the SD on-disk format. The SD writer must be free to serialize sensor-major v2 output even if RAM staging remains slot/minute-major internally.
 
 Use field-by-field explicit little-endian serialization. Do not serialize raw compiler-padded structs. Avoid generic reserved byte arrays unless a specific format purpose is approved; use version fields, byte counts, flags, and explicit lengths instead.
 
