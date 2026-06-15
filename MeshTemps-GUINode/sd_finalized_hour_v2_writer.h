@@ -70,6 +70,13 @@ struct SdFinalizedHourV2WriterLabelSnapshot {
   bool sensor_label_truncated = false;
 };
 
+// Caller-owned scratch for one finalized-hour v2 writer call at a time.
+// A workspace instance is non-reentrant: do not share it across concurrent
+// writer calls. Production callers must keep it in file-scope static storage
+// or long-lived service-owned storage, not on a task/callback stack. Write
+// callbacks must consume or copy bytes during the callback and must not retain
+// pointers into workspace-owned scratch after the callback returns. This pure
+// writer does not own Arduino File/FS/SD append or readback verification.
 struct SdFinalizedHourV2WriterWorkspace {
   SdFinalizedHourV2WriterSensorWorkEntry entries[kHistorySlotCapacity] = {};
   SdFinalizedHourV2WriterLabelSnapshot labels[kHistorySlotCapacity] = {};

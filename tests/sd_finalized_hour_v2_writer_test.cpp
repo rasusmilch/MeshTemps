@@ -12,6 +12,9 @@ struct TestHarness {
 };
 
 TestHarness g_test;
+static_assert(sizeof(SdFinalizedHourV2WriterWorkspace) > 1024U,
+              "SdFinalizedHourV2WriterWorkspace is intentionally not stack-small; "
+              "production callers must not allocate it on task/callback stack.");
 static SdFinalizedHourV2WriterWorkspace g_writer_workspace;
 
 bool CheckTrue(bool condition, const char* expr, const char* file, int line) {
@@ -606,7 +609,7 @@ void TestChangingLabelsAreSnapshottedOnceAndCrcsValidate() {
   CHECK_TRUE(RecordCrcsValidate(sink));
 }
 
-void TestLabelSourceFailureWritesNoBytes() {
+void TestNodeLabelSourceFailureWritesNoBytes() {
   HistoryHourSnapshot snapshot;
   CHECK_TRUE(BuildSnapshot(&snapshot));
   FailingLabels labels;
@@ -621,6 +624,23 @@ void TestLabelSourceFailureWritesNoBytes() {
   CHECK_EQ(status.bytes_written, static_cast<uint32_t>(0));
   CHECK_EQ(labels.node_calls, static_cast<uint32_t>(1));
   CHECK_EQ(labels.sensor_calls, static_cast<uint32_t>(0));
+}
+
+void TestSensorLabelSourceFailureWritesNoBytes() {
+  HistoryHourSnapshot snapshot;
+  CHECK_TRUE(BuildSnapshot(&snapshot));
+  FailingLabels labels;
+  labels.fail_node = false;
+  CaptureSink sink;
+  SdFinalizedHourV2WriteStatus status;
+  CHECK_TRUE(!WriteSnapshot(snapshot, &labels, &sink, &status));
+  CHECK_EQ(status.failure_reason,
+           SdFinalizedHourV2WriteFailureReason::kLabelSourceFailure);
+  CHECK_EQ(sink.used, static_cast<size_t>(0));
+  CHECK_EQ(sink.calls, static_cast<uint32_t>(0));
+  CHECK_EQ(status.bytes_written, static_cast<uint32_t>(0));
+  CHECK_EQ(labels.node_calls, static_cast<uint32_t>(1));
+  CHECK_EQ(labels.sensor_calls, static_cast<uint32_t>(1));
 }
 
 void Run(const char* name, void (*fn)()) {
@@ -641,7 +661,8 @@ int main() {
   Run("TestSinkFailures", TestSinkFailures);
   Run("TestSchemaHasNoDurableSlotIdOrAddr16", TestSchemaHasNoDurableSlotIdOrAddr16);
   Run("TestChangingLabelsAreSnapshottedOnceAndCrcsValidate", TestChangingLabelsAreSnapshottedOnceAndCrcsValidate);
-  Run("TestLabelSourceFailureWritesNoBytes", TestLabelSourceFailureWritesNoBytes);
+  Run("TestNodeLabelSourceFailureWritesNoBytes", TestNodeLabelSourceFailureWritesNoBytes);
+  Run("TestSensorLabelSourceFailureWritesNoBytes", TestSensorLabelSourceFailureWritesNoBytes);
   if (g_test.failures != 0U) {
     std::cerr << g_test.failures << " failure(s)" << std::endl;
     return 1;
