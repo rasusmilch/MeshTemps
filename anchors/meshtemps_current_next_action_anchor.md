@@ -3,8 +3,8 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed during PR #58 stacked writer work; B2-V found a required B2-T test follow-up for SdHistoryStore v2 append behavior before proceeding beyond B2.
-Last updated: 2026-06-14
+Status: PR #58 B1/B2 checkpoint is complete through B2-T-V; current next action after PR #58 user-side PR cleanup and merge is 10C-FMT1-C scanner/policy mapping.
+Last updated: 2026-06-15
 
 ## Authority
 
@@ -24,20 +24,16 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT1-B2-T — add SdHistoryStore append tests for finalized-hour v2 day-file behavior
+Task 10C-FMT1-C — scanner/policy mapping for finalized-hour v2 day files
 ```
 
 PR #57 has merged into `feature/ram-backed-sd-hist` and completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
 
-PR #58 is the current draft PR stack. It contains the anchor terminology cleanup plus the pure 10C-FMT1-B1 writer core work. B1-R1 added the caller-provided writer workspace, moved large writer scratch out of automatic stack locals, and snapshotted labels once before CRC/write passes. B1-R2 documented the workspace storage/lifetime contract, added a workspace-size tripwire, and independently covered node-label and sensor-label source failures. B1-V accepted the writer-core checkpoint. B2 wired the pure v2 writer into SdHistoryStore append/day-file behavior without enabling normal runtime finalization. B2-V found a required B2-T focused test follow-up for direct SdHistoryStore append coverage before proceeding beyond B2.
+PR #58 is the current draft PR stack. B1-R1, B1-R2, and B1-V accepted the pure finalized-hour v2 writer core, including caller-owned workspace, deterministic label snapshots, CRC/write consistency, and host tests. B2 integrated that pure writer into `SdHistoryStore` append/day-file behavior without enabling normal runtime SD finalization. B2-V required B2-T direct append coverage; B2-T added focused SdHistoryStore fake-FS append tests; B2-T-V accepted those tests. After this finalization receipt is reviewed, PR #58 is ready for user-side PR title/body cleanup and the user's ready-for-review/merge decision.
 
-After B2-T lands, run:
+When PR #58 has merged, start Task 10C-FMT1-C in a fresh PR/branch from updated `feature/ram-backed-sd-hist`. Task 10C-FMT1-C must be read-only scanner/policy mapping for finalized-hour v2 day files. Do not enable normal runtime SD finalization. Do not start recovery/append guard, repair/truncate/quarantine, or runtime aggregation yet. `10C-F2-B/C` repair/quarantine/append-guard work remains blocked until after v2 scanner/integrated validation authorizes it, and `10D` runtime aggregation remains blocked.
 
-```text
-Task 10C-FMT1-B2-T-V — validate SdHistoryStore finalized-hour v2 append tests
-```
-
-Do not start scanner/policy mapping, recovery/append guard, or runtime aggregation until B2-T is complete/reviewed and the later C/F tasks explicitly authorize that work.
+The durable-history constraints remain intact: finalized-hour v2 is sensor-major, ROM64-indexed, has no durable `slot_id`, stores no `addr16` by default, treats node ID as provenance only, uses bounded labels as context, writes the generated v2 preamble plus binary-start marker before binary records, has no fake padding/reserved fields, preserves the corrected v2 sizes/offsets/CRC rules, and keeps runtime finalization blocked until v2 scanner/recovery/append-guard validation.
 
 ## Required v2 sequence
 
