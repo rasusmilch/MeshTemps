@@ -3,7 +3,7 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: Refreshed during PR #58 stacked writer work; current work is the B1-R2 writer workspace/label-failure hardening before B1 validation.
+Status: Refreshed during PR #58 stacked writer work; B1-R1/B1-R2/B1-V writer-core checkpoint has been accepted and current work is B2 SdHistoryStore v2 append integration.
 Last updated: 2026-06-14
 
 ## Authority
@@ -24,20 +24,20 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT1-B1-R2 — harden finalized-hour v2 writer workspace and label-failure contract tests
+Task 10C-FMT1-B2 — integrate finalized-hour v2 writer into SdHistoryStore append path
 ```
 
 PR #57 has merged into `feature/ram-backed-sd-hist` and completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
 
-PR #58 is the current draft PR stack. It contains the anchor terminology cleanup plus the pure 10C-FMT1-B1 writer core work. B1-R1 added the caller-provided writer workspace, moved large writer scratch out of automatic stack locals, and snapshotted labels once before CRC/write passes. The current correction is B1-R2: document the workspace storage/lifetime contract, add a workspace-size tripwire, and independently cover node-label and sensor-label source failures before validation.
+PR #58 is the current draft PR stack. It contains the anchor terminology cleanup plus the pure 10C-FMT1-B1 writer core work. B1-R1 added the caller-provided writer workspace, moved large writer scratch out of automatic stack locals, and snapshotted labels once before CRC/write passes. B1-R2 documented the workspace storage/lifetime contract, added a workspace-size tripwire, and independently covered node-label and sensor-label source failures. B1-V accepted the writer-core checkpoint. The current task is B2: wire the pure v2 writer into SdHistoryStore append/day-file behavior without enabling normal runtime finalization.
 
-After B1-R2 lands, run:
+After B2 lands, run:
 
 ```text
-Task 10C-FMT1-B1-V — validate pure finalized-hour v2 writer core and host tests
+Task 10C-FMT1-B2-V — validate SdHistoryStore finalized-hour v2 append integration
 ```
 
-Do not start 10C-FMT1-B2 SdHistoryStore/day-file append integration until B1-R1, B1-R2, and B1-V are complete, reviewed, and accepted.
+Do not start scanner/policy mapping, recovery/append guard, or runtime aggregation until B2 is validated and the later C/F tasks explicitly authorize that work.
 
 ## Required v2 sequence
 

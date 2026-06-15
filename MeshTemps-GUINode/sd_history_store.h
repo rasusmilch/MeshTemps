@@ -14,7 +14,7 @@ class SdHistoryStore {
 
   bool Begin(fs::FS& fs, const char* base_dir);
 
-  // Append one authoritative raw finalized-hour block exported from the
+  // Append one authoritative finalized-hour v2 record exported from the
   // backend-neutral current-hour stager. HistoryHourSnapshot is a logical
   // in-memory shape; the SD record is explicitly serialized with its own
   // magic/version/header CRC/payload CRC. Snapshot counters are diagnostics
@@ -27,6 +27,7 @@ class SdHistoryStore {
   bool BuildFinalizedHourFilePath_(uint32_t hour_start_epoch_minute,
                                    char* out,
                                    size_t out_size) const;
+  bool FinalizedHourFileHasV2Marker_(const char* path) const;
   bool VerifyFinalizedHourRecord_(const char* path, uint32_t record_offset) const;
 
   fs::FS* fs_ = nullptr;
