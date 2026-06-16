@@ -450,8 +450,7 @@ size_t BuildSdFinalizedHourV2Preamble(char* out, size_t len) {
   AppendLiteral(out, len, &o, "MeshTemps finalized-hour v2 format\n");
   AppendLiteral(out, len, &o, "format_name=MeshTemps Finalized HourRecordV2\n");
   AppendLiteral(out, len, &o, "format_version=2\n");
-  AppendLiteral(out, len, &o, "binary_start_marker=");
-  AppendLiteral(out, len, &o, kSdFinalizedHourV2BinaryStartMarker);
+  AppendLiteral(out, len, &o, "binary_start_marker follows this preamble and is the only parser boundary\n");
   AppendLiteral(out, len, &o, "endian=little-endian for every binary integer field; raw compiler structs are not serialized\n");
   AppendLiteral(out, len, &o, "record_magic=MTH2 block_magic=MSB2 block magic checked only at known offsets; no sentinel hunting\n");
   AppendLiteral(out, len, &o, "no_v1_compatibility=true; v1 MTHR is not a production archive format\n");
@@ -482,6 +481,7 @@ size_t BuildSdFinalizedHourV2Preamble(char* out, size_t len) {
                    sizeof(kDescriptorFields) / sizeof(kDescriptorFields[0]));
   AppendFieldTable(out, len, &o, "SensorPayloadV2 fields:", kPayloadFields,
                    sizeof(kPayloadFields) / sizeof(kPayloadFields[0]));
+  AppendLiteral(out, len, &o, kSdFinalizedHourV2BinaryStartMarker);
   if (out != nullptr && len != 0U) {
     out[(o < len) ? o : (len - 1U)] = '\0';
   }
