@@ -3,10 +3,22 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+
+#include "history_storage_limits.h"
 
 #include "sd_finalized_hour_v2_format.h"
 
-constexpr uint16_t kSdFinalizedHourV2ScannerMaxSensors = 64;
+static_assert(kMeshTempsHistoryMaxSensorsPerHour <=
+                  static_cast<std::size_t>(std::numeric_limits<uint16_t>::max()),
+              "scanner max sensor count must fit uint16_t record counts");
+static_assert(kSdFinalizedHourV2SampleCount == kMeshTempsHistoryMinutesPerHour,
+              "v2 sample count remains an on-disk format field but must match the product hour minute count");
+constexpr uint16_t kSdFinalizedHourV2ScannerMaxSensors =
+    static_cast<uint16_t>(kMeshTempsHistoryMaxSensorsPerHour);
+static_assert(kSdFinalizedHourV2ScannerMaxSensors ==
+                  kMeshTempsHistoryMaxSensorsPerHour,
+              "scanner max sensors must follow the product history sensor limit");
 constexpr uint32_t kSdFinalizedHourV2ScannerMaxRecordBytes =
     kSdFinalizedHourV2HeaderBytes +
     (static_cast<uint32_t>(kSdFinalizedHourV2ScannerMaxSensors) *

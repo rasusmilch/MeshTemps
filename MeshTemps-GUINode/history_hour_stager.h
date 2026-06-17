@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <limits>
 
+#include "history_storage_limits.h"
+
 // Backend-neutral current-hour history model for MeshTemps.
 //
 // This layer intentionally has no dependency on MeshNode, FRAM, SD, LVGL,
@@ -13,8 +15,13 @@
 // a future FramHourStager should implement the same IHistoryHourStager seam and
 // export the same HistoryHourSnapshot shape.
 
-constexpr std::size_t kHistorySlotCapacity = 64;
-constexpr std::size_t kHistoryMinutesPerHour = 60;
+constexpr std::size_t kHistorySlotCapacity =
+    kMeshTempsHistoryMaxSensorsPerHour;
+constexpr std::size_t kHistoryMinutesPerHour = kMeshTempsHistoryMinutesPerHour;
+static_assert(kHistorySlotCapacity == kMeshTempsHistoryMaxSensorsPerHour,
+              "stager slot capacity must follow the product history sensor limit");
+static_assert(kHistoryMinutesPerHour == kMeshTempsHistoryMinutesPerHour,
+              "stager minute count must follow the product history minute limit");
 constexpr std::size_t kHistoryBitmapBytes =
     (kHistorySlotCapacity + 7U) / 8U;
 constexpr uint16_t kHistoryHourSnapshotFormatVersion = 1;

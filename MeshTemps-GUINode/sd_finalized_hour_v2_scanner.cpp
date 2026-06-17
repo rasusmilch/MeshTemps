@@ -249,10 +249,14 @@ SdFinalizedHourV2ScanFailureReason ValidateBlock(
       header.block_crc32) {
     return SdFinalizedHourV2ScanFailureReason::kBadBlockCrc;
   }
+  const uint8_t* descriptor_bytes = block + kSdFinalizedHourV2BlockHeaderBytes;
+  if (descriptor_bytes[20] > kSdFinalizedHourV2NodeLabelMaxBytes ||
+      descriptor_bytes[21] > kSdFinalizedHourV2SensorLabelMaxBytes) {
+    return SdFinalizedHourV2ScanFailureReason::kBadDescriptorLabelLength;
+  }
   SdFinalizedHourV2Descriptor descriptor;
   if (!DecodeSdFinalizedHourV2Descriptor(
-          block + kSdFinalizedHourV2BlockHeaderBytes,
-          kSdFinalizedHourV2DescriptorBytes, &descriptor)) {
+          descriptor_bytes, kSdFinalizedHourV2DescriptorBytes, &descriptor)) {
     return SdFinalizedHourV2ScanFailureReason::kBadDescriptorBytes;
   }
   if (descriptor.rom64 != expected_rom64) {

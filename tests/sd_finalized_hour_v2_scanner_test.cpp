@@ -201,6 +201,35 @@ void EncodeHeaderAt(std::vector<uint8_t>* bytes,
                                            kSdFinalizedHourV2HeaderBytes));
 }
 
+
+SdFinalizedHourV2BlockHeader DecodeBlockHeaderAt(const std::vector<uint8_t>& bytes,
+                                                size_t block_offset) {
+  SdFinalizedHourV2BlockHeader header;
+  CHECK_TRUE(DecodeSdFinalizedHourV2BlockHeader(
+      bytes.data() + block_offset, kSdFinalizedHourV2BlockHeaderBytes, &header));
+  return header;
+}
+
+void EncodeBlockHeaderAt(std::vector<uint8_t>* bytes,
+                         size_t block_offset,
+                         SdFinalizedHourV2BlockHeader header,
+                         bool recompute_block_crc) {
+  if (recompute_block_crc) {
+    header.block_crc32 = 0;
+    CHECK_TRUE(EncodeSdFinalizedHourV2BlockHeader(
+        header, bytes->data() + block_offset, kSdFinalizedHourV2BlockHeaderBytes));
+    header.block_crc32 = ComputeSdFinalizedHourV2BlockCrc32(
+        bytes->data() + block_offset, kSdFinalizedHourV2FixedBlockBytes);
+  }
+  CHECK_TRUE(EncodeSdFinalizedHourV2BlockHeader(
+      header, bytes->data() + block_offset, kSdFinalizedHourV2BlockHeaderBytes));
+}
+
+size_t FirstBlockOffset(const std::vector<uint8_t>& bytes, size_t record_offset) {
+  const SdFinalizedHourV2Header header = DecodeHeaderAt(bytes, record_offset);
+  return record_offset + header.sensor_blocks_offset;
+}
+
 void RecomputeBlockCrc(std::vector<uint8_t>* bytes, size_t block_offset) {
   SdFinalizedHourV2BlockHeader block;
   CHECK_TRUE(DecodeSdFinalizedHourV2BlockHeader(
@@ -423,6 +452,139 @@ void TestDangerousRecordSize() {
                SdFinalizedHourV2ScanFailureReason::kRecordBytesTooSmall);
 }
 
+
+void TestMarkerTooLate() {
+  std::vector<uint8_t> bytes(kSdFinalizedHourV2PreambleMaxBytes, static_cast<uint8_t>('A'));
+  const char* marker = kSdFinalizedHourV2BinaryStartMarker;
+  bytes.insert(bytes.end(), reinterpret_cast<const uint8_t*>(marker),
+               reinterpret_cast<const uint8_t*>(marker) + std::strlen(marker));
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kMarkerTooLate,
+               SdFinalizedHourV2ScanFailureReason::kMarkerTooLate);
+}
+
+void TestUnsupportedRecordVersion() {
+  std::vector<uint8_t> bytes = BuildDay(1);
+  const size_t start = BinaryStart(bytes);
+  SdFinalizedHourV2Header header = DecodeHeaderAt(bytes, start);
+  header.record_version = kSdFinalizedHourV2RecordVersion + 1U;
+  EncodeHeaderAt(&bytes, start, header, true);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kUnsupportedFormat,
+               SdFinalizedHourV2ScanFailureReason::kUnsupportedRecordVersion);
+}
+
+void TestUnsupportedBlockVersion() {
+  std::vector<uint8_t> bytes = BuildDay(1);
+  const size_t start = BinaryStart(bytes);
+  const size_t block = FirstBlockOffset(bytes, start);
+  SdFinalizedHourV2BlockHeader header = DecodeBlockHeaderAt(bytes, block);
+  header.block_version = kSdFinalizedHourV2BlockVersion + 1U;
+  EncodeBlockHeaderAt(&bytes, block, header, true);
+  RecomputePayloadAndHeaderCrc(&bytes, start);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kUnsupportedFormat,
+               SdFinalizedHourV2ScanFailureReason::kUnsupportedBlockVersion);
+}
+
+void TestBadBlockMagic() {
+  std::vector<uint8_t> bytes = BuildDay(1);
+  const size_t start = BinaryStart(bytes);
+  const size_t block = FirstBlockOffset(bytes, start);
+  SdFinalizedHourV2BlockHeader header = DecodeBlockHeaderAt(bytes, block);
+  header.block_magic ^= 0x000000FFU;
+  EncodeBlockHeaderAt(&bytes, block, header, true);
+  RecomputePayloadAndHeaderCrc(&bytes, start);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kInvalidAtBinaryStart,
+               SdFinalizedHourV2ScanFailureReason::kBadBlockMagic);
+}
+
+void TestWrongSampleCountBytesEncoding() {
+  std::vector<uint8_t> bytes = BuildDay(1);
+  const size_t start = BinaryStart(bytes);
+  size_t block = FirstBlockOffset(bytes, start);
+  SdFinalizedHourV2BlockHeader header = DecodeBlockHeaderAt(bytes, block);
+  header.sample_count = kSdFinalizedHourV2SampleCount - 1U;
+  EncodeBlockHeaderAt(&bytes, block, header, true);
+  RecomputePayloadAndHeaderCrc(&bytes, start);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kInvalidAtBinaryStart,
+               SdFinalizedHourV2ScanFailureReason::kBadSampleCount);
+
+  bytes = BuildDay(1);
+  block = FirstBlockOffset(bytes, start);
+  header = DecodeBlockHeaderAt(bytes, block);
+  header.sample_bytes = kSdFinalizedHourV2SampleBytes + 1U;
+  EncodeBlockHeaderAt(&bytes, block, header, true);
+  RecomputePayloadAndHeaderCrc(&bytes, start);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kInvalidAtBinaryStart,
+               SdFinalizedHourV2ScanFailureReason::kBadSampleBytes);
+
+  bytes = BuildDay(1);
+  block = FirstBlockOffset(bytes, start);
+  header = DecodeBlockHeaderAt(bytes, block);
+  header.sample_encoding = kSdFinalizedHourV2SampleEncodingInt16CentiCLe + 1U;
+  EncodeBlockHeaderAt(&bytes, block, header, true);
+  RecomputePayloadAndHeaderCrc(&bytes, start);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kInvalidAtBinaryStart,
+               SdFinalizedHourV2ScanFailureReason::kBadSampleEncoding);
+}
+
+void TestBadDescriptorLabelLength() {
+  std::vector<uint8_t> bytes = BuildDay(1);
+  const size_t start = BinaryStart(bytes);
+  const size_t block = FirstBlockOffset(bytes, start);
+  const size_t descriptor = block + kSdFinalizedHourV2BlockHeaderBytes;
+  bytes[descriptor + 20U] = kSdFinalizedHourV2NodeLabelMaxBytes + 1U;
+  RecomputeBlockCrc(&bytes, block);
+  RecomputePayloadAndHeaderCrc(&bytes, start);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kInvalidAtBinaryStart,
+               SdFinalizedHourV2ScanFailureReason::kBadDescriptorLabelLength);
+}
+
+void TestReadErrorDistinctFromShortRead() {
+  std::vector<uint8_t> bytes = BuildDay(1);
+  const size_t start = BinaryStart(bytes);
+  VectorReader reader(bytes);
+  reader.fail_offset = start;
+  g_scanner_workspace = SdFinalizedHourV2ScannerWorkspace{};
+  const SdFinalizedHourV2ScanResult read_error =
+      ScanSdFinalizedHourV2DayFile(reader, g_scanner_workspace);
+  CHECK_EQ(read_error.status, SdFinalizedHourV2ScanStatus::kReadError);
+  CHECK_EQ(read_error.first_failure_reason, SdFinalizedHourV2ScanFailureReason::kReadError);
+
+  std::vector<uint8_t> truncated;
+  const size_t binary_start = AppendPreamble(&truncated);
+  truncated.push_back('x');
+  const SdFinalizedHourV2ScanResult short_read = Scan(truncated);
+  CHECK_EQ(short_read.status, SdFinalizedHourV2ScanStatus::kInvalidAtBinaryStart);
+  CHECK_EQ(short_read.first_failure_reason, SdFinalizedHourV2ScanFailureReason::kPartialHeader);
+  CHECK_EQ(short_read.first_unsafe_offset, static_cast<uint64_t>(binary_start));
+}
+
+void TestRecordBytesTooLarge() {
+  std::vector<uint8_t> bytes = BuildDay(1);
+  const size_t start = BinaryStart(bytes);
+  SdFinalizedHourV2Header header = DecodeHeaderAt(bytes, start);
+  header.record_bytes = kSdFinalizedHourV2ScannerMaxRecordBytes + 1U;
+  EncodeHeaderAt(&bytes, start, header, true);
+  ExpectReason(bytes, SdFinalizedHourV2ScanStatus::kDangerousSizeOrOffset,
+               SdFinalizedHourV2ScanFailureReason::kRecordBytesTooLarge);
+}
+
+void TestPreambleMarkerExactlyOnceAtEnd() {
+  std::vector<uint8_t> bytes;
+  const size_t preamble_bytes = AppendPreamble(&bytes);
+  const char* marker = kSdFinalizedHourV2BinaryStartMarker;
+  const size_t marker_len = std::strlen(marker);
+  size_t count = 0;
+  size_t last_start = 0;
+  for (size_t i = 0; i + marker_len <= bytes.size(); ++i) {
+    if (std::memcmp(bytes.data() + i, marker, marker_len) == 0) {
+      ++count;
+      last_start = i;
+    }
+  }
+  CHECK_EQ(count, static_cast<size_t>(1));
+  CHECK_EQ(last_start + marker_len, preamble_bytes);
+}
+
 void Run(const char* name, void (*fn)()) {
   g_test.current_test = name;
   fn();
@@ -448,6 +610,15 @@ int main() {
   Run("DescriptorRom64Mismatch", TestDescriptorRom64Mismatch);
   Run("CorrectedWithoutPresence", TestCorrectedWithoutPresence);
   Run("DangerousRecordSize", TestDangerousRecordSize);
+  Run("MarkerTooLate", TestMarkerTooLate);
+  Run("UnsupportedRecordVersion", TestUnsupportedRecordVersion);
+  Run("UnsupportedBlockVersion", TestUnsupportedBlockVersion);
+  Run("BadBlockMagic", TestBadBlockMagic);
+  Run("WrongSampleCountBytesEncoding", TestWrongSampleCountBytesEncoding);
+  Run("BadDescriptorLabelLength", TestBadDescriptorLabelLength);
+  Run("ReadErrorDistinctFromShortRead", TestReadErrorDistinctFromShortRead);
+  Run("RecordBytesTooLarge", TestRecordBytesTooLarge);
+  Run("PreambleMarkerExactlyOnceAtEnd", TestPreambleMarkerExactlyOnceAtEnd);
 
   if (g_test.failures != 0U) {
     std::cerr << g_test.failures << " failure(s)" << std::endl;
