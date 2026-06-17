@@ -3,8 +3,8 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Current near-term sequencing for MeshTemps storage/history tasks.
-Status: PR #58 B1/B2 checkpoint is complete through B2-T-V; current next action after PR #58 user-side PR cleanup and merge is 10C-FMT1-C scanner/policy mapping.
-Last updated: 2026-06-15
+Status: PR #59 Task 10C-FMT1-C scanner stack has passed local integrated C-V validation with caveats; current next action is 10C-FMT1-D anchor/PR-readiness cleanup before the user ready-for-review decision.
+Last updated: 2026-06-17
 
 ## Authority
 
@@ -24,16 +24,18 @@ It no longer supersedes the updated roadmap, requirements, or decision log. If t
 Current next action:
 
 ```text
-Task 10C-FMT1-C — scanner/policy mapping for finalized-hour v2 day files
+Task 10C-FMT1-D — scanner-stack anchor and PR-readiness cleanup after C-V
 ```
 
-PR #57 has merged into `feature/ram-backed-sd-hist` and completed the pure finalized-hour v2 format/schema/preamble skeleton, the R1 anchor correction, the R2 no-padding/no-stager-dependency code correction, and the 10C-FMT1-A-V targeted checkpoint validation. The v2 format skeleton passed targeted validation.
+PR #57 has merged into `feature/ram-backed-sd-hist` and completed the pure finalized-hour v2 format/schema/preamble skeleton. PR #58 has merged into `feature/ram-backed-sd-hist` and completed the finalized-hour v2 writer plus `SdHistoryStore` append/day-file behavior without enabling normal runtime SD finalization.
 
-PR #58 is the current draft PR stack. B1-R1, B1-R2, and B1-V accepted the pure finalized-hour v2 writer core, including caller-owned workspace, deterministic label snapshots, CRC/write consistency, and host tests. B2 integrated that pure writer into `SdHistoryStore` append/day-file behavior without enabling normal runtime SD finalization. B2-V required B2-T direct append coverage; B2-T added focused SdHistoryStore fake-FS append tests; B2-T-V accepted those tests. After this finalization receipt is reviewed, PR #58 is ready for user-side PR title/body cleanup and the user's ready-for-review/merge decision.
+PR #59 is the current draft scanner-stack PR. Task 10C-FMT1-C is accepted through local integrated C-V validation for the read-only scanner/policy-mapping stack: pure finalized-hour v2 byte-reader scanner, expanded corruption/failure coverage, neutral `history_storage_limits.h` product/domain limit owner, deterministic preamble marker placement, read-only `SdHistoryStore::ScanFinalizedHourFile` File/FS seam, scanner/store host tests, and preserved store append regression.
 
-When PR #58 has merged, start Task 10C-FMT1-C in a fresh PR/branch from updated `feature/ram-backed-sd-hist`. Task 10C-FMT1-C must be read-only scanner/policy mapping for finalized-hour v2 day files. Do not enable normal runtime SD finalization. Do not start recovery/append guard, repair/truncate/quarantine, or runtime aggregation yet. `10C-F2-B/C` repair/quarantine/append-guard work remains blocked until after v2 scanner/integrated validation authorizes it, and `10D` runtime aggregation remains blocked.
+C-V caveats: the local Codex validation SHA did not match the GitHub PR #59 head reported by ChatGPT inspection, Arduino firmware build was not run, full CI was not run, hardware SD/FAT behavior was not tested, and power-loss behavior was not tested. PR #59 must remain draft until user-side PR title/body cleanup and the user's ready-for-review decision.
 
-The durable-history constraints remain intact: finalized-hour v2 is sensor-major, ROM64-indexed, has no durable `slot_id`, stores no `addr16` by default, treats node ID as provenance only, uses bounded labels as context, writes the generated v2 preamble plus binary-start marker before binary records, has no fake padding/reserved fields, preserves the corrected v2 sizes/offsets/CRC rules, and keeps runtime finalization blocked until v2 scanner/recovery/append-guard validation.
+Task 10C-FMT1-D is documentation/anchor cleanup only. Do not change scanner/store/source behavior. Do not enable normal runtime SD finalization. Do not start recovery/append guard, repair/truncate/quarantine, or runtime aggregation yet. `10C-F2-B/C` repair/quarantine/append-guard work remains blocked until after broader v2 integrated validation authorizes it, and `10D` runtime aggregation remains blocked.
+
+The durable-history constraints remain intact: finalized-hour v2 is sensor-major, ROM64-indexed, has no durable `slot_id`, stores no `addr16` by default, treats node ID as provenance only, uses bounded labels as context, writes the generated v2 preamble plus binary-start marker before binary records, has no fake padding/reserved fields, preserves the corrected v2 sizes/offsets/CRC rules, keeps production scanner/write paths bounded and heap-free, and keeps runtime finalization blocked until v2 recovery/append-guard validation.
 
 ## Required v2 sequence
 
@@ -46,15 +48,14 @@ Current intended sequence:
   -> 10C-FMT1-A-V checkpoint validation
   -> 10C-FMT1-B writer integration
   -> 10C-FMT1-B-V checkpoint validation
-  -> 10C-FMT1-C scanner/policy mapping
-  -> 10C-FMT1-C-V checkpoint validation
-  -> 10C-FMT1-D tests/docs cleanup
-  -> 10C-FMTV integrated v2 validation
+  -> 10C-FMT1-C scanner/policy mapping (accepted through local C-V on PR #59)
+  -> 10C-FMT1-D anchor/PR-readiness cleanup (current)
+  -> 10C-FMTV broader integrated v2 validation after PR #59 cleanup/merge
   -> 10C-F2-B/C v2 recovery/append guard
   -> 10D runtime aggregator
 ```
 
-10C-F2-B/C repair/quarantine/append-guard work and 10D runtime aggregation are blocked until after 10C-FMTV validates the v2 format/writer/scanner/preamble path. Do not continue mutating recovery work against the deprecated v1 slot/minute-major layout unless the user explicitly reverses the v2 direction.
+10C-F2-B/C repair/quarantine/append-guard work and 10D runtime aggregation are blocked until after broader 10C-FMTV validates the v2 format/writer/scanner/preamble path after PR #59 cleanup/merge. Do not continue mutating recovery work against the deprecated v1 slot/minute-major layout unless the user explicitly reverses the v2 direction.
 
 ## Durable-history rules to preserve
 

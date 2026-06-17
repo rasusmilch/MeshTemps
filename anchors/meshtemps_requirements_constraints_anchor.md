@@ -80,6 +80,8 @@ Promotion rule: promote a local constant/function/class to shared ownership only
 
 Demotion/removal rule: a shared file or helper is suspicious and should be reviewed if it has only one real consumer, mixes unrelated constants/functions, depends on a higher-level module, exists only to reduce include typing, contains transitional/legacy concepts, or nobody can explain who owns it.
 
+Neutral history-storage limit exception: `history_storage_limits.h` is the narrow product/domain owner for stable per-hour history capacity constants shared by stager, writer/scanner seams, and tests. It must stay small, typed, dependency-light, and must not own v2 on-disk format constants or become a generic constants bucket.
+
 Finalized-hour v2 on-disk format constraints:
 - No `reserved0`, fake padding, generic reserved bytes, or alignment filler merely to preserve mistaken byte counts.
 - SensorBlockHeaderV2 is 32 bytes, SensorDescriptorV2 is 106 bytes, SensorPayloadV2 is 136 bytes, fixed SensorBlockV2 is 274 bytes, block CRC offset is 24, and descriptor_flags offset is 22.
@@ -95,7 +97,7 @@ Nontrivial work must follow:
 Plan -> Review -> Execute -> Validate
 ```
 
-The current next required task is read-only planning/spec work: `10C-FMT0` finalized-hour v2 format planning. Do not continue mutating repair/quarantine, runtime append guard, or Task 10D runtime aggregation before the v2 format gate is reviewed and approved.
+The current next required task is PR #59 scanner-stack anchor/PR-readiness cleanup after local 10C-FMT1-C-V acceptance. Do not continue mutating repair/quarantine, runtime append guard, or Task 10D runtime aggregation before PR #59 cleanup/merge and broader v2 integrated validation are reviewed and approved.
 
 Execution tasks must be narrow and ordered. Format, scanner, repair, runtime aggregation, reader/query, chart migration, diagnostics, pruning, and optional FRAM work must not be collapsed into one unreviewable task.
 

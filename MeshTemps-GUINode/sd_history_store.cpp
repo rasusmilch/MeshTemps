@@ -1,6 +1,7 @@
 #include "sd_history_store.h"
 
 #include "sd_finalized_hour_v2_format.h"
+#include "sd_finalized_hour_v2_scanner.h"
 #include "sd_finalized_hour_v2_writer.h"
 #include "sd_finalized_hour_write_coalescer.h"
 
@@ -25,6 +26,30 @@ alignas(4) static uint8_t g_finalized_verify_buffer[kFinalizedVerifyBufferBytes]
 alignas(4) static char g_finalized_hour_v2_preamble_buffer
     [kSdFinalizedHourV2PreambleMaxBytes];
 static SdFinalizedHourV2WriterWorkspace g_finalized_hour_v2_writer_workspace;
+
+
+class FinalizedHourFileByteReader final : public ISdFinalizedHourV2ByteReader {
+ public:
+  explicit FinalizedHourFileByteReader(File* file) : file_(file) {}
+
+  bool Read(uint64_t offset,
+            uint8_t* out,
+            size_t len,
+            size_t* bytes_read) override {
+    if (bytes_read != nullptr) *bytes_read = 0;
+    if (file_ == nullptr || !(*file_)) return false;
+    if (len == 0U) return true;
+    if (out == nullptr || offset > UINT32_MAX) return false;
+    if (!file_->seek(static_cast<uint32_t>(offset))) return false;
+    const int got = file_->read(out, len);
+    if (got < 0) return false;
+    if (bytes_read != nullptr) *bytes_read = static_cast<size_t>(got);
+    return true;
+  }
+
+ private:
+  File* file_ = nullptr;
+};
 
 struct FinalizedHourFileWriteContext {
   File* file = nullptr;
@@ -194,6 +219,29 @@ bool SdHistoryStore::AppendFinalizedHourSnapshot(
   file.flush();
   file.close();
   return VerifyFinalizedHourRecord_(path, record_offset);
+}
+
+
+bool SdHistoryStore::ScanFinalizedHourFile(
+    uint32_t hour_start_epoch_minute,
+    SdFinalizedHourV2ScannerWorkspace& workspace,
+    SdFinalizedHourV2ScanResult* out_result) const {
+  if (out_result == nullptr) return false;
+  *out_result = SdFinalizedHourV2ScanResult{};
+  if (fs_ == nullptr) return false;
+
+  char path[kSdHistoryPathMax];
+  if (!BuildFinalizedHourFilePath_(hour_start_epoch_minute, path, sizeof(path))) {
+    return false;
+  }
+
+  File file = fs_->open(path, FILE_READ);
+  if (!file) return false;
+
+  FinalizedHourFileByteReader reader(&file);
+  *out_result = ScanSdFinalizedHourV2DayFile(reader, workspace);
+  file.close();
+  return true;
 }
 
 bool SdHistoryStore::EnsureDirExists_(const char* path) {

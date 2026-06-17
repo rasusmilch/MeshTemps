@@ -1,9 +1,9 @@
 # MeshTemps Roadmap Anchor
 
-Project: MeshTemps  
-Workstream: GUI-node history storage, SD archive, recovery, and chart hardening  
-Anchor purpose: Keep future ChatGPT/Codex tasks sequenced, scoped, and aligned with current product intent.  
-Status: Committed repository roadmap after PR #55 merge and finalized-hour v2 intent clarification.  
+Project: MeshTemps
+Workstream: GUI-node history storage, SD archive, recovery, and chart hardening
+Anchor purpose: Keep future ChatGPT/Codex tasks sequenced, scoped, and aligned with current product intent.
+Status: Committed repository roadmap after PR #55 merge and finalized-hour v2 intent clarification.
 Last updated: 2026-06-11
 
 ## 1. Current project/workstream objective
@@ -61,9 +61,9 @@ Important caveat: the merged writer/scanner/policy work was built around the exi
 
 ### Task 10C-FMT0 — Plan finalized-hour v2 sensor-major ROM64 archive format
 
-Type: read-only planning/spec task.  
-Risk: high.  
-PR/branch: may be a doc-only/anchor update; if Codex opens a PR, use a focused draft PR branch and do not mix implementation.  
+Type: read-only planning/spec task.
+Risk: high.
+PR/branch: may be a doc-only/anchor update; if Codex opens a PR, use a focused draft PR branch and do not mix implementation.
 Checkpoint: required before any mutating recovery or runtime integration work.
 
 Scope:
@@ -96,9 +96,10 @@ Acceptance:
 
 ### Task 10C-FMT1 — Implement finalized-hour v2 writer/scanner/tests
 
-Type: focused execute after 10C-FMT0 approval.  
-Risk: high.  
-PR/branch: same draft PR branch as 10C-FMTV validation. Keep draft until validation passes.  
+Type: focused execute after 10C-FMT0 approval.
+Risk: high.
+Status: writer/store append work merged in PR #58; scanner-stack work in PR #59 is accepted through local integrated C-V validation with source-identity, firmware-build, full-CI, hardware-SD/FAT, and power-loss caveats.
+PR/branch: PR #59 remains draft until user-side title/body cleanup and ready-for-review decision.
 Checkpoint: required before resuming 10C-F2-B/C recovery work.
 
 Scope:
@@ -112,8 +113,11 @@ Scope:
 - Add block magic/sentinel and explicit `block_bytes`.
 - Add header, payload, and block CRC validation as specified.
 - Update scanner to validate v2 records and day-file binary-start offset.
-- Update tests for clean records, corrupt records, duplicate ROMs, bad offsets, bad lengths, label bounds, preamble schema drift, CRC failures, and dangerous sizes.
-- Preserve bounded/static-buffer SD append/verify constraints.
+- Add a read-only File/FS scanner seam in `SdHistoryStore` without recovery or append guard.
+- Update tests for clean records, corrupt records, duplicate ROMs, bad offsets, bad lengths, label bounds, preamble schema drift, CRC failures, dangerous sizes, and read-only File/FS scan behavior.
+- Preserve bounded/static-buffer SD append/verify/scanner constraints.
+
+Accepted local PR #59 scanner-stack contents: pure finalized-hour v2 byte-reader scanner, expanded scanner corruption/failure coverage, neutral `history_storage_limits.h` product/domain limit owner, deterministic preamble marker placement, read-only `SdHistoryStore::ScanFinalizedHourFile` seam, scanner/store host tests, and preserved store append regression.
 
 Explicit exclusions:
 
@@ -125,9 +129,9 @@ Explicit exclusions:
 
 ### Task 10C-FMTV — Targeted validation of finalized-hour v2 format
 
-Type: validation task for the 10C-FMT1 draft PR.  
-Risk: high.  
-PR/branch: same draft PR branch as 10C-FMT1.  
+Type: broader validation task after PR #59 cleanup/merge.
+Risk: high.
+PR/branch: follow the post-PR #59 validation branch/PR chosen by the user.
 Checkpoint: must pass before 10C-F2-B/C.
 
 Validate:
@@ -139,16 +143,17 @@ Validate:
 - Preamble includes field names/types/byte lengths and parser guidance.
 - Binary parsing uses lengths/counts/offsets/CRCs, not sentinel scanning.
 - Writer remains bounded/heap-free in production paths.
-- Scanner blocks unsafe append after corrupt tail.
+- Scanner preserves valid-prefix/first-unsafe knowledge after corrupt tail without mutating files.
+- Read-only File/FS scanner seam does not create, append, repair, truncate, quarantine, remove, rename, or mutate files.
 - Host tests run normally and with assertions/checks not disabled where relevant.
 
 ## 4. Stabilization tasks
 
 ### Task 10C-F2-B — Implement approved repair/quarantine/fault behavior for v2
 
-Type: focused execute after 10C-FMTV.  
-Risk: high.  
-Requires read-only planning first if 10C-FMT0 does not already settle truncate/copy/replace/fault policy.  
+Type: focused execute after 10C-FMTV.
+Risk: high.
+Requires read-only planning first if 10C-FMT0 does not already settle truncate/copy/replace/fault policy.
 PR/branch: may share one draft PR branch with 10C-F2-C if kept draft and gated; otherwise split if large.
 
 Scope:
@@ -170,8 +175,8 @@ Exclusions:
 
 ### Task 10C-F2-C — Runtime append guard / recovery integration
 
-Type: focused execute after 10C-F2-B validation or same draft PR branch gated after B is correct.  
-Risk: high.  
+Type: focused execute after 10C-F2-B validation or same draft PR branch gated after B is correct.
+Risk: high.
 Checkpoint: required before 10D.
 
 Scope:
@@ -184,8 +189,8 @@ Scope:
 
 ### Task 10C-F2V — Recovery validation for v2
 
-Type: targeted validation.  
-Risk: high.  
+Type: targeted validation.
+Risk: high.
 Required before normal runtime SD finalization.
 
 Validate:
@@ -201,9 +206,9 @@ Validate:
 
 ### Task 10D — Add runtime HistoryAggregator snapshot path
 
-Type: focused execute after 10C-F2V.  
-Risk: high.  
-PR/branch: separate draft PR branch from format/recovery unless user explicitly approves combining.  
+Type: focused execute after 10C-F2V.
+Risk: high.
+PR/branch: separate draft PR branch from format/recovery unless user explicitly approves combining.
 Checkpoint: required before chart/query migration.
 
 Scope:
@@ -218,7 +223,7 @@ Scope:
 
 ### Task 10D-V — Runtime aggregation validation
 
-Type: targeted validation.  
+Type: targeted validation.
 Risk: high.
 
 Validate:
@@ -233,7 +238,7 @@ Validate:
 
 ### Task 10E — Pilot/hardware validation of SD finalization and recovery
 
-Type: pilot/validation task.  
+Type: pilot/validation task.
 Risk: high.
 
 Scope:
@@ -247,7 +252,7 @@ Scope:
 
 ### Task 10F — SD reader/query/reduction service
 
-Type: focused execute after 10D/D-V and enough v2 records exist for tests.  
+Type: focused execute after 10D/D-V and enough v2 records exist for tests.
 Risk: high.
 
 Scope:
@@ -259,7 +264,7 @@ Scope:
 
 ### Task 10G — Chart migration to SD-backed query path
 
-Type: focused execute after 10F validation.  
+Type: focused execute after 10F validation.
 Risk: high.
 
 Scope:
@@ -271,7 +276,7 @@ Scope:
 
 ### Task 10H — Operator diagnostics and maintenance UI
 
-Type: focused execute after recovery/runtime basics.  
+Type: focused execute after recovery/runtime basics.
 Risk: medium/high.
 
 Scope:
@@ -282,7 +287,7 @@ Scope:
 
 ### Task 10I — Retention/pruning policy
 
-Type: read-only planning before execute.  
+Type: read-only planning before execute.
 Risk: medium/high.
 
 Scope:
@@ -293,7 +298,7 @@ Scope:
 
 ### Task 10J — Optional FRAM backend
 
-Type: read-only hardware/design planning first.  
+Type: read-only hardware/design planning first.
 Risk: high.
 
 Scope:
@@ -360,7 +365,7 @@ Do not skip 10C-FMT0. Do not build mutating recovery on v1 unless the user expli
 Recommended branch/PR grouping:
 
 - 10C-FMT0: no implementation PR required unless anchor/spec files are changed; if changed, use a small doc/spec PR or direct anchor commit as explicitly requested.
-- 10C-FMT1 + 10C-FMTV: one draft PR branch; keep draft until validation passes.
+- 10C-FMT1/PR #59: keep draft until PR title/body cleanup and ready-for-review decision; run broader 10C-FMTV after PR #59 cleanup/merge before recovery/append guard.
 - 10C-F2-B + 10C-F2-C + 10C-F2V: one draft PR branch is acceptable if kept gated and not marked ready until validation passes; split if repair policy grows large.
 - 10D + 10D-V: separate draft PR branch.
 - 10F reader/query: separate draft PR branch.
@@ -397,7 +402,7 @@ Focused execute tasks after their prerequisites:
 High-risk checkpoint validations are required for:
 
 - 10C-FMT0 review approval plus 10C-FMT0-A on-disk format decision-table approval before implementation.
-- 10C-FMT1-A-V / 10C-FMT1-B-V / 10C-FMT1-C-V checkpoint validations as the v2 format work is split.
+- 10C-FMT1-A-V / 10C-FMT1-B-V / 10C-FMT1-C-V checkpoint validations as the v2 format work is split; PR #59 scanner stack is accepted through local C-V with caveats.
 - 10C-FMTV v2 writer/scanner/preamble validation.
 - 10C-F2V recovery validation.
 - 10D-V runtime aggregation validation.
@@ -409,24 +414,22 @@ High-risk checkpoint validations are required for:
 
 ## 14. Completed tasks still needing integrated validation
 
-Completed/merged work still needs integrated validation after the v2 format change:
+Completed/merged work still needs broader integrated validation after PR #59 cleanup/merge:
 
-- Static 4096-byte finalized-hour write coalescer and 512-byte verify buffer still need confirmation after v2 writer changes.
-- Bounded finalized-hour path builder still needs confirmation after preamble/day-file creation changes.
-- PR #54 scanner architecture must be revalidated against v2 record structure and day-file binary-start marker.
-- PR #55 policy classifier must be revalidated against v2 scanner statuses and failure reasons.
+- Finalized-hour v2 format, writer, scanner, preamble, path builder, coalescer, and read-only File/FS scan seam should be validated together in 10C-FMTV before recovery/append guard.
+- PR #54/#55 v1 scanner/recovery-policy architecture remains useful background only; v1 field names, active slot count, descriptor bytes, frame bytes, and fixed 64-slot frame assumptions must not be cited as final v2 confidence.
 - Existing host tests that rely on v1 field names, active slot count, descriptor bytes, frame bytes, or fixed 64-slot frames must be updated before being cited as final confidence.
-- Anchor set remains partially stale outside this roadmap and the project intent anchor; follow-up anchor cleanup is required.
+- Anchor set should be kept aligned by the current 10C-FMT1-D cleanup and any later PR-readiness notes.
 
 ## 15. Current next required action
 
 Current next required action:
 
 ```text
-Task 10C-FMT0-A — update v2 on-disk format decision table and anchor sequencing before implementation
+Task 10C-FMT1-D — scanner-stack anchor and PR-readiness cleanup after C-V
 ```
 
-After 10C-FMT0-A, the first implementation task is 10C-FMT1-A pure v2 format/schema/preamble skeleton, but only after the v2 on-disk format decision table is reviewed and the choices needed for 10C-FMT1-A are approved.
+After 10C-FMT1-D, PR #59 still needs user-side PR title/body cleanup and the user's ready-for-review decision. After PR #59 cleanup/merge, run broader 10C-FMTV validation of the v2 format/writer/scanner/preamble/store-scan path before recovery/append guard or runtime aggregation.
 
 10C-FMTV must validate the v2 format/writer/scanner/preamble path before 10C-F2-B repair/quarantine/fault implementation, 10C-F2-C runtime append guard, or 10D runtime aggregator.
 

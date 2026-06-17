@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "history_hour_stager.h"
+#include "sd_finalized_hour_v2_scanner.h"
 #include "sd_history_path_builder.h"
 
 class SdHistoryStore {
@@ -20,6 +21,13 @@ class SdHistoryStore {
   // magic/version/header CRC/payload CRC. Snapshot counters are diagnostics
   // only and are not used as sample/payload counts.
   bool AppendFinalizedHourSnapshot(const HistoryHourSnapshot& snapshot);
+
+  // Read-only finalized-hour v2 scan by hour. Returns false only when the
+  // store/path/file cannot be opened for scanning or out_result is null;
+  // scanner clean/corrupt classifications are reported through out_result.
+  bool ScanFinalizedHourFile(uint32_t hour_start_epoch_minute,
+                             SdFinalizedHourV2ScannerWorkspace& workspace,
+                             SdFinalizedHourV2ScanResult* out_result) const;
 
  private:
   bool EnsureDirExists_(const char* path);

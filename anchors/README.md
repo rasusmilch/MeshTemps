@@ -32,7 +32,7 @@ Before generating or reviewing MeshTemps storage/history tasks, read these ancho
    - Testing policy for future tests and existing/past tests that future work touches, relies on, or cites as validation evidence.
 
 8. `anchors/meshtemps_sd_durability_recovery_anchor.md`
-   - Power-loss durability risk, FAT32 append/recovery contract, scanner/repair/quarantine plan, and required recovery tests. Some field-level v1 examples are stale until the v2 scanner lands; the longest-valid-prefix recovery principle remains current.
+   - Power-loss durability risk, FAT32 append/recovery contract, scanner/repair/quarantine plan, and required recovery tests. Some field-level v1 examples are stale after the v2 scanner stack; the longest-valid-prefix recovery principle remains current, but recovery/append guard remain blocked until broader v2 validation authorizes them.
 
 ## Current planned storage sequence
 
@@ -45,10 +45,9 @@ Current intended sequence after the v2 format clarification:
   -> 10C-FMT1-A-V checkpoint validation
   -> 10C-FMT1-B writer integration
   -> 10C-FMT1-B-V checkpoint validation
-  -> 10C-FMT1-C scanner/policy mapping
-  -> 10C-FMT1-C-V checkpoint validation
-  -> 10C-FMT1-D tests/docs cleanup
-  -> 10C-FMTV integrated v2 validation
+  -> 10C-FMT1-C scanner/policy mapping (accepted through local C-V on PR #59)
+  -> 10C-FMT1-D anchor/PR-readiness cleanup
+  -> 10C-FMTV broader integrated v2 validation after PR #59 cleanup/merge
   -> 10C-F2-B/C v2 recovery/append guard
   -> 10D runtime aggregator
 ```
