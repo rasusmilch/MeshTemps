@@ -8,7 +8,7 @@ Last updated: 2026-06-09
 
 ## v2 format caveat
 
-This recovery anchor was originally written around the current v1 finalized-hour header/descriptor/frame field names. Those field-level examples are stale for the final v2 sensor-major day-file format until the v2 scanner lands. The recovery principle remains current: valid history is the longest structurally and CRC-valid prefix, and append must stay blocked after a corrupt tail until approved recovery/fault policy makes the file safe. Task 10C-FMT1-C must update field-level scanner checks for the v2 preamble, binary-start marker, HourRecordV2 header, ROM64+offset index, sensor blocks, and block/payload/header CRCs before 10C-F2-B/C proceeds.
+This recovery anchor was originally written around the current v1 finalized-hour header/descriptor/frame field names. Those v1 field-level examples are stale for the final v2 sensor-major day-file format. PR #59 / Task 10C-FMT1-C has landed the local read-only v2 scanner-stack validation basis: preamble and binary-start marker parsing, HourRecordV2 header checks, ROM64+offset index checks, sensor block checks, block/payload/header CRC checks, valid-prefix accounting, and a read-only `SdHistoryStore::ScanFinalizedHourFile` seam. The recovery principle remains current: valid history is the longest structurally and CRC-valid prefix, and append must stay blocked after a corrupt tail until approved recovery/fault policy makes the file safe. 10C-F2-B/C must still not proceed until PR #59 cleanup/merge and broader v2 integrated validation authorize recovery/append-guard work.
 
 ## 1. Why this anchor exists
 
