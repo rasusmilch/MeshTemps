@@ -98,8 +98,8 @@ Acceptance:
 
 Type: focused execute after 10C-FMT0 approval.
 Risk: high.
-Status: writer/store append work merged in PR #58; scanner-stack work in PR #59 is accepted through local integrated C-V validation with source-identity, firmware-build, full-CI, hardware-SD/FAT, and power-loss caveats.
-PR/branch: PR #59 remains draft until user-side title/body cleanup and ready-for-review decision.
+Status: writer/store append work merged in PR #58; scanner-stack work merged in PR #59 with firmware-build, full-CI, hardware-SD/FAT, and power-loss caveats carried into 10C-FMTV.
+PR/branch: PR #59 merged; post-merge validation runs on the current branch snapshot.
 Checkpoint: required before resuming 10C-F2-B/C recovery work.
 
 Scope:
@@ -129,7 +129,8 @@ Explicit exclusions:
 
 ### Task 10C-FMTV — Targeted validation of finalized-hour v2 format
 
-Type: broader validation task after PR #59 cleanup/merge.
+Type: broader validation task after PR #59 merge.
+Status: current gate before 10C-F2-B/C.
 Risk: high.
 PR/branch: follow the post-PR #59 validation branch/PR chosen by the user.
 Checkpoint: must pass before 10C-F2-B/C.
@@ -464,6 +465,6 @@ Inspected current source/context for this roadmap update:
   - Decision log and validation ledger anchors were not found during the prior project-intent anchor search.
 
 
-### PR #57 R2 gate before 10C-FMT1-A-V
+### Completed PR #57 R2 gate before 10C-FMT1-A-V
 
-Before 10C-FMT1-A-V checkpoint validation, PR #57 needs a focused R2 code revision to remove `reserved0`/fake padding from finalized-hour v2, correct SensorBlockHeaderV2 to 32 bytes, SensorDescriptorV2 to 106 bytes, fixed SensorBlockV2 to 274 bytes, block CRC offset to 24, descriptor_flags offset to 22, remove the `history_hour_stager.h` dependency from the v2 format module, and use a v2-owned invalid-sample sentinel without creating a shared header solely for that value.
+The PR #57 R2 code revision gate completed before 10C-FMT1-A-V. The finalized-hour v2 format removed `reserved0`/fake padding, corrected SensorBlockHeaderV2 to 32 bytes, SensorDescriptorV2 to 106 bytes, fixed SensorBlockV2 to 274 bytes, block CRC offset to 24, descriptor_flags offset to 22, removed the `history_hour_stager.h` dependency from the v2 format module, and uses a v2-owned invalid-sample sentinel without creating a shared header solely for that value.

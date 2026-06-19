@@ -394,7 +394,7 @@ This table is a compact approval checklist, not a complete byte-level specificat
 | Neutral history-storage limits owner | settled | `history_storage_limits.h` owns narrow product/domain per-hour history capacity constants shared by stager/scanner/tests, while v2 on-disk constants remain in the v2 format module. | Removes duplicated scanner/stager max-sensor literals without turning v2 ABI constants into generic product constants. | PR #59 / 10C-FMT1-C. |
 | Read-only finalized-hour v2 File/FS scanner seam | settled | `SdHistoryStore::ScanFinalizedHourFile` opens finalized-hour files read-only, uses the v2 byte-reader scanner, reports scanner classification, and does not repair, truncate, quarantine, append-guard, or mutate. | Allows later diagnostics/validation to inspect actual day files without authorizing recovery or runtime finalization. | PR #59 / 10C-FMT1-C. |
 
-Implementation checkpoint update: the earlier PR #57 R2/10C-FMT1-A-V correction gate has completed. PR #58 completed finalized-hour v2 writer/store append work, and PR #59 scanner-stack cleanup/validation is the current draft workflow before broader v2 integrated validation.
+Implementation checkpoint update: the earlier PR #57 R2/10C-FMT1-A-V correction gate has completed. PR #58 completed finalized-hour v2 writer/store append work, and PR #59 completed scanner-stack cleanup/validation. Broader post-merge 10C-FMTV integrated validation is the current gate before 10C-F2-B/C recovery/append-guard planning.
 
 
 ## Decision 18 — Task 10C-FMT1-A pure v2 format skeleton is authoritative for future finalized-hour format work

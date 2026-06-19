@@ -3,8 +3,8 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Purpose: Quick entry point for future ChatGPT/Codex planning, execution, validation, and review tasks.
-Status: Committed repository anchor index refreshed after PR #57 review; current next work is a focused PR #57 code revision before 10C-FMT1-A-V checkpoint validation.
-Last updated: 2026-06-13
+Status: Post-PR #59 merge anchor index; current next work is Task 10C-FMTV integrated finalized-hour v2 validation before 10C-F2-B/C recovery/append-guard planning.
+Last updated: 2026-06-19
 
 ## Required anchor reading order
 
@@ -45,16 +45,16 @@ Current intended sequence after the v2 format clarification:
   -> 10C-FMT1-A-V checkpoint validation
   -> 10C-FMT1-B writer integration
   -> 10C-FMT1-B-V checkpoint validation
-  -> 10C-FMT1-C scanner/policy mapping (accepted through local C-V on PR #59)
-  -> 10C-FMT1-D anchor/PR-readiness cleanup
-  -> 10C-FMTV broader integrated v2 validation after PR #59 cleanup/merge
+  -> 10C-FMT1-C scanner/policy mapping (merged in PR #59)
+  -> 10C-FMT1-D anchor/PR-readiness cleanup (merged in PR #59)
+  -> 10C-FMTV broader integrated v2 validation after PR #59 merge (current)
   -> 10C-F2-B/C v2 recovery/append guard
   -> 10D runtime aggregator
 ```
 
 The old PR #54/#55 v1-recovery sequence is no longer the immediate next workflow. PR #54 scanner and PR #55 recovery-policy work remain useful infrastructure only; their v1 on-disk assumptions are not compatibility requirements and must be removed/replaced as v2 scanner/recovery work lands before 10C-F2-B/C or 10D proceeds.
 
-The compact v2 on-disk format decision table in `anchors/meshtemps_decision_log_anchor.md` is approved for 10C-FMT1-A, but PR #57 needs a focused R2 code revision before checkpoint validation: remove `reserved0`/fake padding, correct v2 sizes and CRC offsets, remove the v2 format dependency on `history_hour_stager.h`, and give the v2 format module ownership of its on-disk invalid-sample sentinel. Do not run 10C-FMT1-A-V until that revision lands.
+The compact v2 on-disk format decision table in `anchors/meshtemps_decision_log_anchor.md` is approved and PR #57/PR #58/PR #59 have landed the v2 format skeleton, writer/store append path, scanner stack, and read-only store scan seam. Do not start 10C-F2-B/C recovery/append-guard planning until Task 10C-FMTV validates the integrated post-PR #59 branch.
 
 If any older anchor text still says Task 10D may follow directly after Task 10C-E3V, or routes immediately to 10C-F2-B/C v1 repair/quarantine work, treat that text as stale and reconcile it with this index, the current-next-action anchor, the roadmap, the requirements anchor, and the decision log before executing work.
 
