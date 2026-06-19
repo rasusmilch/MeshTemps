@@ -97,7 +97,7 @@ Nontrivial work must follow:
 Plan -> Review -> Execute -> Validate
 ```
 
-The current next required task is PR #59 scanner-stack anchor/PR-readiness cleanup after local 10C-FMT1-C-V acceptance. Do not continue mutating repair/quarantine, runtime append guard, or Task 10D runtime aggregation before PR #59 cleanup/merge and broader v2 integrated validation are reviewed and approved.
+The current next required task is Task 10C-FMTV integrated finalized-hour v2 validation after PR #59 merge. Do not continue mutating repair/quarantine, runtime append guard, or Task 10D runtime aggregation before broader v2 integrated validation is reviewed and approved.
 
 Execution tasks must be narrow and ordered. Format, scanner, repair, runtime aggregation, reader/query, chart migration, diagnostics, pruning, and optional FRAM work must not be collapsed into one unreviewable task.
 

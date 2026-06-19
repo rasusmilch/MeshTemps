@@ -3,12 +3,12 @@
 Project: MeshTemps
 Workstream: GUI-node history storage and chart hardening
 Anchor purpose: Durable SD finalized-hour recovery guidance for future ChatGPT/Codex planning, execution, validation, and review tasks.
-Status: Committed repository anchor after PR #54 scanner merge; current recovery work is split across 10C-F2 subtasks.
-Last updated: 2026-06-09
+Status: Post-PR #59 recovery guidance; recovery/append guard remains blocked until 10C-FMTV authorizes 10C-F2-B/C planning.
+Last updated: 2026-06-19
 
 ## v2 format caveat
 
-This recovery anchor was originally written around the current v1 finalized-hour header/descriptor/frame field names. Those v1 field-level examples are stale for the final v2 sensor-major day-file format. PR #59 / Task 10C-FMT1-C has landed the local read-only v2 scanner-stack validation basis: preamble and binary-start marker parsing, HourRecordV2 header checks, ROM64+offset index checks, sensor block checks, block/payload/header CRC checks, valid-prefix accounting, and a read-only `SdHistoryStore::ScanFinalizedHourFile` seam. The recovery principle remains current: valid history is the longest structurally and CRC-valid prefix, and append must stay blocked after a corrupt tail until approved recovery/fault policy makes the file safe. 10C-F2-B/C must still not proceed until PR #59 cleanup/merge and broader v2 integrated validation authorize recovery/append-guard work.
+This recovery anchor was originally written around the current v1 finalized-hour header/descriptor/frame field names. Those v1 field-level examples are stale for the final v2 sensor-major day-file format. PR #59 / Task 10C-FMT1-C has landed the local read-only v2 scanner-stack validation basis: preamble and binary-start marker parsing, HourRecordV2 header checks, ROM64+offset index checks, sensor block checks, block/payload/header CRC checks, valid-prefix accounting, and a read-only `SdHistoryStore::ScanFinalizedHourFile` seam. The recovery principle remains current: valid history is the longest structurally and CRC-valid prefix, and append must stay blocked after a corrupt tail until approved recovery/fault policy makes the file safe. 10C-F2-B/C must still not proceed until broader post-PR #59 v2 integrated validation authorizes recovery/append-guard work.
 
 ## 1. Why this anchor exists
 
